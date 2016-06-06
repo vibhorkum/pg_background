@@ -1,0 +1,4 @@
+comment = 'Run SQL queries in the background'
+default_version = '1.0'
+module_pathname = '$libdir/pg_background'
+relocatable = true
