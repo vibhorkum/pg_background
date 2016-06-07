@@ -52,7 +52,7 @@ SELECT pg_background_launch('vacuum verbose public.sales');
 (1 row)
 
 
-SELECT * FROM pg_background_result(11088) as (x text);
+SELECT * FROM pg_background_result(11088) as (result text);
 INFO:  vacuuming "public.sales"
 INFO:  index "sales_pkey" now contains 0 row versions in 1 pages
 DETAIL:  0 index row versions were removed.
@@ -75,9 +75,40 @@ There were 0 unused item pointers.
 Skipped 0 pages due to buffer pins.
 0 pages are entirely empty.
 CPU 0.00s/0.00u sec elapsed 0.00 sec.
-   x    
+ result    
 --------
  VACUUM
 (1 row)
 
+```
+
+If user wants to execute the command wait for result, then they can use following example:
+```sql
+SELECT * FROM pg_background_result(pg_background_launch('vacuum verbose public.sales')) as (result TEXT);
+INFO:  vacuuming "public.sales"
+INFO:  index "sales_pkey" now contains 0 row versions in 1 pages
+DETAIL:  0 index row versions were removed.
+0 index pages have been deleted, 0 are currently reusable.
+CPU 0.00s/0.00u sec elapsed 0.00 sec.
+INFO:  "sales": found 0 removable, 0 nonremovable row versions in 0 out of 0 pages
+DETAIL:  0 dead row versions cannot be removed yet.
+There were 0 unused item pointers.
+Skipped 0 pages due to buffer pins.
+0 pages are entirely empty.
+CPU 0.00s/0.00u sec elapsed 0.00 sec.
+INFO:  vacuuming "pg_toast.pg_toast_1866942"
+INFO:  index "pg_toast_1866942_index" now contains 0 row versions in 1 pages
+DETAIL:  0 index row versions were removed.
+0 index pages have been deleted, 0 are currently reusable.
+CPU 0.00s/0.00u sec elapsed 0.00 sec.
+INFO:  "pg_toast_1866942": found 0 removable, 0 nonremovable row versions in 0 out of 0 pages
+DETAIL:  0 dead row versions cannot be removed yet.
+There were 0 unused item pointers.
+Skipped 0 pages due to buffer pins.
+0 pages are entirely empty.
+CPU 0.00s/0.00u sec elapsed 0.00 sec.
+ result 
+--------
+ VACUUM
+(1 row)
 ```
