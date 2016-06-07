@@ -10,6 +10,7 @@ This module allows user to arbitrary command in a background worker and gives ca
 3. Allows to perform task like CREATE INDEX CONCURRENTLY from a procedural language 
 
 This module comes with following SQL APIs:
+
 1. ***pg_background_launch*** : This API takes SQL command, which user wants to execute, and size of queue buffer. This function returns the process id of background worker.
 2. ***pg_background_result*** : This API takes the process id as input parameter and returns the result of command executed throught the background worker.
 3. ***pg_background_detach*** : This API takes the process id and detach the background process which is waiting for user to read its results.
