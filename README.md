@@ -52,7 +52,7 @@ SELECT pg_background_launch('vacuum verbose public.sales');
 (1 row)
 
 
-SELECT * from pg_background_result(11088) as (x text);
+SELECT * FROM pg_background_result(11088) as (x text);
 INFO:  vacuuming "public.sales"
 INFO:  index "sales_pkey" now contains 0 row versions in 1 pages
 DETAIL:  0 index row versions were removed.
