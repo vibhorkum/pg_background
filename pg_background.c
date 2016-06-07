@@ -694,7 +694,8 @@ pg_background_worker_main(Datum main_arg)
 	responseq = shm_mq_attach(mq, seg, NULL);
 
 	/* Redirect protocol messages to responseq. */
-	pq_redirect_to_shm_mq(mq, responseq);
+	//pq_redirect_to_shm_mq(mq, responseq);
+	pq_redirect_to_shm_mq(seg, responseq);
 
 	/*
 	 * Initialize our user and database ID based on the strings version of
