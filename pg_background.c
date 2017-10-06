@@ -188,7 +188,9 @@ pg_background_launch(PG_FUNCTION_ARGS)
 		BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
 	worker.bgw_start_time = BgWorkerStart_ConsistentState;
 	worker.bgw_restart_time = BGW_NEVER_RESTART;
-	worker.bgw_main = NULL;		/* new worker might not have library loaded */
+	#if PG_VERSION_NUM < 100000
+		worker.bgw_main = NULL;		/* new worker might not have library loaded */
+	#endif
 	sprintf(worker.bgw_library_name, "pg_background");
 	sprintf(worker.bgw_function_name, "pg_background_worker_main");
 	snprintf(worker.bgw_name, BGW_MAXLEN,
@@ -269,6 +271,7 @@ pg_background_result(PG_FUNCTION_ARGS)
 	{
 		MemoryContext	oldcontext;
 		pg_background_worker_info *info;
+		dsm_segment *seg;
 
 		funcctx = SRF_FIRSTCALL_INIT();
 		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
@@ -291,7 +294,9 @@ pg_background_result(PG_FUNCTION_ARGS)
 		 * may not try to read from the DSM once we've begun to do so.
 		 * Accordingly, make arrangements to clean things up at end of query.
 		 */
-		dsm_unpin_mapping(info->seg);
+		seg = info->seg;
+
+			dsm_unpin_mapping(seg);
 
 		/* Set up tuple-descriptor based on colum definition list. */
 		if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
@@ -686,10 +691,18 @@ pg_background_worker_main(Datum main_arg)
 			   errmsg("bad magic number in dynamic shared memory segment")));
 
 	/* Find data structures in dynamic shared memory. */
-	fdata = shm_toc_lookup(toc, PG_BACKGROUND_KEY_FIXED_DATA);
-	sql = shm_toc_lookup(toc, PG_BACKGROUND_KEY_SQL);
-	gucstate = shm_toc_lookup(toc, PG_BACKGROUND_KEY_GUC);
-	mq = shm_toc_lookup(toc, PG_BACKGROUND_KEY_QUEUE);
+	#if PG_VERSION_NUM < 100000
+		fdata = shm_toc_lookup(toc, PG_BACKGROUND_KEY_FIXED_DATA);
+		sql = shm_toc_lookup(toc, PG_BACKGROUND_KEY_SQL);
+		gucstate = shm_toc_lookup(toc, PG_BACKGROUND_KEY_GUC);
+		mq = shm_toc_lookup(toc, PG_BACKGROUND_KEY_QUEUE);
+	#else
+                fdata = shm_toc_lookup(toc, PG_BACKGROUND_KEY_FIXED_DATA,false);
+                sql = shm_toc_lookup(toc, PG_BACKGROUND_KEY_SQL,false);
+                gucstate = shm_toc_lookup(toc, PG_BACKGROUND_KEY_GUC,false);
+                mq = shm_toc_lookup(toc, PG_BACKGROUND_KEY_QUEUE,false);
+
+	#endif
 	shm_mq_set_sender(mq, MyProc);
 	responseq = shm_mq_attach(mq, seg, NULL);
 
@@ -787,7 +800,11 @@ execute_sql_string(const char *sql)
 	 */
 	foreach(lc1, raw_parsetree_list)
 	{
-		Node	   *parsetree = (Node *) lfirst(lc1);
+		#if PG_VERSION_NUM < 100000
+			Node	   *parsetree = (Node *) lfirst(lc1);
+		#else
+			RawStmt *parsetree = (RawStmt *)  lfirst(lc1);
+		#endif
         const char *commandTag;
         char        completionTag[COMPLETION_TAG_BUFSIZE];
         List       *querytree_list,
@@ -813,7 +830,11 @@ execute_sql_string(const char *sql)
          * do any special start-of-SQL-command processing needed by the
          * destination.
          */
-        commandTag = CreateCommandTag(parsetree);
+	#if PG_VERSION_NUM < 100000
+        	commandTag = CreateCommandTag(parsetree);
+	#else
+		commandTag = CreateCommandTag(parsetree->stmt);
+	#endif
         set_ps_display(commandTag, false);
         BeginCommand(commandTag, DestNone);
 
@@ -832,7 +853,12 @@ execute_sql_string(const char *sql)
 		 * perform internal transaction control.
 		 */
 		oldcontext = MemoryContextSwitchTo(parsecontext);
-		querytree_list = pg_analyze_and_rewrite(parsetree, sql, NULL, 0);
+                #if PG_VERSION_NUM >= 100000
+                        querytree_list = pg_analyze_and_rewrite(parsetree, sql, NULL, 0,NULL);
+                #else
+                        querytree_list = pg_analyze_and_rewrite(parsetree, sql, NULL, 0);
+                #endif
+
 		plantree_list = pg_plan_queries(querytree_list, 0, NULL);
 
 		/* Done with the snapshot used for parsing/planning */
@@ -876,8 +902,13 @@ execute_sql_string(const char *sql)
 		MemoryContextSwitchTo(oldcontext);
 
 		/* Here's where we actually execute the command. */
-		(void) PortalRun(portal, FETCH_ALL, isTopLevel, receiver, receiver,
-                         completionTag);
+		#if PG_VERSION_NUM < 100000
+			(void) PortalRun(portal, FETCH_ALL, isTopLevel, receiver, receiver,
+                         	completionTag);
+		#else
+			(void) PortalRun(portal, FETCH_ALL, isTopLevel,true, receiver, receiver,
+                                completionTag);
+		#endif
 
 		/* Clean up the receiver. */
 		(*receiver->rDestroy) (receiver);
