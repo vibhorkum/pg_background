@@ -29,7 +29,7 @@ After installing module, please use following command install this extension on 
   psql -h server.hostname.org -p 5444 -c "CREATE EXTENSION pg_background;" dbname
 ```
 
-##Usage:
+## Usage:
 
 To execute a command in background user can use following SQL API
 ```sql
@@ -42,7 +42,7 @@ SELECT pg_background_result(pid)
 ```
 **pid is process id returned by pg_background_launch function **
 
-##Example:
+## Example:
 
 ```sql
 SELECT pg_background_launch('vacuum verbose public.sales');
