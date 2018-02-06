@@ -41,7 +41,7 @@ To fetch the result of command executed background worker, user can use followin
 SELECT pg_background_result(pid)
 ```
 
-**pid is process id returned by pg_background_launch function **
+**pid is process id returned by pg_background_launch function**
 
 ## Example:
 
