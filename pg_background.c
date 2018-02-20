@@ -40,6 +40,8 @@
 #include "utils/ps_status.h"
 #include "utils/snapmgr.h"
 #include "utils/timeout.h"
+#include "utils/syscache.h"
+#include "utils/acl.h"
 
 /* Table-of-contents constants for our dynamic shared memory segment. */
 #define PG_BACKGROUND_MAGIC				0x50674267
@@ -56,14 +58,15 @@ typedef struct pg_background_fixed_data
 	Oid	authenticated_user_id;
 	Oid	current_user_id;
 	int	sec_context;
-	char database[NAMEDATALEN];
-	char authenticated_user[NAMEDATALEN];
+        NameData        database;
+        NameData        authenticated_user;
 } pg_background_fixed_data;
 
 /* Private state maintained by the launching backend for IPC. */
 typedef struct pg_background_worker_info
 {
 	pid_t		pid;
+        Oid                     current_user_id;
 	dsm_segment *seg;
 	BackgroundWorkerHandle *handle;	
 	shm_mq_handle *responseq;	
@@ -85,15 +88,18 @@ static HTAB *worker_hash;
 
 static void cleanup_worker_info(dsm_segment *, Datum pid_datum);
 static pg_background_worker_info *find_worker_info(pid_t pid);
+static void check_rights(pg_background_worker_info *info);
 static void save_worker_info(pid_t pid, dsm_segment *seg,
 				 BackgroundWorkerHandle *handle,
 				 shm_mq_handle *responseq);
+static void pg_background_error_callback(void *arg);
 
 static HeapTuple form_result_tuple(pg_background_result_state *state,
 								   TupleDesc tupdesc, StringInfo msg);
 
 static void handle_sigterm(SIGNAL_ARGS);
 static void execute_sql_string(const char *sql);
+static bool exists_binary_recv_fn(Oid type);
 
 PG_MODULE_MAGIC;
 
@@ -117,7 +123,7 @@ pg_background_launch(PG_FUNCTION_ARGS)
 	dsm_segment *seg;
 	shm_toc_estimator e;
 	shm_toc    *toc;
-    char	   *sqlp;
+        char	   *sqlp;
 	char	   *gucstate;
 	shm_mq	   *mq;
 	BackgroundWorker worker;
@@ -152,9 +158,9 @@ pg_background_launch(PG_FUNCTION_ARGS)
 	fdata->database_id = MyDatabaseId;
 	fdata->authenticated_user_id = GetAuthenticatedUserId();
 	GetUserIdAndSecContext(&fdata->current_user_id, &fdata->sec_context);
-	strlcpy(fdata->database, get_database_name(MyDatabaseId), NAMEDATALEN);
-	strlcpy(fdata->authenticated_user,
-			GetUserNameFromId(fdata->authenticated_user_id, false), NAMEDATALEN);
+        namestrcpy(&fdata->database, get_database_name(MyDatabaseId));
+        namestrcpy(&fdata->authenticated_user,
+                           GetUserNameFromId(fdata->authenticated_user_id, false));
 	shm_toc_insert(toc, PG_BACKGROUND_KEY_FIXED_DATA, fdata);
 
 	/* Store SQL query in dynamic shared memory. */
@@ -281,6 +287,7 @@ pg_background_result(PG_FUNCTION_ARGS)
 			ereport(ERROR,
 					(errcode(ERRCODE_UNDEFINED_OBJECT),
 					 errmsg("PID %d is not attached to this session", pid)));
+		check_rights(info);
 
 		/* Can't read results twice. */
 		if (info->consumed)
@@ -370,6 +377,7 @@ pg_background_result(PG_FUNCTION_ARGS)
 			case 'N':
 				{
 					ErrorData	edata;
+                                        ErrorContextCallback context;
 
 					/* Parse ErrorResponse or NoticeResponse. */
 					pq_parse_errornotice(&msg, &edata);
@@ -382,8 +390,16 @@ pg_background_result(PG_FUNCTION_ARGS)
 					if (edata.elevel > ERROR)
 						edata.elevel = ERROR;
 
-					/* Rethrow the error. */
+                                        /*
+                                         * Rethrow the error with an appropriate context method.
+                                         */
+                                        context.callback = pg_background_error_callback;
+                                        context.arg = (void *) &pid;
+                                        context.previous = error_context_stack;
+                                        error_context_stack = &context;
 					ThrowErrorData(&edata);	
+                                        error_context_stack = context.previous;
+
 					break;
 				}
 			case 'A':
@@ -418,12 +434,22 @@ pg_background_result(PG_FUNCTION_ARGS)
 						(void) pq_getmsgint(&msg, 4);	/* typmod */
 						(void) pq_getmsgint(&msg, 2);	/* format code */
 
-						if (type_id != tupdesc->attrs[i]->atttypid)
-							ereport(ERROR,
-									(errcode(ERRCODE_DATATYPE_MISMATCH),
-									 errmsg("remote query result rowtype does not match "
-										"the specified FROM clause rowtype")));
-					}
+
+                                                if (exists_binary_recv_fn(type_id))
+                                                {
+                                                        if (type_id != tupdesc->attrs[i]->atttypid)
+                                                                ereport(ERROR,
+                                                                                (errcode(ERRCODE_DATATYPE_MISMATCH),
+                                                                                 errmsg("remote query result rowtype does not match "
+                                                                                                "the specified FROM clause rowtype")));
+                                                }
+                                                else if(tupdesc->attrs[i]->atttypid != TEXTOID)
+                                                        ereport(ERROR,
+                                                                        (errcode(ERRCODE_DATATYPE_MISMATCH),
+                                                                         errmsg("remote query result rowtype does not match "
+                                                                                        "the specified FROM clause rowtype"),
+                                                                         errhint("use text type instead")));
+                                        }
 
 					pq_getmsgend(&msg);
 
@@ -450,6 +476,14 @@ pg_background_result(PG_FUNCTION_ARGS)
 					MemoryContextSwitchTo(oldcontext);
 					break;
 				}
+                        case 'G':
+                        case 'H':
+                        case 'W':
+                                {
+                                        ereport(ERROR,
+                                                        (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                                                         errmsg("COPY protocol not allowed in pg_background")));
+                                }
 			case 'Z':
 				{
 					/* Handle ReadyForQuery message. */
@@ -616,39 +650,88 @@ find_worker_info(pid_t pid)
 }
 
 /*
- * Save worker information for future IPC.
+ * Check whether the current user has rights to manipulate the background
+ * worker with the given PID.
+ */
+static void
+check_rights(pg_background_worker_info *info)
+{
+	Oid	current_user_id;
+	int	sec_context;
+
+	GetUserIdAndSecContext(&current_user_id, &sec_context);
+	if (!has_privs_of_role(current_user_id, info->current_user_id))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+			 errmsg("permission denied for background worker with PID \"%d\"",
+						info->pid)));
+}
+
+/*
+  Save worker information for future IPC.
  */
 static void
 save_worker_info(pid_t pid, dsm_segment *seg, BackgroundWorkerHandle *handle,
-				 shm_mq_handle *responseq)
+                                 shm_mq_handle *responseq)
 {
-	pg_background_worker_info *info;
+        pg_background_worker_info *info;
+        Oid current_user_id;
+        int     sec_context;
 
-	/* If the hash table hasn't been set up yet, do that now. */
-	if (worker_hash == NULL)
-	{
-		HASHCTL	ctl;
+        /* If the hash table hasn't been set up yet, do that now. */
+        if (worker_hash == NULL)
+        {
+                HASHCTL ctl;
 
-		ctl.keysize = sizeof(pid_t);
-		ctl.entrysize = sizeof(pg_background_worker_info);
-		worker_hash = hash_create("pg_background worker_hash", 8, &ctl,
-								  HASH_ELEM);
-	}
+                ctl.keysize = sizeof(pid_t);
+                ctl.entrysize = sizeof(pg_background_worker_info);
+                worker_hash = hash_create("pg_background worker_hash", 8, &ctl,
+                                                                  HASH_ELEM);
+        }
 
-	/* Detach any older worker with this PID. */
-	if ((info = find_worker_info(pid)) != NULL)
-		dsm_detach(info->seg);
+        /* Get current authentication information. */
+        GetUserIdAndSecContext(&current_user_id, &sec_context);
 
-	/* When the DSM is unmapped, clean everything up. */
-	on_dsm_detach(seg, cleanup_worker_info, Int32GetDatum(pid));
+        /*
+         * In the unlikely event that there's an older worker with this PID,
+         * just detach it - unless it has a different user ID than the
+         * currently-active one, in which case someone might be trying to pull
+         * a fast one.  Let's kill the backend to make sure we don't break
+         * anyone's expectations.
+         */
+        if ((info = find_worker_info(pid)) != NULL)
+        {
+                if (current_user_id != info->current_user_id)
+                        ereport(FATAL,
+                                (errcode(ERRCODE_DUPLICATE_OBJECT),
+                         errmsg("background worker with PID \"%d\" already exists",
+                                                pid)));
+                dsm_detach(info->seg);
+        }
 
-	/* Create a new entry for this worker. */
-	info = hash_search(worker_hash, (void *) &pid, HASH_ENTER, NULL);
-	info->seg = seg;
-	info->handle = handle;
-	info->responseq = responseq;
-	info->consumed = false;
+        /* When the DSM is unmapped, clean everything up. */
+        on_dsm_detach(seg, cleanup_worker_info, Int32GetDatum(pid));
+
+        /* Create a new entry for this worker. */
+        info = hash_search(worker_hash, (void *) &pid, HASH_ENTER, NULL);
+        info->seg = seg;
+        info->handle = handle;
+        info->responseq = responseq;
+        info->consumed = false;
 }
+
+/*
+ * Indicate that an error came from a particular background worker.
+ */
+static void
+pg_background_error_callback(void *arg)
+{
+	pid_t	pid = * (pid_t *) arg;
+
+	errcontext("background worker, pid %d", pid);
+}
+
+
 
 /*
  * Background worker entrypoint.
@@ -720,8 +803,9 @@ pg_background_worker_main(Datum main_arg)
 	 * be a variant of BackgroundWorkerInitializeConnection that accepts OIDs
 	 * rather than strings.
 	 */
-	BackgroundWorkerInitializeConnection(fdata->database,
-										 fdata->authenticated_user);
+        BackgroundWorkerInitializeConnection(NameStr(fdata->database),
+                                                                                 NameStr(fdata->authenticated_user));
+
 	if (fdata->database_id != MyDatabaseId ||
 		fdata->authenticated_user_id != GetAuthenticatedUserId())
 		ereport(ERROR,
@@ -758,6 +842,28 @@ pg_background_worker_main(Datum main_arg)
 	/* Signal that we are done. */
 	ReadyForQuery(DestRemote);
 }
+
+/*
+ * Check binary input function exists for the given type.
+ */
+static bool
+exists_binary_recv_fn(Oid type)
+{
+	HeapTuple	typeTuple;
+	Form_pg_type pt;
+	bool exists_rev_fn;
+
+	typeTuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type));
+	if (!HeapTupleIsValid(typeTuple))
+		elog(ERROR, "cache lookup failed for type %u", type);
+
+	pt = (Form_pg_type) GETSTRUCT(typeTuple);
+	exists_rev_fn = OidIsValid(pt->typreceive);
+	ReleaseSysCache(typeTuple);
+
+	return exists_rev_fn;
+}
+
 
 /*
  * Execute given SQL string.

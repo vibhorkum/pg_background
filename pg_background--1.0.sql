@@ -14,3 +14,9 @@ CREATE FUNCTION pg_background_result(pid pg_catalog.int4)
 CREATE FUNCTION pg_background_detach(pid pg_catalog.int4)
     RETURNS pg_catalog.void STRICT
 	AS 'MODULE_PATHNAME' LANGUAGE C;
+REVOKE ALL ON FUNCTION pg_background_launch(pg_catalog.text, pg_catalog.int4)
+	FROM public;
+REVOKE ALL ON FUNCTION pg_background_result(pg_catalog.int4)
+	FROM public;
+REVOKE ALL ON FUNCTION pg_background_detach(pg_catalog.int4)
+	FROM public;
