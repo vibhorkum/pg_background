@@ -716,6 +716,7 @@ save_worker_info(pid_t pid, dsm_segment *seg, BackgroundWorkerHandle *handle,
         info = hash_search(worker_hash, (void *) &pid, HASH_ENTER, NULL);
         info->seg = seg;
         info->handle = handle;
+	info->current_user_id = current_user_id;
         info->responseq = responseq;
         info->consumed = false;
 }
