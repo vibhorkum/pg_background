@@ -25,6 +25,7 @@ extern int	StatementTimeout;
 to
 ```c
 extern PGDLLIMPORT int	StatementTimeout;
+```
 ## openssl
 Maybe opensslconf.h may be necessary.
 Get source from https://github.com/openssl/openssl.git and configure the header file.
