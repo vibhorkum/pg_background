@@ -227,13 +227,9 @@ pg_background_launch(PG_FUNCTION_ARGS)
 			/* Success. */
 			break;
 		case BGWH_STOPPED:
-			pfree(worker_handle);
-			ereport(ERROR,
-					(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
-					 errmsg("could not start background process"),
-					 errhint("More details may be available in the server log.")));
+			/* Success and already done. */
 			break;
-        case BGWH_POSTMASTER_DIED:
+		case BGWH_POSTMASTER_DIED:
 			pfree(worker_handle);
 			ereport(ERROR,
 					(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
