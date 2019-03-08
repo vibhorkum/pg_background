@@ -227,13 +227,9 @@ pg_background_launch(PG_FUNCTION_ARGS)
 			/* Success. */
 			break;
 		case BGWH_STOPPED:
-			pfree(worker_handle);
-			ereport(ERROR,
-					(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
-					 errmsg("could not start background process"),
-					 errhint("More details may be available in the server log.")));
+			/* Success and already done. */
 			break;
-        case BGWH_POSTMASTER_DIED:
+		case BGWH_POSTMASTER_DIED:
 			pfree(worker_handle);
 			ereport(ERROR,
 					(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
@@ -330,7 +326,7 @@ pg_background_result(PG_FUNCTION_ARGS)
 			{
 				Oid	receive_function_id;
 
-				getTypeBinaryInputInfo(funcctx->tuple_desc->attrs[i]->atttypid,
+				getTypeBinaryInputInfo(funcctx->tuple_desc->attrs[i].atttypid,
 									   &receive_function_id,
 									   &state->typioparams[i]);
 				fmgr_info(receive_function_id, &state->receive_functions[i]);
@@ -437,13 +433,13 @@ pg_background_result(PG_FUNCTION_ARGS)
 
                                                 if (exists_binary_recv_fn(type_id))
                                                 {
-                                                        if (type_id != tupdesc->attrs[i]->atttypid)
+                                                        if (type_id != tupdesc->attrs[i].atttypid)
                                                                 ereport(ERROR,
                                                                                 (errcode(ERRCODE_DATATYPE_MISMATCH),
                                                                                  errmsg("remote query result rowtype does not match "
                                                                                                 "the specified FROM clause rowtype")));
                                                 }
-                                                else if(tupdesc->attrs[i]->atttypid != TEXTOID)
+                                                else if(tupdesc->attrs[i].atttypid != TEXTOID)
                                                         ereport(ERROR,
                                                                         (errcode(ERRCODE_DATATYPE_MISMATCH),
                                                                          errmsg("remote query result rowtype does not match "
@@ -507,7 +503,7 @@ pg_background_result(PG_FUNCTION_ARGS)
 	/* If no data rows, return the command tags instead. */
 	if (!state->has_row_description)
 	{
-		if (tupdesc->natts != 1 || tupdesc->attrs[0]->atttypid != TEXTOID)
+		if (tupdesc->natts != 1 || tupdesc->attrs[0].atttypid != TEXTOID)
 			ereport(ERROR,
 					(errcode(ERRCODE_DATATYPE_MISMATCH),
 					 errmsg("remote query did not return a result set, but "
@@ -566,7 +562,7 @@ form_result_tuple(pg_background_result_state *state, TupleDesc tupdesc,
 			values[i] = ReceiveFunctionCall(&state->receive_functions[i],
 											NULL,
 											state->typioparams[i],
-											tupdesc->attrs[i]->atttypmod);
+											tupdesc->attrs[i].atttypmod);
 			isnull[i] = true;
 		}
 		else
@@ -576,7 +572,7 @@ form_result_tuple(pg_background_result_state *state, TupleDesc tupdesc,
 			values[i] = ReceiveFunctionCall(&state->receive_functions[i],
 											&buf,
 											state->typioparams[i],
-											tupdesc->attrs[i]->atttypmod);
+											tupdesc->attrs[i].atttypmod);
 			isnull[i] = false;
 		}
 	}
@@ -805,7 +801,7 @@ pg_background_worker_main(Datum main_arg)
 	 * rather than strings.
 	 */
         BackgroundWorkerInitializeConnection(NameStr(fdata->database),
-                                                                                 NameStr(fdata->authenticated_user));
+                                                                                 NameStr(fdata->authenticated_user), 0);
 
 	if (fdata->database_id != MyDatabaseId ||
 		fdata->authenticated_user_id != GetAuthenticatedUserId())
