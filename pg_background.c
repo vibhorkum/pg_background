@@ -42,6 +42,10 @@
 #include "utils/timeout.h"
 #include "utils/syscache.h"
 #include "utils/acl.h"
+#ifdef WIN32
+#include "windows/pg_background_win.h"
+#endif // WIN32
+
 
 /* Table-of-contents constants for our dynamic shared memory segment. */
 #define PG_BACKGROUND_MAGIC				0x50674267
