@@ -120,7 +120,7 @@ Datum
 pg_background_launch(PG_FUNCTION_ARGS)
 {
 	text	   *sql = PG_GETARG_TEXT_PP(0);
-	int32		queue_size = PG_GETARG_INT64(1);
+	int32		queue_size = PG_GETARG_INT32(1);
 	int32		sql_len = VARSIZE_ANY_EXHDR(sql);
 	Size		guc_len;
 	Size		segsize;
