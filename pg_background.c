@@ -204,7 +204,10 @@ pg_background_launch(PG_FUNCTION_ARGS)
 	sprintf(worker.bgw_library_name, "pg_background");
 	sprintf(worker.bgw_function_name, "pg_background_worker_main");
 	snprintf(worker.bgw_name, BGW_MAXLEN,
-			 "pg_background by PID %d", MyProcPid);
+			 "pg_background by PID %d", MyProcPid);	
+	#if (PG_VERSION_NUM >= 110000)
+        	snprintf(worker.bgw_type, BGW_MAXLEN, "pg_background");
+	#endif
 	worker.bgw_main_arg = UInt32GetDatum(dsm_segment_handle(seg));
 	/* set bgw_notify_pid, so we can detect if the worker stops */
 	worker.bgw_notify_pid = MyProcPid;
