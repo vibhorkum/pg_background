@@ -848,7 +848,7 @@ pg_background_worker_main(Datum main_arg)
                                                                                  NameStr(fdata->authenticated_user));
     #else
             BackgroundWorkerInitializeConnection(NameStr(fdata->database),
-                                                                                 NameStr(fdata->authenticated_user), 0);
+                                                                                 NameStr(fdata->authenticated_user), BGWORKER_BYPASS_ALLOWCONN);
     #endif
 
 	if (fdata->database_id != MyDatabaseId ||
