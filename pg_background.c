@@ -333,9 +333,16 @@ pg_background_result(PG_FUNCTION_ARGS)
 			{
 				Oid	receive_function_id;
 
-				getTypeBinaryInputInfo(funcctx->tuple_desc->attrs[i].atttypid,
-									   &receive_function_id,
-									   &state->typioparams[i]);
+#if (PG_VERSION_NUM <110000)
+                    getTypeBinaryInputInfo(funcctx->tuple_desc->attrs[i]->atttypid,
+					                       &receive_function_id,
+                                           &state->typioparams[i]);
+#else
+                    getTypeBinaryInputInfo(funcctx->tuple_desc->attrs[i].atttypid,
+                                           &receive_function_id,
+                                           &state->typioparams[i]);
+#endif
+
 				fmgr_info(receive_function_id, &state->receive_functions[i]);
 			}
 		}
@@ -440,13 +447,23 @@ pg_background_result(PG_FUNCTION_ARGS)
 
                                                 if (exists_binary_recv_fn(type_id))
                                                 {
+#if (PG_VERSION_NUM <110000)
+                                                        if (type_id != tupdesc->attrs[i]->atttypid)
+#else
                                                         if (type_id != tupdesc->attrs[i].atttypid)
+#endif
+
                                                                 ereport(ERROR,
                                                                                 (errcode(ERRCODE_DATATYPE_MISMATCH),
                                                                                  errmsg("remote query result rowtype does not match "
                                                                                                 "the specified FROM clause rowtype")));
                                                 }
+#if (PG_VERSION_NUM < 110000)
+                                                else if(tupdesc->attrs[i]->atttypid != TEXTOID)
+#else
                                                 else if(tupdesc->attrs[i].atttypid != TEXTOID)
+#endif
+
                                                         ereport(ERROR,
                                                                         (errcode(ERRCODE_DATATYPE_MISMATCH),
                                                                          errmsg("remote query result rowtype does not match "
@@ -510,7 +527,12 @@ pg_background_result(PG_FUNCTION_ARGS)
 	/* If no data rows, return the command tags instead. */
 	if (!state->has_row_description)
 	{
+#if (PG_VERSION_NUM < 110000)
+		if (tupdesc->natts != 1 || tupdesc->attrs[0]->atttypid != TEXTOID)
+#else
 		if (tupdesc->natts != 1 || tupdesc->attrs[0].atttypid != TEXTOID)
+#endif
+
 			ereport(ERROR,
 					(errcode(ERRCODE_DATATYPE_MISMATCH),
 					 errmsg("remote query did not return a result set, but "
@@ -566,20 +588,34 @@ form_result_tuple(pg_background_result_state *state, TupleDesc tupdesc,
 
 		if (bytes < 0)
 		{
+#if (PG_VERSION_NUM < 110000)
+			values[i] = ReceiveFunctionCall(&state->receive_functions[i],
+											NULL,
+											state->typioparams[i],
+											tupdesc->attrs[i]->atttypmod);
+#else
 			values[i] = ReceiveFunctionCall(&state->receive_functions[i],
 											NULL,
 											state->typioparams[i],
 											tupdesc->attrs[i].atttypmod);
+#endif
 			isnull[i] = true;
 		}
 		else
 		{
 			resetStringInfo(&buf);
 			appendBinaryStringInfo(&buf, pq_getmsgbytes(msg, bytes), bytes);
+#if (PG_VERSION_NUM < 110000)
+			values[i] = ReceiveFunctionCall(&state->receive_functions[i],
+											&buf,
+											state->typioparams[i],
+											tupdesc->attrs[i]->atttypmod);
+#else
 			values[i] = ReceiveFunctionCall(&state->receive_functions[i],
 											&buf,
 											state->typioparams[i],
 											tupdesc->attrs[i].atttypmod);
+#endif
 			isnull[i] = false;
 		}
 	}
@@ -807,8 +843,13 @@ pg_background_worker_main(Datum main_arg)
 	 * be a variant of BackgroundWorkerInitializeConnection that accepts OIDs
 	 * rather than strings.
 	 */
-        BackgroundWorkerInitializeConnection(NameStr(fdata->database),
+	#if PG_VERSION_NUM < 110000
+            BackgroundWorkerInitializeConnection(NameStr(fdata->database),
+                                                                                 NameStr(fdata->authenticated_user));
+    #else
+            BackgroundWorkerInitializeConnection(NameStr(fdata->database),
                                                                                  NameStr(fdata->authenticated_user), 0);
+    #endif
 
 	if (fdata->database_id != MyDatabaseId ||
 		fdata->authenticated_user_id != GetAuthenticatedUserId())
