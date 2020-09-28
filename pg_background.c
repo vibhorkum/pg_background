@@ -956,8 +956,16 @@ execute_sql_string(const char *sql)
 		#else
 			RawStmt *parsetree = (RawStmt *)  lfirst(lc1);
 		#endif
-        const char *commandTag;
+		#if PG_VERSION_NUM >= 130000
+			CommandTag commandTag;
+		#else
+			const char *commandTag;
+		#endif
+		#if PG_VERSION_NUM < 130000
         char        completionTag[COMPLETION_TAG_BUFSIZE];
+		#else
+		QueryCompletion qc;
+		#endif
         List       *querytree_list,
                    *plantree_list;
 		bool		snapshot_set = false;
@@ -981,12 +989,17 @@ execute_sql_string(const char *sql)
          * do any special start-of-SQL-command processing needed by the
          * destination.
          */
-	#if PG_VERSION_NUM < 100000
-        	commandTag = CreateCommandTag(parsetree);
+	#if PG_VERSION_NUM < 100000 || PG_VERSION_NUM >= 130000
+		commandTag = CreateCommandTag((Node *) parsetree);
 	#else
 		commandTag = CreateCommandTag(parsetree->stmt);
 	#endif
-        set_ps_display(commandTag, false);
+	#if PG_VERSION_NUM < 130000
+		set_ps_display(commandTag, false);
+	#else
+		set_ps_display(GetCommandTagName(commandTag));
+	#endif
+
         BeginCommand(commandTag, DestNone);
 
 		/* Set up a snapshot if parse analysis/planning will need one. */
@@ -1010,7 +1023,11 @@ execute_sql_string(const char *sql)
                         querytree_list = pg_analyze_and_rewrite(parsetree, sql, NULL, 0);
                 #endif
 
-		plantree_list = pg_plan_queries(querytree_list, 0, NULL);
+		plantree_list = pg_plan_queries(querytree_list,
+			#if PG_VERSION_NUM >= 130000
+				sql,
+			#endif
+				0, NULL);
 
 		/* Done with the snapshot used for parsing/planning */
         if (snapshot_set)
@@ -1056,9 +1073,12 @@ execute_sql_string(const char *sql)
 		#if PG_VERSION_NUM < 100000
 			(void) PortalRun(portal, FETCH_ALL, isTopLevel, receiver, receiver,
                          	completionTag);
-		#else
+		#elif PG_VERSION_NUM < 130000
 			(void) PortalRun(portal, FETCH_ALL, isTopLevel,true, receiver, receiver,
                                 completionTag);
+		#else
+			(void) PortalRun(portal, FETCH_ALL, isTopLevel,true, receiver, receiver,
+                                &qc);
 		#endif
 
 		/* Clean up the receiver. */
@@ -1069,7 +1089,11 @@ execute_sql_string(const char *sql)
 		 * results.  The user backend will report these in the absence of
 		 * any true query results.
 		 */
+		#if PG_VERSION_NUM < 130000
 		EndCommand(completionTag, DestRemote);
+		#else
+		EndCommand(&qc, DestRemote, false);
+		#endif
 
 		/* Clean up the portal. */
 		PortalDrop(portal, false);
