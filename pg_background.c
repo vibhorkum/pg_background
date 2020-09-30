@@ -496,14 +496,15 @@ pg_background_result(PG_FUNCTION_ARGS)
 					MemoryContextSwitchTo(oldcontext);
 					break;
 				}
-                        case 'G':
-                        case 'H':
-                        case 'W':
-                                {
-                                        ereport(ERROR,
-                                                        (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                                                         errmsg("COPY protocol not allowed in pg_background")));
-                                }
+			case 'G':
+			case 'H':
+			case 'W':
+				{
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("COPY protocol not allowed in pg_background")));
+					break;
+				}
 			case 'Z':
 				{
 					/* Handle ReadyForQuery message. */
