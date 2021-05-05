@@ -726,7 +726,7 @@ save_worker_info(pid_t pid, dsm_segment *seg, BackgroundWorkerHandle *handle,
                 ctl.keysize = sizeof(pid_t);
                 ctl.entrysize = sizeof(pg_background_worker_info);
                 worker_hash = hash_create("pg_background worker_hash", 8, &ctl,
-                                                                  HASH_ELEM);
+                                          HASH_BLOBS | HASH_ELEM);
         }
 
         /* Get current authentication information. */
