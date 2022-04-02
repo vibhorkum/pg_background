@@ -72,8 +72,8 @@ typedef struct pg_background_worker_info
 	pid_t		pid;
         Oid                     current_user_id;
 	dsm_segment *seg;
-	BackgroundWorkerHandle *handle;	
-	shm_mq_handle *responseq;	
+	BackgroundWorkerHandle *handle;
+	shm_mq_handle *responseq;
 	bool		consumed;
 } pg_background_worker_info;
 
@@ -94,8 +94,8 @@ static void cleanup_worker_info(dsm_segment *, Datum pid_datum);
 static pg_background_worker_info *find_worker_info(pid_t pid);
 static void check_rights(pg_background_worker_info *info);
 static void save_worker_info(pid_t pid, dsm_segment *seg,
-				 BackgroundWorkerHandle *handle,
-				 shm_mq_handle *responseq);
+							 BackgroundWorkerHandle *handle,
+							 shm_mq_handle *responseq);
 static void pg_background_error_callback(void *arg);
 
 static HeapTuple form_result_tuple(pg_background_result_state *state,
@@ -162,9 +162,9 @@ pg_background_launch(PG_FUNCTION_ARGS)
 	fdata->database_id = MyDatabaseId;
 	fdata->authenticated_user_id = GetAuthenticatedUserId();
 	GetUserIdAndSecContext(&fdata->current_user_id, &fdata->sec_context);
-        namestrcpy(&fdata->database, get_database_name(MyDatabaseId));
-        namestrcpy(&fdata->authenticated_user,
-                           GetUserNameFromId(fdata->authenticated_user_id, false));
+	namestrcpy(&fdata->database, get_database_name(MyDatabaseId));
+	namestrcpy(&fdata->authenticated_user,
+			   GetUserNameFromId(fdata->authenticated_user_id, false));
 	shm_toc_insert(toc, PG_BACKGROUND_KEY_FIXED_DATA, fdata);
 
 	/* Store SQL query in dynamic shared memory. */
@@ -198,16 +198,16 @@ pg_background_launch(PG_FUNCTION_ARGS)
 		BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
 	worker.bgw_start_time = BgWorkerStart_ConsistentState;
 	worker.bgw_restart_time = BGW_NEVER_RESTART;
-	#if PG_VERSION_NUM < 100000
-		worker.bgw_main = NULL;		/* new worker might not have library loaded */
-	#endif
+#if PG_VERSION_NUM < 100000
+	worker.bgw_main = NULL;		/* new worker might not have library loaded */
+#endif
 	sprintf(worker.bgw_library_name, "pg_background");
 	sprintf(worker.bgw_function_name, "pg_background_worker_main");
 	snprintf(worker.bgw_name, BGW_MAXLEN,
-			 "pg_background by PID %d", MyProcPid);	
-	#if (PG_VERSION_NUM >= 110000)
-        	snprintf(worker.bgw_type, BGW_MAXLEN, "pg_background");
-	#endif
+			 "pg_background by PID %d", MyProcPid);
+#if (PG_VERSION_NUM >= 110000)
+	snprintf(worker.bgw_type, BGW_MAXLEN, "pg_background");
+#endif
 	worker.bgw_main_arg = UInt32GetDatum(dsm_segment_handle(seg));
 	/* set bgw_notify_pid, so we can detect if the worker stops */
 	worker.bgw_notify_pid = MyProcPid;
@@ -297,7 +297,7 @@ pg_background_result(PG_FUNCTION_ARGS)
 			ereport(ERROR,
 					(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("results for PID %d have already been consumed", pid)));
-		info->consumed = true;		
+		info->consumed = true;
 
 		/*
 		 * Whether we succeed or fail, a future invocation of this function
@@ -306,7 +306,7 @@ pg_background_result(PG_FUNCTION_ARGS)
 		 */
 		seg = info->seg;
 
-			dsm_unpin_mapping(seg);
+		dsm_unpin_mapping(seg);
 
 		/* Set up tuple-descriptor based on colum definition list. */
 		if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
@@ -334,13 +334,13 @@ pg_background_result(PG_FUNCTION_ARGS)
 				Oid	receive_function_id;
 
 #if (PG_VERSION_NUM <110000)
-                    getTypeBinaryInputInfo(funcctx->tuple_desc->attrs[i]->atttypid,
-					                       &receive_function_id,
-                                           &state->typioparams[i]);
+				getTypeBinaryInputInfo(funcctx->tuple_desc->attrs[i]->atttypid,
+									   &receive_function_id,
+									   &state->typioparams[i]);
 #else
-                    getTypeBinaryInputInfo(funcctx->tuple_desc->attrs[i].atttypid,
-                                           &receive_function_id,
-                                           &state->typioparams[i]);
+				getTypeBinaryInputInfo(funcctx->tuple_desc->attrs[i].atttypid,
+									   &receive_function_id,
+									   &state->typioparams[i]);
 #endif
 
 				fmgr_info(receive_function_id, &state->receive_functions[i]);
@@ -387,7 +387,7 @@ pg_background_result(PG_FUNCTION_ARGS)
 			case 'N':
 				{
 					ErrorData	edata;
-                                        ErrorContextCallback context;
+					ErrorContextCallback context;
 
 					/* Parse ErrorResponse or NoticeResponse. */
 					pq_parse_errornotice(&msg, &edata);
@@ -400,15 +400,15 @@ pg_background_result(PG_FUNCTION_ARGS)
 					if (edata.elevel > ERROR)
 						edata.elevel = ERROR;
 
-                                        /*
-                                         * Rethrow the error with an appropriate context method.
-                                         */
-                                        context.callback = pg_background_error_callback;
-                                        context.arg = (void *) &pid;
-                                        context.previous = error_context_stack;
-                                        error_context_stack = &context;
-					ThrowErrorData(&edata);	
-                                        error_context_stack = context.previous;
+					/*
+					 * Rethrow the error with an appropriate context method.
+					 */
+					context.callback = pg_background_error_callback;
+					context.arg = (void *) &pid;
+					context.previous = error_context_stack;
+					error_context_stack = &context;
+					ThrowErrorData(&edata);
+					error_context_stack = context.previous;
 
 					break;
 				}
@@ -426,7 +426,7 @@ pg_background_result(PG_FUNCTION_ARGS)
 					if (state->has_row_description)
 						elog(ERROR, "multiple RowDescription messages");
 					state->has_row_description = true;
-   					if (natts != tupdesc->natts)
+					if (natts != tupdesc->natts)
 						ereport(ERROR,
 								(errcode(ERRCODE_DATATYPE_MISMATCH),
 								 errmsg("remote query result rowtype does not match "
@@ -444,32 +444,31 @@ pg_background_result(PG_FUNCTION_ARGS)
 						(void) pq_getmsgint(&msg, 4);	/* typmod */
 						(void) pq_getmsgint(&msg, 2);	/* format code */
 
-
-                                                if (exists_binary_recv_fn(type_id))
-                                                {
+						if (exists_binary_recv_fn(type_id))
+						{
 #if (PG_VERSION_NUM <110000)
-                                                        if (type_id != tupdesc->attrs[i]->atttypid)
+							if (type_id != tupdesc->attrs[i]->atttypid)
 #else
-                                                        if (type_id != tupdesc->attrs[i].atttypid)
+							if (type_id != tupdesc->attrs[i].atttypid)
 #endif
 
-                                                                ereport(ERROR,
-                                                                                (errcode(ERRCODE_DATATYPE_MISMATCH),
-                                                                                 errmsg("remote query result rowtype does not match "
-                                                                                                "the specified FROM clause rowtype")));
-                                                }
+								ereport(ERROR,
+										(errcode(ERRCODE_DATATYPE_MISMATCH),
+										 errmsg("remote query result rowtype does not match "
+											    "the specified FROM clause rowtype")));
+						}
 #if (PG_VERSION_NUM < 110000)
-                                                else if(tupdesc->attrs[i]->atttypid != TEXTOID)
+						else if(tupdesc->attrs[i]->atttypid != TEXTOID)
 #else
-                                                else if(tupdesc->attrs[i].atttypid != TEXTOID)
+						else if(tupdesc->attrs[i].atttypid != TEXTOID)
 #endif
 
-                                                        ereport(ERROR,
-                                                                        (errcode(ERRCODE_DATATYPE_MISMATCH),
-                                                                         errmsg("remote query result rowtype does not match "
-                                                                                        "the specified FROM clause rowtype"),
-                                                                         errhint("use text type instead")));
-                                        }
+							ereport(ERROR,
+									(errcode(ERRCODE_DATATYPE_MISMATCH),
+									 errmsg("remote query result rowtype does not match "
+										    "the specified FROM clause rowtype"),
+									 errhint("use text type instead")));
+					}
 
 					pq_getmsgend(&msg);
 
@@ -523,7 +522,7 @@ pg_background_result(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_CONNECTION_FAILURE),
 				 errmsg("lost connection to worker process with PID %d",
-					pid)));
+				 pid)));
 
 	/* If no data rows, return the command tags instead. */
 	if (!state->has_row_description)
@@ -537,7 +536,7 @@ pg_background_result(PG_FUNCTION_ARGS)
 			ereport(ERROR,
 					(errcode(ERRCODE_DATATYPE_MISMATCH),
 					 errmsg("remote query did not return a result set, but "
-							"result rowtype is not a single text column")));
+						    "result rowtype is not a single text column")));
 		if (state->command_tags != NIL)
 		{
 			char *tag = linitial(state->command_tags);
@@ -550,7 +549,7 @@ pg_background_result(PG_FUNCTION_ARGS)
 			isnull = false;
 			result = heap_form_tuple(tupdesc, &value, &isnull);
 			SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(result));
-		}			
+		}
 	}
 
 	/* We're done! */
@@ -574,7 +573,7 @@ form_result_tuple(pg_background_result_state *state, TupleDesc tupdesc,
 
 	if (!state->has_row_description)
 		elog(ERROR, "DataRow not preceded by RowDescription");
-   	if (natts != tupdesc->natts)
+	if (natts != tupdesc->natts)
 		elog(ERROR, "malformed DataRow");
 	if (natts > 0)
 	{
@@ -703,62 +702,62 @@ check_rights(pg_background_worker_info *info)
 	if (!has_privs_of_role(current_user_id, info->current_user_id))
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-			 errmsg("permission denied for background worker with PID \"%d\"",
+				 errmsg("permission denied for background worker with PID \"%d\"",
 						info->pid)));
 }
 
 /*
-  Save worker information for future IPC.
+ * Save worker information for future IPC.
  */
 static void
 save_worker_info(pid_t pid, dsm_segment *seg, BackgroundWorkerHandle *handle,
-                                 shm_mq_handle *responseq)
+				 shm_mq_handle *responseq)
 {
-        pg_background_worker_info *info;
-        Oid current_user_id;
-        int     sec_context;
+	pg_background_worker_info *info;
+	Oid current_user_id;
+	int     sec_context;
 
-        /* If the hash table hasn't been set up yet, do that now. */
-        if (worker_hash == NULL)
-        {
-                HASHCTL ctl;
+	/* If the hash table hasn't been set up yet, do that now. */
+	if (worker_hash == NULL)
+	{
+		HASHCTL ctl;
 
-                ctl.keysize = sizeof(pid_t);
-                ctl.entrysize = sizeof(pg_background_worker_info);
-                worker_hash = hash_create("pg_background worker_hash", 8, &ctl,
-                                          HASH_BLOBS | HASH_ELEM);
-        }
+		ctl.keysize = sizeof(pid_t);
+		ctl.entrysize = sizeof(pg_background_worker_info);
+		worker_hash = hash_create("pg_background worker_hash", 8, &ctl,
+								  HASH_BLOBS | HASH_ELEM);
+	}
 
-        /* Get current authentication information. */
-        GetUserIdAndSecContext(&current_user_id, &sec_context);
+	/* Get current authentication information. */
+	GetUserIdAndSecContext(&current_user_id, &sec_context);
 
-        /*
-         * In the unlikely event that there's an older worker with this PID,
-         * just detach it - unless it has a different user ID than the
-         * currently-active one, in which case someone might be trying to pull
-         * a fast one.  Let's kill the backend to make sure we don't break
-         * anyone's expectations.
-         */
-        if ((info = find_worker_info(pid)) != NULL)
-        {
-                if (current_user_id != info->current_user_id)
-                        ereport(FATAL,
-                                (errcode(ERRCODE_DUPLICATE_OBJECT),
-                         errmsg("background worker with PID \"%d\" already exists",
-                                                pid)));
-                dsm_detach(info->seg);
-        }
+	/*
+	 * In the unlikely event that there's an older worker with this PID,
+	 * just detach it - unless it has a different user ID than the
+	 * currently-active one, in which case someone might be trying to pull
+	 * a fast one.  Let's kill the backend to make sure we don't break
+	 * anyone's expectations.
+	 */
+	if ((info = find_worker_info(pid)) != NULL)
+	{
+		if (current_user_id != info->current_user_id)
+			ereport(FATAL,
+					(errcode(ERRCODE_DUPLICATE_OBJECT),
+					 errmsg("background worker with PID \"%d\" already exists",
+						    pid)));
+		dsm_detach(info->seg);
+	}
 
-        /* When the DSM is unmapped, clean everything up. */
-        on_dsm_detach(seg, cleanup_worker_info, Int32GetDatum(pid));
+	/* When the DSM is unmapped, clean everything up. */
+	on_dsm_detach(seg, cleanup_worker_info, Int32GetDatum(pid));
 
-        /* Create a new entry for this worker. */
-        info = hash_search(worker_hash, (void *) &pid, HASH_ENTER, NULL);
-        info->seg = seg;
-        info->handle = handle;
+	/* Create a new entry for this worker. */
+	info = hash_search(worker_hash, (void *) &pid, HASH_ENTER, NULL);
+	info->seg = seg;
+	info->handle = handle;
 	info->current_user_id = current_user_id;
-        info->responseq = responseq;
-        info->consumed = false;
+	info->responseq = responseq;
+	info->consumed = false;
 }
 
 /*
@@ -771,8 +770,6 @@ pg_background_error_callback(void *arg)
 
 	errcontext("background worker, pid %d", pid);
 }
-
-
 
 /*
  * Background worker entrypoint.
@@ -800,7 +797,7 @@ pg_background_worker_main(Datum main_arg)
 												 ALLOCSET_DEFAULT_MINSIZE,
 												 ALLOCSET_DEFAULT_INITSIZE,
 												 ALLOCSET_DEFAULT_MAXSIZE);
-	
+
 
 	/* Connect to the dynamic shared memory segment. */
 	seg = dsm_attach(DatumGetInt32(main_arg));
@@ -815,18 +812,18 @@ pg_background_worker_main(Datum main_arg)
 			   errmsg("bad magic number in dynamic shared memory segment")));
 
 	/* Find data structures in dynamic shared memory. */
-	#if PG_VERSION_NUM < 100000
-		fdata = shm_toc_lookup(toc, PG_BACKGROUND_KEY_FIXED_DATA);
-		sql = shm_toc_lookup(toc, PG_BACKGROUND_KEY_SQL);
-		gucstate = shm_toc_lookup(toc, PG_BACKGROUND_KEY_GUC);
-		mq = shm_toc_lookup(toc, PG_BACKGROUND_KEY_QUEUE);
-	#else
-                fdata = shm_toc_lookup(toc, PG_BACKGROUND_KEY_FIXED_DATA,false);
-                sql = shm_toc_lookup(toc, PG_BACKGROUND_KEY_SQL,false);
-                gucstate = shm_toc_lookup(toc, PG_BACKGROUND_KEY_GUC,false);
-                mq = shm_toc_lookup(toc, PG_BACKGROUND_KEY_QUEUE,false);
+#if PG_VERSION_NUM < 100000
+	fdata = shm_toc_lookup(toc, PG_BACKGROUND_KEY_FIXED_DATA);
+	sql = shm_toc_lookup(toc, PG_BACKGROUND_KEY_SQL);
+	gucstate = shm_toc_lookup(toc, PG_BACKGROUND_KEY_GUC);
+	mq = shm_toc_lookup(toc, PG_BACKGROUND_KEY_QUEUE);
+#else
+	fdata = shm_toc_lookup(toc, PG_BACKGROUND_KEY_FIXED_DATA,false);
+	sql = shm_toc_lookup(toc, PG_BACKGROUND_KEY_SQL,false);
+	gucstate = shm_toc_lookup(toc, PG_BACKGROUND_KEY_GUC,false);
+	mq = shm_toc_lookup(toc, PG_BACKGROUND_KEY_QUEUE,false);
+#endif
 
-	#endif
 	shm_mq_set_sender(mq, MyProc);
 	responseq = shm_mq_attach(mq, seg, NULL);
 
@@ -844,13 +841,14 @@ pg_background_worker_main(Datum main_arg)
 	 * be a variant of BackgroundWorkerInitializeConnection that accepts OIDs
 	 * rather than strings.
 	 */
-	#if PG_VERSION_NUM < 110000
-            BackgroundWorkerInitializeConnection(NameStr(fdata->database),
-                                                                                 NameStr(fdata->authenticated_user));
-    #else
-            BackgroundWorkerInitializeConnection(NameStr(fdata->database),
-                                                                                 NameStr(fdata->authenticated_user), BGWORKER_BYPASS_ALLOWCONN);
-    #endif
+#if PG_VERSION_NUM < 110000
+	BackgroundWorkerInitializeConnection(NameStr(fdata->database),
+										 NameStr(fdata->authenticated_user));
+#else
+	BackgroundWorkerInitializeConnection(NameStr(fdata->database),
+										 NameStr(fdata->authenticated_user),
+										 BGWORKER_BYPASS_ALLOWCONN);
+#endif
 
 	if (fdata->database_id != MyDatabaseId ||
 		fdata->authenticated_user_id != GetAuthenticatedUserId())
@@ -868,7 +866,7 @@ pg_background_worker_main(Datum main_arg)
 	/* Prepare to execute the query. */
 	SetCurrentStatementStartTimestamp();
 	debug_query_string = sql;
-   	pgstat_report_activity(STATE_RUNNING, sql);
+	pgstat_report_activity(STATE_RUNNING, sql);
 	StartTransactionCommand();
 	if (StatementTimeout > 0)
 		enable_timeout_after(STATEMENT_TIMEOUT, StatementTimeout);
@@ -882,7 +880,7 @@ pg_background_worker_main(Datum main_arg)
 	disable_timeout(STATEMENT_TIMEOUT, false);
 	CommitTransactionCommand();
 	ProcessCompletedNotifies();
-   	pgstat_report_activity(STATE_IDLE, sql);
+	pgstat_report_activity(STATE_IDLE, sql);
 	pgstat_report_stat(true);
 
 	/* Signal that we are done. */
@@ -952,23 +950,23 @@ execute_sql_string(const char *sql)
 	 */
 	foreach(lc1, raw_parsetree_list)
 	{
-		#if PG_VERSION_NUM < 100000
-			Node	   *parsetree = (Node *) lfirst(lc1);
-		#else
-			RawStmt *parsetree = (RawStmt *)  lfirst(lc1);
-		#endif
-		#if PG_VERSION_NUM >= 130000
-			CommandTag commandTag;
-		#else
-			const char *commandTag;
-		#endif
-		#if PG_VERSION_NUM < 130000
-        char        completionTag[COMPLETION_TAG_BUFSIZE];
-		#else
+#if PG_VERSION_NUM < 100000
+		Node	   *parsetree = (Node *) lfirst(lc1);
+#else
+		RawStmt *parsetree = (RawStmt *)  lfirst(lc1);
+#endif
+#if PG_VERSION_NUM >= 130000
+		CommandTag commandTag;
+#else
+		const char *commandTag;
+#endif
+#if PG_VERSION_NUM < 130000
+		char        completionTag[COMPLETION_TAG_BUFSIZE];
+#else
 		QueryCompletion qc;
-		#endif
-        List       *querytree_list,
-                   *plantree_list;
+#endif
+		List       *querytree_list,
+				   *plantree_list;
 		bool		snapshot_set = false;
 		Portal		portal;
 		DestReceiver *receiver;
@@ -984,24 +982,24 @@ execute_sql_string(const char *sql)
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("transaction control statements are not allowed in pg_background")));
 
-        /*
-         * Get the command name for use in status display (it also becomes the
-         * default completion tag, down inside PortalRun).  Set ps_status and
-         * do any special start-of-SQL-command processing needed by the
-         * destination.
-         */
-	#if PG_VERSION_NUM < 100000 || PG_VERSION_NUM >= 130000
+		/*
+		 * Get the command name for use in status display (it also becomes the
+		 * default completion tag, down inside PortalRun).  Set ps_status and
+		 * do any special start-of-SQL-command processing needed by the
+		 * destination.
+		 */
+#if PG_VERSION_NUM < 100000 || PG_VERSION_NUM >= 130000
 		commandTag = CreateCommandTag((Node *) parsetree);
-	#else
+#else
 		commandTag = CreateCommandTag(parsetree->stmt);
-	#endif
-	#if PG_VERSION_NUM < 130000
+#endif
+#if PG_VERSION_NUM < 130000
 		set_ps_display(commandTag, false);
-	#else
+#else
 		set_ps_display(GetCommandTagName(commandTag));
-	#endif
+#endif
 
-        BeginCommand(commandTag, DestNone);
+		BeginCommand(commandTag, DestNone);
 
 		/* Set up a snapshot if parse analysis/planning will need one. */
 		if (analyze_requires_snapshot(parsetree))
@@ -1018,31 +1016,31 @@ execute_sql_string(const char *sql)
 		 * perform internal transaction control.
 		 */
 		oldcontext = MemoryContextSwitchTo(parsecontext);
-                #if PG_VERSION_NUM >= 100000
-                        querytree_list = pg_analyze_and_rewrite(parsetree, sql, NULL, 0,NULL);
-                #else
-                        querytree_list = pg_analyze_and_rewrite(parsetree, sql, NULL, 0);
-                #endif
+#if PG_VERSION_NUM >= 100000
+		querytree_list = pg_analyze_and_rewrite(parsetree, sql, NULL, 0, NULL);
+#else
+		querytree_list = pg_analyze_and_rewrite(parsetree, sql, NULL, 0);
+#endif
 
 		plantree_list = pg_plan_queries(querytree_list,
-			#if PG_VERSION_NUM >= 130000
+#if PG_VERSION_NUM >= 130000
 				sql,
-			#endif
+#endif
 				0, NULL);
 
 		/* Done with the snapshot used for parsing/planning */
-        if (snapshot_set)
-            PopActiveSnapshot();
+		if (snapshot_set)
+			PopActiveSnapshot();
 
-        /* If we got a cancel signal in analysis or planning, quit */
-        CHECK_FOR_INTERRUPTS();
+		/* If we got a cancel signal in analysis or planning, quit */
+		CHECK_FOR_INTERRUPTS();
 
 		/*
 		 * Execute the query using the unnamed portal.
 		 */
-        portal = CreatePortal("", true, true);
-        /* Don't display the portal in pg_cursors */
-        portal->visible = false;
+		portal = CreatePortal("", true, true);
+		/* Don't display the portal in pg_cursors */
+		portal->visible = false;
 		PortalDefineQuery(portal, NULL, sql, commandTag, plantree_list, NULL);
 		PortalStart(portal, NULL, 0, InvalidSnapshot);
 		PortalSetResultFormat(portal, 1, &format);		/* binary format */
@@ -1071,16 +1069,16 @@ execute_sql_string(const char *sql)
 		MemoryContextSwitchTo(oldcontext);
 
 		/* Here's where we actually execute the command. */
-		#if PG_VERSION_NUM < 100000
+#if PG_VERSION_NUM < 100000
 			(void) PortalRun(portal, FETCH_ALL, isTopLevel, receiver, receiver,
-                         	completionTag);
-		#elif PG_VERSION_NUM < 130000
-			(void) PortalRun(portal, FETCH_ALL, isTopLevel,true, receiver, receiver,
-                                completionTag);
-		#else
-			(void) PortalRun(portal, FETCH_ALL, isTopLevel,true, receiver, receiver,
-                                &qc);
-		#endif
+							 completionTag);
+#elif PG_VERSION_NUM < 130000
+			(void) PortalRun(portal, FETCH_ALL, isTopLevel, true, receiver,
+							 receiver, completionTag);
+#else
+			(void) PortalRun(portal, FETCH_ALL, isTopLevel, true, receiver,
+							 receiver, &qc);
+#endif
 
 		/* Clean up the receiver. */
 		(*receiver->rDestroy) (receiver);
@@ -1090,11 +1088,11 @@ execute_sql_string(const char *sql)
 		 * results.  The user backend will report these in the absence of
 		 * any true query results.
 		 */
-		#if PG_VERSION_NUM < 130000
+#if PG_VERSION_NUM < 130000
 		EndCommand(completionTag, DestRemote);
-		#else
+#else
 		EndCommand(&qc, DestRemote, false);
-		#endif
+#endif
 
 		/* Clean up the portal. */
 		PortalDrop(portal, false);
