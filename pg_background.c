@@ -46,6 +46,8 @@
 #include "windows/pg_background_win.h"
 #endif // WIN32
 
+#include "pg_background.h"
+
 
 /* Table-of-contents constants for our dynamic shared memory segment. */
 #define PG_BACKGROUND_MAGIC				0x50674267
@@ -333,15 +335,9 @@ pg_background_result(PG_FUNCTION_ARGS)
 			{
 				Oid	receive_function_id;
 
-#if (PG_VERSION_NUM <110000)
-				getTypeBinaryInputInfo(funcctx->tuple_desc->attrs[i]->atttypid,
+				getTypeBinaryInputInfo(TupleDescAttr(funcctx->tuple_desc, i)->atttypid,
 									   &receive_function_id,
 									   &state->typioparams[i]);
-#else
-				getTypeBinaryInputInfo(funcctx->tuple_desc->attrs[i].atttypid,
-									   &receive_function_id,
-									   &state->typioparams[i]);
-#endif
 
 				fmgr_info(receive_function_id, &state->receive_functions[i]);
 			}
@@ -446,28 +442,22 @@ pg_background_result(PG_FUNCTION_ARGS)
 
 						if (exists_binary_recv_fn(type_id))
 						{
-#if (PG_VERSION_NUM <110000)
-							if (type_id != tupdesc->attrs[i]->atttypid)
-#else
-							if (type_id != tupdesc->attrs[i].atttypid)
-#endif
-
+							if (type_id != TupleDescAttr(tupdesc, i)->atttypid)
+							{
 								ereport(ERROR,
 										(errcode(ERRCODE_DATATYPE_MISMATCH),
 										 errmsg("remote query result rowtype does not match "
 											    "the specified FROM clause rowtype")));
+							}
 						}
-#if (PG_VERSION_NUM < 110000)
-						else if(tupdesc->attrs[i]->atttypid != TEXTOID)
-#else
-						else if(tupdesc->attrs[i].atttypid != TEXTOID)
-#endif
-
+						else if(TupleDescAttr(tupdesc, i)->atttypid != TEXTOID)
+						{
 							ereport(ERROR,
 									(errcode(ERRCODE_DATATYPE_MISMATCH),
 									 errmsg("remote query result rowtype does not match "
 										    "the specified FROM clause rowtype"),
 									 errhint("use text type instead")));
+						}
 					}
 
 					pq_getmsgend(&msg);
@@ -527,16 +517,13 @@ pg_background_result(PG_FUNCTION_ARGS)
 	/* If no data rows, return the command tags instead. */
 	if (!state->has_row_description)
 	{
-#if (PG_VERSION_NUM < 110000)
-		if (tupdesc->natts != 1 || tupdesc->attrs[0]->atttypid != TEXTOID)
-#else
-		if (tupdesc->natts != 1 || tupdesc->attrs[0].atttypid != TEXTOID)
-#endif
-
+		if (tupdesc->natts != 1 || TupleDescAttr(tupdesc, 0)->atttypid != TEXTOID)
+		{
 			ereport(ERROR,
 					(errcode(ERRCODE_DATATYPE_MISMATCH),
 					 errmsg("remote query did not return a result set, but "
 						    "result rowtype is not a single text column")));
+		}
 		if (state->command_tags != NIL)
 		{
 			char *tag = linitial(state->command_tags);
@@ -588,34 +575,20 @@ form_result_tuple(pg_background_result_state *state, TupleDesc tupdesc,
 
 		if (bytes < 0)
 		{
-#if (PG_VERSION_NUM < 110000)
 			values[i] = ReceiveFunctionCall(&state->receive_functions[i],
 											NULL,
 											state->typioparams[i],
-											tupdesc->attrs[i]->atttypmod);
-#else
-			values[i] = ReceiveFunctionCall(&state->receive_functions[i],
-											NULL,
-											state->typioparams[i],
-											tupdesc->attrs[i].atttypmod);
-#endif
+											TupleDescAttr(tupdesc, i)->atttypmod);
 			isnull[i] = true;
 		}
 		else
 		{
 			resetStringInfo(&buf);
 			appendBinaryStringInfo(&buf, pq_getmsgbytes(msg, bytes), bytes);
-#if (PG_VERSION_NUM < 110000)
 			values[i] = ReceiveFunctionCall(&state->receive_functions[i],
 											&buf,
 											state->typioparams[i],
-											tupdesc->attrs[i]->atttypmod);
-#else
-			values[i] = ReceiveFunctionCall(&state->receive_functions[i],
-											&buf,
-											state->typioparams[i],
-											tupdesc->attrs[i].atttypmod);
-#endif
+											TupleDescAttr(tupdesc, i)->atttypmod);
 			isnull[i] = false;
 		}
 	}
@@ -812,17 +785,10 @@ pg_background_worker_main(Datum main_arg)
 			   errmsg("bad magic number in dynamic shared memory segment")));
 
 	/* Find data structures in dynamic shared memory. */
-#if PG_VERSION_NUM < 100000
-	fdata = shm_toc_lookup(toc, PG_BACKGROUND_KEY_FIXED_DATA);
-	sql = shm_toc_lookup(toc, PG_BACKGROUND_KEY_SQL);
-	gucstate = shm_toc_lookup(toc, PG_BACKGROUND_KEY_GUC);
-	mq = shm_toc_lookup(toc, PG_BACKGROUND_KEY_QUEUE);
-#else
-	fdata = shm_toc_lookup(toc, PG_BACKGROUND_KEY_FIXED_DATA,false);
-	sql = shm_toc_lookup(toc, PG_BACKGROUND_KEY_SQL,false);
-	gucstate = shm_toc_lookup(toc, PG_BACKGROUND_KEY_GUC,false);
-	mq = shm_toc_lookup(toc, PG_BACKGROUND_KEY_QUEUE,false);
-#endif
+	fdata = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_FIXED_DATA, false);
+	sql = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_SQL, false);
+	gucstate = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_GUC, false);
+	mq = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_QUEUE, false);
 
 	shm_mq_set_sender(mq, MyProc);
 	responseq = shm_mq_attach(mq, seg, NULL);
@@ -841,14 +807,12 @@ pg_background_worker_main(Datum main_arg)
 	 * be a variant of BackgroundWorkerInitializeConnection that accepts OIDs
 	 * rather than strings.
 	 */
-#if PG_VERSION_NUM < 110000
 	BackgroundWorkerInitializeConnection(NameStr(fdata->database),
-										 NameStr(fdata->authenticated_user));
-#else
-	BackgroundWorkerInitializeConnection(NameStr(fdata->database),
-										 NameStr(fdata->authenticated_user),
-										 BGWORKER_BYPASS_ALLOWCONN);
+										 NameStr(fdata->authenticated_user)
+#if PG_VERSION_NUM >= 110000
+										 , BGWORKER_BYPASS_ALLOWCONN
 #endif
+										);
 
 	if (fdata->database_id != MyDatabaseId ||
 		fdata->authenticated_user_id != GetAuthenticatedUserId())
@@ -988,16 +952,8 @@ execute_sql_string(const char *sql)
 		 * do any special start-of-SQL-command processing needed by the
 		 * destination.
 		 */
-#if PG_VERSION_NUM < 100000 || PG_VERSION_NUM >= 130000
-		commandTag = CreateCommandTag((Node *) parsetree);
-#else
-		commandTag = CreateCommandTag(parsetree->stmt);
-#endif
-#if PG_VERSION_NUM < 130000
-		set_ps_display(commandTag, false);
-#else
-		set_ps_display(GetCommandTagName(commandTag));
-#endif
+		commandTag = CreateCommandTag_compat(parsetree);
+		set_ps_display_compat(GetCommandTagName(commandTag));
 
 		BeginCommand(commandTag, DestNone);
 
@@ -1016,11 +972,8 @@ execute_sql_string(const char *sql)
 		 * perform internal transaction control.
 		 */
 		oldcontext = MemoryContextSwitchTo(parsecontext);
-#if PG_VERSION_NUM >= 100000
-		querytree_list = pg_analyze_and_rewrite(parsetree, sql, NULL, 0, NULL);
-#else
-		querytree_list = pg_analyze_and_rewrite(parsetree, sql, NULL, 0);
-#endif
+		querytree_list = pg_analyze_and_rewrite_compat(parsetree, sql, NULL, 0,
+													   NULL);
 
 		plantree_list = pg_plan_queries(querytree_list,
 #if PG_VERSION_NUM >= 130000
