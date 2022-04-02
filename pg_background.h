@@ -30,7 +30,10 @@
 #define set_ps_display_compat(tag) set_ps_display((tag))
 #endif
 
-#if PG_VERSION_NUM >= 100000
+#if PG_VERSION_NUM >= 150000
+#define pg_analyze_and_rewrite_compat(parse, string, types, num, env) \
+	pg_analyze_and_rewrite_fixedparams((parse), (string), (types), (num), (env))
+#elif PG_VERSION_NUM >= 100000
 #define pg_analyze_and_rewrite_compat(parse, string, types, num, env) \
 	pg_analyze_and_rewrite((parse), (string), (types), (num), (env))
 #else

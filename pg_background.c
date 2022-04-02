@@ -843,7 +843,9 @@ pg_background_worker_main(Datum main_arg)
 	/* Post-execution cleanup. */
 	disable_timeout(STATEMENT_TIMEOUT, false);
 	CommitTransactionCommand();
+#if PG_VERSION_NUM < 150000
 	ProcessCompletedNotifies();
+#endif
 	pgstat_report_activity(STATE_IDLE, sql);
 	pgstat_report_stat(true);
 
