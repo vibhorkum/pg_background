@@ -13,6 +13,7 @@ This module comes with following SQL APIs:
 
 1. ***pg_background_launch*** : This API takes SQL command, which user wants to execute, and size of queue buffer. This function returns the process id of background worker.
 2. ***pg_background_result*** : This API takes the process id as input parameter and returns the result of command executed throught the background worker.
+2. ***pg_background_discard_result*** : This API takes the process id as input parameter and discards the result of command executed throught the background worker, only emitted any error message.
 3. ***pg_background_detach*** : This API takes the process id and detach the background process which is waiting for user to read its results.
 
 ## Installation steps
@@ -39,6 +40,11 @@ SELECT pg_background_launch('SQL COMMAND');
 To fetch the result of command executed background worker, user can use following command:
 ```sql
 SELECT pg_background_result(pid)
+```
+
+Alternatively, to discard the result but still get error messages if any, user can use following command:
+```sql
+SELECT pg_background_discard_result(pid)
 ```
 
 **pid is process id returned by pg_background_launch function**
@@ -111,5 +117,15 @@ CPU 0.00s/0.00u sec elapsed 0.00 sec.
  result 
 --------
  VACUUM
+(1 row)
+```
+
+Or to only get the error data:
+```sql
+SELECT * FROM pg_background_discard_result(pg_background_launch('DROP TABLE IF EXISTS table_to_drop'));
+NOTICE:  table "table_to_drop" does not exist, skipping
+ pg_background_discard_result
+------------------------------
+
 (1 row)
 ```

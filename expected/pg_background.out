@@ -12,3 +12,10 @@ SELECT * FROM t;
   1
 (1 row)
 
+SELECT * FROM pg_background_discard_result(pg_background_launch($$DROP TABLE IF EXISTS not_a_table; SELECT 1, 'val'$$));
+NOTICE:  table "not_a_table" does not exist, skipping
+ pg_background_discard_result 
+------------------------------
+ 
+(1 row)
+
