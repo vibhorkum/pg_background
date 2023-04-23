@@ -100,13 +100,8 @@ static void save_worker_info(pid_t pid, dsm_segment *seg,
 							 shm_mq_handle *responseq);
 static void pg_background_error_callback(void *arg);
 
-static Datum pg_background_process_result(FunctionCallInfo fcinfo, int32 pid,
-										  bool emit_rows);
 static HeapTuple form_result_tuple(pg_background_result_state *state,
 								   TupleDesc tupdesc, StringInfo msg);
-static TupleDesc pg_background_setup_tupdesc(FunctionCallInfo fcinfo,
-											 FuncCallContext *funcctx,
-											 pg_background_result_state *state);
 
 static void handle_sigterm(SIGNAL_ARGS);
 static void execute_sql_string(const char *sql);
@@ -115,7 +110,6 @@ static bool exists_binary_recv_fn(Oid type);
 PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(pg_background_launch);
-PG_FUNCTION_INFO_V1(pg_background_discard_result);
 PG_FUNCTION_INFO_V1(pg_background_result);
 PG_FUNCTION_INFO_V1(pg_background_detach);
 
@@ -271,55 +265,27 @@ pg_background_launch(PG_FUNCTION_ARGS)
 
 /*
  * Retrieve the results of a background query previously launched in this
- * session, discarding all except error data.
- */
-Datum
-pg_background_discard_result(PG_FUNCTION_ARGS)
-{
-	int32		pid = PG_GETARG_INT32(0);
-
-	return pg_background_process_result(fcinfo, pid, false);
-}
-
-/*
- * Retrieve the results of a background query previously launched in this
  * session.
  */
 Datum
 pg_background_result(PG_FUNCTION_ARGS)
 {
 	int32		pid = PG_GETARG_INT32(0);
-
-	return pg_background_process_result(fcinfo, pid, true);
-}
-
-/*
- * Internal processing of the message queue for the given worker.
- * This will consume all the received message and emit data as wanted.
- *
- * If emit_rows is true, it will emit all the received messages using the
- * ValuePerCall STF interface.
-
- * Otherwise, it will only rethrow all error data and silently discard all data
- * rows (while still consuming them).  This mode is not an SRF and will simply
- * returns void.
- */
-static Datum
-pg_background_process_result(FunctionCallInfo fcinfo, int32 pid, bool emit_rows)
-{
 	shm_mq_result	res;
-	pg_background_worker_info *info = NULL;
 	FuncCallContext *funcctx;
 	TupleDesc	tupdesc;
 	StringInfoData	msg;
-	pg_background_result_state *state = NULL;
+	pg_background_result_state *state;
 
-	/*
-	 * First, retrieve the worker info and do all underlying sanity checks.
-	 */
-	if (!emit_rows || SRF_IS_FIRSTCALL())
+	/* First-time setup. */
+	if (SRF_IS_FIRSTCALL())
 	{
+		MemoryContext	oldcontext;
+		pg_background_worker_info *info;
 		dsm_segment *seg;
+
+		funcctx = SRF_FIRSTCALL_INIT();
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
 
 		/* See if we have a connection to the specified PID. */
 		if ((info = find_worker_info(pid)) == NULL)
@@ -343,47 +309,46 @@ pg_background_process_result(FunctionCallInfo fcinfo, int32 pid, bool emit_rows)
 		seg = info->seg;
 
 		dsm_unpin_mapping(seg);
-	}
 
-	/* First-time setup. */
-	if (!emit_rows)
-	{
-		/*
-		 * If we don't emit the rows, we can allocate the state in current
-		 * context
-		 */
-		state = palloc0(sizeof(pg_background_result_state));
-		state->info = info;
-	}
-	else if (emit_rows && SRF_IS_FIRSTCALL())
-	{
-		MemoryContext	oldcontext;
-
-		funcctx = SRF_FIRSTCALL_INIT();
-		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+		/* Set up tuple-descriptor based on colum definition list. */
+		if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("function returning record called in context "
+							"that cannot accept type record"),
+					 errhint("Try calling the function in the FROM clause "
+							 "using a column definition list.")));
+		funcctx->tuple_desc = BlessTupleDesc(tupdesc);
 
 		/* Cache state that will be needed on every call. */
-		Assert(!state);
 		state = palloc0(sizeof(pg_background_result_state));
-
-		/* Set up tuple-descriptor based on colum definition list, if needed. */
-		if (emit_rows)
-			tupdesc = pg_background_setup_tupdesc(fcinfo, funcctx, state);
-
-		Assert(info);
 		state->info = info;
+		if (funcctx->tuple_desc->natts > 0)
+		{
+			int	natts = funcctx->tuple_desc->natts;
+			int	i;
+
+			state->receive_functions = palloc(sizeof(FmgrInfo) * natts);
+			state->typioparams = palloc(sizeof(Oid) * natts);
+
+			for (i = 0;	i < natts; ++i)
+			{
+				Oid	receive_function_id;
+
+				getTypeBinaryInputInfo(TupleDescAttr(funcctx->tuple_desc, i)->atttypid,
+									   &receive_function_id,
+									   &state->typioparams[i]);
+
+				fmgr_info(receive_function_id, &state->receive_functions[i]);
+			}
+		}
 		funcctx->user_fctx = state;
 
 		MemoryContextSwitchTo(oldcontext);
 	}
-
-	/* In SRF mode, we need to retrieve the previously initialized state. */
-	if (emit_rows)
-	{
-		funcctx = SRF_PERCALL_SETUP();
-		tupdesc = funcctx->tuple_desc;
-		state = funcctx->user_fctx;
-	}
+	funcctx = SRF_PERCALL_SETUP();
+	tupdesc = funcctx->tuple_desc;
+	state = funcctx->user_fctx;
 
 	/* Initialize message buffer. */
 	initStringInfo(&msg);
@@ -454,21 +419,14 @@ pg_background_process_result(FunctionCallInfo fcinfo, int32 pid, bool emit_rows)
 					int16	natts = pq_getmsgint(&msg, 2);
 					int16	i;
 
-					/*
-					 * We only need to do the sanity checks on the tupledesc if
-					 * we emit the rows.
-					 */
-					if (emit_rows)
-					{
-						if (state->has_row_description)
-							elog(ERROR, "multiple RowDescription messages");
-						state->has_row_description = true;
-						if (natts != tupdesc->natts)
-							ereport(ERROR,
-									(errcode(ERRCODE_DATATYPE_MISMATCH),
-									 errmsg("remote query result rowtype does not match "
-										"the specified FROM clause rowtype")));
-					}
+					if (state->has_row_description)
+						elog(ERROR, "multiple RowDescription messages");
+					state->has_row_description = true;
+					if (natts != tupdesc->natts)
+						ereport(ERROR,
+								(errcode(ERRCODE_DATATYPE_MISMATCH),
+								 errmsg("remote query result rowtype does not match "
+									"the specified FROM clause rowtype")));
 
 					for (i = 0; i < natts; ++i)
 					{
@@ -481,13 +439,6 @@ pg_background_process_result(FunctionCallInfo fcinfo, int32 pid, bool emit_rows)
 						(void) pq_getmsgint(&msg, 2);	/* type length */
 						(void) pq_getmsgint(&msg, 4);	/* typmod */
 						(void) pq_getmsgint(&msg, 2);	/* format code */
-
-						/*
-						 * Ignore the type sanity check after consuming the
-						 * data if caller doesn't want to emit the rows.
-						 */
-						if (!emit_rows)
-							continue;
 
 						if (exists_binary_recv_fn(type_id))
 						{
@@ -518,13 +469,6 @@ pg_background_process_result(FunctionCallInfo fcinfo, int32 pid, bool emit_rows)
 					/* Handle DataRow message. */
 					HeapTuple	result;
 
-					/*
-					 * Ignore the message if caller doesn't want to emit the
-					 * rows.
-					 */
-					if (!emit_rows)
-						break;
-
 					result = form_result_tuple(state, tupdesc, &msg);
 					SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(result));
 				}
@@ -533,13 +477,6 @@ pg_background_process_result(FunctionCallInfo fcinfo, int32 pid, bool emit_rows)
 					/* Handle CommandComplete message. */
 					MemoryContext	oldcontext;
 					const char  *tag = pq_getmsgstring(&msg);
-
-					/*
-					 * Ignore the message after consuming it caller doesn't
-					 * want to emit data.
-					 */
-					if (!emit_rows)
-						break;
 
 					oldcontext =
 						MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
@@ -577,11 +514,8 @@ pg_background_process_result(FunctionCallInfo fcinfo, int32 pid, bool emit_rows)
 				 errmsg("lost connection to worker process with PID %d",
 				 pid)));
 
-	/*
-	 * If no data rows, return the command tags instead, if callers want to
-	 * output rows.
-	 */
-	if (emit_rows && !state->has_row_description)
+	/* If no data rows, return the command tags instead. */
+	if (!state->has_row_description)
 	{
 		if (tupdesc->natts != 1 || TupleDescAttr(tupdesc, 0)->atttypid != TEXTOID)
 		{
@@ -607,10 +541,7 @@ pg_background_process_result(FunctionCallInfo fcinfo, int32 pid, bool emit_rows)
 
 	/* We're done! */
 	dsm_detach(state->info->seg);
-	if (emit_rows)
-		SRF_RETURN_DONE(funcctx);
-	else
-		PG_RETURN_VOID();
+	SRF_RETURN_DONE(funcctx);
 }
 
 /*
@@ -665,45 +596,6 @@ form_result_tuple(pg_background_result_state *state, TupleDesc tupdesc,
 	pq_getmsgend(msg);
 
 	return heap_form_tuple(tupdesc, values, isnull);
-}
-
-static TupleDesc
-pg_background_setup_tupdesc(FunctionCallInfo fcinfo,
-							FuncCallContext *funcctx,
-							pg_background_result_state *state)
-{
-	TupleDesc tupdesc;
-
-	if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("function returning record called in context "
-						"that cannot accept type record"),
-				 errhint("Try calling the function in the FROM clause "
-						 "using a column definition list.")));
-	funcctx->tuple_desc = BlessTupleDesc(tupdesc);
-
-	if (funcctx->tuple_desc->natts > 0)
-	{
-		int	natts = funcctx->tuple_desc->natts;
-		int	i;
-
-		state->receive_functions = palloc(sizeof(FmgrInfo) * natts);
-		state->typioparams = palloc(sizeof(Oid) * natts);
-
-		for (i = 0;	i < natts; ++i)
-		{
-			Oid	receive_function_id;
-
-			getTypeBinaryInputInfo(TupleDescAttr(funcctx->tuple_desc, i)->atttypid,
-								   &receive_function_id,
-								   &state->typioparams[i]);
-
-			fmgr_info(receive_function_id, &state->receive_functions[i]);
-		}
-	}
-
-	return tupdesc;
 }
 
 /*
