@@ -113,7 +113,7 @@ PG_FUNCTION_INFO_V1(pg_background_launch);
 PG_FUNCTION_INFO_V1(pg_background_result);
 PG_FUNCTION_INFO_V1(pg_background_detach);
 
-void pg_background_worker_main(Datum);
+PGDLLEXPORT void pg_background_worker_main(Datum);
 
 /*
  * Start a dynamic background worker to run a user-specified SQL command.
