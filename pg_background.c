@@ -264,6 +264,36 @@ pg_background_launch(PG_FUNCTION_ARGS)
 }
 
 /*
+ * Parts of error messages received from the shared memory queue have already been translated to client encoding.
+ * In order to rethrow the error/notice received, we have to translate them back to server encoding.
+ * Not all fields are involved : have a look at EVALUATE_MESSAGE macro in elog.c, especially the translateit parameter.
+ * It's not an issue to untranslate internal messages (see errdetail_internal in elog.c),
+ * since they only use US-ASCII characters, which are common to all characters set : no translation/untranslation occurs in the end.
+ */
+static void
+throw_untranslated_error(ErrorData translated_edata)
+{
+	ErrorData untranslated_edata = translated_edata;
+
+#define UNTRANSLATE(field) if (translated_edata.field != NULL) { untranslated_edata.field = pg_client_to_server(translated_edata.field, strlen(translated_edata.field)); }
+#define FREE_UNTRANSLATED(field) if (untranslated_edata.field != translated_edata.field) { pfree(untranslated_edata.field); }
+
+	UNTRANSLATE(message);
+	UNTRANSLATE(detail);
+	UNTRANSLATE(detail_log);
+	UNTRANSLATE(hint);
+	UNTRANSLATE(context);
+
+	ThrowErrorData(&untranslated_edata);
+
+	FREE_UNTRANSLATED(message);
+	FREE_UNTRANSLATED(detail);
+	FREE_UNTRANSLATED(detail_log);
+	FREE_UNTRANSLATED(hint);
+	FREE_UNTRANSLATED(context);
+}
+
+/*
  * Retrieve the results of a background query previously launched in this
  * session.
  */
@@ -403,7 +433,7 @@ pg_background_result(PG_FUNCTION_ARGS)
 					context.arg = (void *) &pid;
 					context.previous = error_context_stack;
 					error_context_stack = &context;
-					ThrowErrorData(&edata);
+					throw_untranslated_error(edata);
 					error_context_stack = context.previous;
 
 					break;
