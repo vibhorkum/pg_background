@@ -1,6 +1,6 @@
 # Postgres Background Worker
 
-pg_background is an extension for Postgres 9.5.
+pg_background is an extension for PostgreSQL version >= 9.5.
 Initially this extension was shared by Robert Haas in PostgreSQL community for demo purpose. Some modification has been done, by me, to keep it in sync with latest version of Postgres version >=9.5. Extra error handling and command results has been added.
 
 This module allows user to arbitrary command in a background worker and gives capability to users to launch 
