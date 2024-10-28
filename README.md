@@ -181,5 +181,12 @@ INFO:  Executed command: REVOKE EXECUTE ON FUNCTION pg_background_detach(pg_cata
 
 GNU General Public License v3.0
 
-## Author information
+# Author Information
+Authors:
 Vibhor Kumar
+@a-mckinley
+@rjuju
+@svorcmar 
+@egor-rogov
+@RekGRpth
+@Hiroaki-Kubota
