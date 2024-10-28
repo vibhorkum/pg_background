@@ -183,10 +183,10 @@ GNU General Public License v3.0
 
 # Author Information
 Authors:
-Vibhor Kumar
-@a-mckinley
-@rjuju
-@svorcmar 
-@egor-rogov
-@RekGRpth
-@Hiroaki-Kubota
+* Vibhor Kumar
+* @a-mckinley
+* @rjuju
+* @svorcmar 
+* @egor-rogov
+* @RekGRpth
+* @Hiroaki-Kubota
