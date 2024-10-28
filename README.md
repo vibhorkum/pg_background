@@ -179,7 +179,7 @@ INFO:  Executed command: REVOKE EXECUTE ON FUNCTION pg_background_detach(pg_cata
 
 ## License
 
-BSD
+GNU General Public License v3.0
 
 ## Author information
 Vibhor Kumar
