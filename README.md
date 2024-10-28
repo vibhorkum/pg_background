@@ -1,49 +1,81 @@
-# Postgres Background Worker
+# pg_background: Run PostgreSQL Commands in Background Workers
 
-pg_background is an extension for PostgreSQL version >= 9.5.
-Initially this extension was shared by Robert Haas in PostgreSQL community for demo purpose. Some modification has been done, by me, to keep it in sync with latest version of Postgres version >=9.5. Extra error handling and command results has been added.
+This extension allows you to execute arbitrary SQL commands in background worker processes within PostgreSQL (version >= 9.5). It provides a convenient way to offload long-running tasks, perform operations asynchronously, and implement autonomous transactions.
 
-This module allows user to arbitrary command in a background worker and gives capability to users to launch 
+## Features
 
-1. VACUUM in background
-2. Autonomous transaction implementation better than dblink way.
-3. Allows to perform task like CREATE INDEX CONCURRENTLY from a procedural language 
+* Execute any SQL command in a background worker.
+* Retrieve the result of the background command.
+* Detach background workers to run independently.
+* Enhanced error handling and command result reporting.
+* Built-in functions for managing privileges.
 
-This module comes with following SQL APIs:
+## Installation
 
-1. ***pg_background_launch*** : This API takes SQL command, which user wants to execute, and size of queue buffer. This function returns the process id of background worker.
-2. ***pg_background_result*** : This API takes the process id as input parameter and returns the result of command executed throught the background worker.
-3. ***pg_background_detach*** : This API takes the process id and detach the background process which is waiting for user to read its results.
+1. **Prerequisites:**
+   * PostgreSQL version >= 9.5
+   * Ensure `pg_config` is in your `PATH`
 
-## Installation steps
+2. **Build and Install:**
+   ```bash
+   make
+   sudo make install
+   ```
+3. **Enable the Extension:**
+   ```bash
+    psql -h your_server -p 5432 -d your_database -c "CREATE EXTENSION pg_background;"
+   ```
 
-1. Copy the source code from repository.
-2. set pg_config binary location in PATH environment variable
-3. Execute following command to install this module
+## Usage
+### SQL API:
+
+****pg_background_launch(sql_command TEXT, queue_size INTEGER DEFAULT 65536):****
+
+Executes `sql_command` in a background worker. `queue_size` determines the message queue size (default: 65536). Returns the background worker's process ID.
+
+****pg_background_result(pid INTEGER):****
+Retrieves the result of the command executed by the background worker with process ID `pid`.
+
+****pg_background_detach(pid INTEGER):****
+Detaches the background worker with process ID `pid`, allowing it to run independently.
+
+## Examples
 ```sql
-make
-make install
-```
-After installing module, please use following command install this extension on source and target database as given below:
-```sql
-  psql -h server.hostname.org -p 5444 -c "CREATE EXTENSION pg_background;" dbname
-```
+-- Run VACUUM in the background
+SELECT pg_background_launch('VACUUM VERBOSE public.your_table');
 
-## Usage:
+-- Retrieve the result
+SELECT pg_background_result(12345); -- Replace 12345 with the actual pid
 
-To execute a command in background user can use following SQL API
-```sql
-SELECT pg_background_launch('SQL COMMAND');
+-- Run a command and wait for the result
+SELECT pg_background_result(pg_background_launch('SELECT count(*) FROM your_table'));
 ```
 
-To fetch the result of command executed background worker, user can use following command:
-```sql
-SELECT pg_background_result(pid)
+## Privilege Management
+For security, grant privileges to a dedicated role:
+```SQL
+-- Create a role
+CREATE ROLE pgbackground_role;
+
+-- Grant privileges using the built-in function
+SELECT grant_pg_background_privileges('pgbackground_role', TRUE);
+
+-- Revoke privileges
+SELECT revoke_pg_background_privileges('pgbackground_role', TRUE);
 ```
 
-**pid is process id returned by pg_background_launch function**
+## Use Cases
 
-## Example:
+***Background Tasks:*** Offload long-running tasks like VACUUM, ANALYZE, or CREATE INDEX CONCURRENTLY to background workers.
+
+***Autonomous Transactions:*** Implement autonomous transactions more effectively than with dblink.
+
+***Procedural Languages:*** Execute commands from procedural languages like PL/pgSQL without blocking.
+
+
+
+
+## More examples:
 
 ```sql
 SELECT pg_background_launch('vacuum verbose public.sales');
@@ -113,3 +145,41 @@ CPU 0.00s/0.00u sec elapsed 0.00 sec.
  VACUUM
 (1 row)
 ```
+
+Granting/Revoking permissions
+```sql
+CREATE ROLE pgbackground_role;
+CREATE ROLE
+
+SELECT grant_pg_background_privileges(user_name => 'pgbackground_role', print_commands => true);
+INFO:  Executed command: GRANT EXECUTE ON FUNCTION pg_background_launch(pg_catalog.text, pg_catalog.int4) TO pgbackground_role
+INFO:  Executed command: GRANT EXECUTE ON FUNCTION pg_background_result(pg_catalog.int4) TO pgbackground_role
+INFO:  Executed command: GRANT EXECUTE ON FUNCTION pg_background_detach(pg_catalog.int4) TO pgbackground_role
+┌────────────────────────────────┐
+│ grant_pg_background_privileges │
+├────────────────────────────────┤
+│ t                              │
+└────────────────────────────────┘
+(1 row)
+```
+
+If you want to revoke permission from a specific role, the following function can be used:
+```sql
+SELECT revoke_pg_background_privileges(user_name => 'pgbackground_role', print_commands => true);
+INFO:  Executed command: REVOKE EXECUTE ON FUNCTION pg_background_launch(pg_catalog.text, pg_catalog.int4) FROM pgbackground_role
+INFO:  Executed command: REVOKE EXECUTE ON FUNCTION pg_background_result(pg_catalog.int4) FROM pgbackground_role
+INFO:  Executed command: REVOKE EXECUTE ON FUNCTION pg_background_detach(pg_catalog.int4) FROM pgbackground_role
+┌─────────────────────────────────┐
+│ revoke_pg_background_privileges │
+├─────────────────────────────────┤
+│ t                               │
+└─────────────────────────────────┘
+(1 row)
+```
+
+## License
+
+GNU General Public License v3.0
+
+## Author information
+Vibhor Kumar

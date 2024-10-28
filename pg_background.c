@@ -44,11 +44,11 @@
 #include "utils/acl.h"
 #ifdef WIN32
 #include "windows/pg_background_win.h"
-#endif // WIN32
+#endif	/* // WIN32 */
 
 #include "pg_background.h"
 
-// Define constants for magic numbers
+/*  Define constants for magic numbers */
 #define SQL_TERMINATOR_LEN 1
 
 /* Table-of-contents constants for our dynamic shared memory segment. */
@@ -62,24 +62,24 @@
 /* Fixed-size data passed via our dynamic shared memory segment. */
 typedef struct pg_background_fixed_data
 {
-	Oid	database_id;
-	Oid	authenticated_user_id;
-	Oid	current_user_id;
-	int	sec_context;
-        NameData        database;
-        NameData        authenticated_user;
-} pg_background_fixed_data;
+	Oid			database_id;
+	Oid			authenticated_user_id;
+	Oid			current_user_id;
+	int			sec_context;
+	NameData	database;
+	NameData	authenticated_user;
+}			pg_background_fixed_data;
 
 /* Private state maintained by the launching backend for IPC. */
 typedef struct pg_background_worker_info
 {
 	pid_t		pid;
-        Oid                     current_user_id;
+	Oid			current_user_id;
 	dsm_segment *seg;
 	BackgroundWorkerHandle *handle;
 	shm_mq_handle *responseq;
 	bool		consumed;
-} pg_background_worker_info;
+}			pg_background_worker_info;
 
 /* Private state maintained across calls to pg_background_result. */
 typedef struct pg_background_result_state
@@ -90,19 +90,19 @@ typedef struct pg_background_result_state
 	bool		has_row_description;
 	List	   *command_tags;
 	bool		complete;
-} pg_background_result_state;
+}			pg_background_result_state;
 
 static HTAB *worker_hash;
 
 static void cleanup_worker_info(dsm_segment *, Datum pid_datum);
-static pg_background_worker_info *find_worker_info(pid_t pid);
-static void check_rights(pg_background_worker_info *info);
+static pg_background_worker_info * find_worker_info(pid_t pid);
+static void check_rights(pg_background_worker_info * info);
 static void save_worker_info(pid_t pid, dsm_segment *seg,
 							 BackgroundWorkerHandle *handle,
 							 shm_mq_handle *responseq);
 static void pg_background_error_callback(void *arg);
 
-static HeapTuple form_result_tuple(pg_background_result_state *state,
+static HeapTuple form_result_tuple(pg_background_result_state * state,
 								   TupleDesc tupdesc, StringInfo msg);
 
 static void handle_sigterm(SIGNAL_ARGS);
@@ -131,7 +131,7 @@ pg_background_launch(PG_FUNCTION_ARGS)
 	dsm_segment *seg;
 	shm_toc_estimator e;
 	shm_toc    *toc;
-    char	   *sqlp;
+	char	   *sqlp;
 	char	   *gucstate;
 	shm_mq	   *mq;
 	BackgroundWorker worker;
@@ -139,7 +139,7 @@ pg_background_launch(PG_FUNCTION_ARGS)
 	pg_background_fixed_data *fdata;
 	pid_t		pid;
 	shm_mq_handle *responseq;
-	MemoryContext	oldcontext;
+	MemoryContext oldcontext;
 
 	/* Ensure a valid queue size. */
 	if (queue_size < 0 || ((uint64) queue_size) < shm_mq_minimum_size)
@@ -157,7 +157,7 @@ pg_background_launch(PG_FUNCTION_ARGS)
 	shm_toc_estimate_chunk(&e, (Size) queue_size);
 	shm_toc_estimate_keys(&e, PG_BACKGROUND_NKEYS);
 	segsize = shm_toc_estimate(&e);
-	seg = dsm_create(segsize,0);
+	seg = dsm_create(segsize, 0);
 	toc = shm_toc_create(PG_BACKGROUND_MAGIC, dsm_segment_address(seg),
 						 segsize);
 
@@ -173,8 +173,9 @@ pg_background_launch(PG_FUNCTION_ARGS)
 
 	/* Store SQL query in dynamic shared memory. */
 	sqlp = shm_toc_allocate(toc, sql_len + SQL_TERMINATOR_LEN);
-	if (sqlp == NULL)  // Line 171: Added error handling
-        ereport(ERROR, (errmsg("Failed to allocate memory for SQL query")));
+	if (sqlp == NULL)
+//Line 171:Added error handling
+			ereport(ERROR, (errmsg("Failed to allocate memory for SQL query")));
 	memcpy(sqlp, VARDATA(sql), sql_len);
 	sqlp[sql_len] = '\0';
 	shm_toc_insert(toc, PG_BACKGROUND_KEY_SQL, sqlp);
@@ -207,7 +208,7 @@ pg_background_launch(PG_FUNCTION_ARGS)
 #if PG_VERSION_NUM < 100000
 	worker.bgw_main = NULL;		/* new worker might not have library loaded */
 #endif
-	snprintf(worker.bgw_library_name,BGW_MAXLEN, "pg_background");
+	snprintf(worker.bgw_library_name, BGW_MAXLEN, "pg_background");
 	snprintf(worker.bgw_function_name, BGW_MAXLEN, "pg_background_worker_main");
 	snprintf(worker.bgw_name, BGW_MAXLEN,
 			 "pg_background by PID %d", MyProcPid);
@@ -229,7 +230,7 @@ pg_background_launch(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
 				 errmsg("could not register background process"),
-			 errhint("You may need to increase max_worker_processes.")));
+				 errhint("You may need to increase max_worker_processes.")));
 	MemoryContextSwitchTo(oldcontext);
 	shm_mq_set_handle(responseq, worker_handle);
 
@@ -305,16 +306,16 @@ Datum
 pg_background_result(PG_FUNCTION_ARGS)
 {
 	int32		pid = PG_GETARG_INT32(0);
-	shm_mq_result	res;
+	shm_mq_result res;
 	FuncCallContext *funcctx;
 	TupleDesc	tupdesc;
-	StringInfoData	msg;
+	StringInfoData msg;
 	pg_background_result_state *state;
 
 	/* First-time setup. */
 	if (SRF_IS_FIRSTCALL())
 	{
-		MemoryContext	oldcontext;
+		MemoryContext oldcontext;
 		pg_background_worker_info *info;
 		dsm_segment *seg;
 
@@ -332,7 +333,7 @@ pg_background_result(PG_FUNCTION_ARGS)
 		if (info->consumed)
 			ereport(ERROR,
 					(errcode(ERRCODE_UNDEFINED_OBJECT),
-				 errmsg("results for PID %d have already been consumed", pid)));
+					 errmsg("results for PID %d have already been consumed", pid)));
 		info->consumed = true;
 
 		/*
@@ -359,15 +360,15 @@ pg_background_result(PG_FUNCTION_ARGS)
 		state->info = info;
 		if (funcctx->tuple_desc->natts > 0)
 		{
-			int	natts = funcctx->tuple_desc->natts;
-			int	i;
+			int			natts = funcctx->tuple_desc->natts;
+			int			i;
 
 			state->receive_functions = palloc(sizeof(FmgrInfo) * natts);
 			state->typioparams = palloc(sizeof(Oid) * natts);
 
-			for (i = 0;	i < natts; ++i)
+			for (i = 0; i < natts; ++i)
 			{
-				Oid	receive_function_id;
+				Oid			receive_function_id;
 
 				getTypeBinaryInputInfo(TupleDescAttr(funcctx->tuple_desc, i)->atttypid,
 									   &receive_function_id,
@@ -450,8 +451,8 @@ pg_background_result(PG_FUNCTION_ARGS)
 				}
 			case 'T':
 				{
-					int16	natts = pq_getmsgint(&msg, 2);
-					int16	i;
+					int16		natts = pq_getmsgint(&msg, 2);
+					int16		i;
 
 					if (state->has_row_description)
 						elog(ERROR, "multiple RowDescription messages");
@@ -460,11 +461,11 @@ pg_background_result(PG_FUNCTION_ARGS)
 						ereport(ERROR,
 								(errcode(ERRCODE_DATATYPE_MISMATCH),
 								 errmsg("remote query result rowtype does not match "
-									"the specified FROM clause rowtype")));
+										"the specified FROM clause rowtype")));
 
 					for (i = 0; i < natts; ++i)
 					{
-						Oid		type_id;
+						Oid			type_id;
 
 						(void) pq_getmsgstring(&msg);	/* name */
 						(void) pq_getmsgint(&msg, 4);	/* table OID */
@@ -481,15 +482,15 @@ pg_background_result(PG_FUNCTION_ARGS)
 								ereport(ERROR,
 										(errcode(ERRCODE_DATATYPE_MISMATCH),
 										 errmsg("remote query result rowtype does not match "
-											    "the specified FROM clause rowtype")));
+												"the specified FROM clause rowtype")));
 							}
 						}
-						else if(TupleDescAttr(tupdesc, i)->atttypid != TEXTOID)
+						else if (TupleDescAttr(tupdesc, i)->atttypid != TEXTOID)
 						{
 							ereport(ERROR,
 									(errcode(ERRCODE_DATATYPE_MISMATCH),
 									 errmsg("remote query result rowtype does not match "
-										    "the specified FROM clause rowtype"),
+											"the specified FROM clause rowtype"),
 									 errhint("use text type instead")));
 						}
 					}
@@ -509,8 +510,8 @@ pg_background_result(PG_FUNCTION_ARGS)
 			case 'C':
 				{
 					/* Handle CommandComplete message. */
-					MemoryContext	oldcontext;
-					const char  *tag = pq_getmsgstring(&msg);
+					MemoryContext oldcontext;
+					const char *tag = pq_getmsgstring(&msg);
 
 					oldcontext =
 						MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
@@ -546,7 +547,7 @@ pg_background_result(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_CONNECTION_FAILURE),
 				 errmsg("lost connection to worker process with PID %d",
-				 pid)));
+						pid)));
 
 	/* If no data rows, return the command tags instead. */
 	if (!state->has_row_description)
@@ -556,13 +557,13 @@ pg_background_result(PG_FUNCTION_ARGS)
 			ereport(ERROR,
 					(errcode(ERRCODE_DATATYPE_MISMATCH),
 					 errmsg("remote query did not return a result set, but "
-						    "result rowtype is not a single text column")));
+							"result rowtype is not a single text column")));
 		}
 		if (state->command_tags != NIL)
 		{
-			char *tag = linitial(state->command_tags);
-			Datum	value;
-			bool	isnull;
+			char	   *tag = linitial(state->command_tags);
+			Datum		value;
+			bool		isnull;
 			HeapTuple	result;
 
 			state->command_tags = list_delete_first(state->command_tags);
@@ -582,15 +583,15 @@ pg_background_result(PG_FUNCTION_ARGS)
  * Parse a DataRow message and form a result tuple.
  */
 static HeapTuple
-form_result_tuple(pg_background_result_state *state, TupleDesc tupdesc,
+form_result_tuple(pg_background_result_state * state, TupleDesc tupdesc,
 				  StringInfo msg)
 {
 	/* Handle DataRow message. */
-	int16	natts = pq_getmsgint(msg, 2);
-	int16	i;
-	Datum  *values = NULL;
-	bool   *isnull = NULL;
-	StringInfoData	buf;
+	int16		natts = pq_getmsgint(msg, 2);
+	int16		i;
+	Datum	   *values = NULL;
+	bool	   *isnull = NULL;
+	StringInfoData buf;
 
 	if (!state->has_row_description)
 		elog(ERROR, "DataRow not preceded by RowDescription");
@@ -605,7 +606,7 @@ form_result_tuple(pg_background_result_state *state, TupleDesc tupdesc,
 
 	for (i = 0; i < natts; ++i)
 	{
-		int32	bytes = pq_getmsgint(msg, 4);
+		int32		bytes = pq_getmsgint(msg, 4);
 
 		if (bytes < 0)
 		{
@@ -660,8 +661,8 @@ pg_background_detach(PG_FUNCTION_ARGS)
 static void
 cleanup_worker_info(dsm_segment *seg, Datum pid_datum)
 {
-	pid_t	pid = DatumGetInt32(pid_datum);
-	bool	found;
+	pid_t		pid = DatumGetInt32(pid_datum);
+	bool		found;
 	pg_background_worker_info *info;
 
 	/* Find any worker info entry for this PID.  If none, we're done. */
@@ -700,10 +701,10 @@ find_worker_info(pid_t pid)
  * worker with the given PID.
  */
 static void
-check_rights(pg_background_worker_info *info)
+check_rights(pg_background_worker_info * info)
 {
-	Oid	current_user_id;
-	int	sec_context;
+	Oid			current_user_id;
+	int			sec_context;
 
 	GetUserIdAndSecContext(&current_user_id, &sec_context);
 	if (!has_privs_of_role(current_user_id, info->current_user_id))
@@ -721,13 +722,13 @@ save_worker_info(pid_t pid, dsm_segment *seg, BackgroundWorkerHandle *handle,
 				 shm_mq_handle *responseq)
 {
 	pg_background_worker_info *info;
-	Oid current_user_id;
-	int     sec_context;
+	Oid			current_user_id;
+	int			sec_context;
 
 	/* If the hash table hasn't been set up yet, do that now. */
 	if (worker_hash == NULL)
 	{
-		HASHCTL ctl;
+		HASHCTL		ctl;
 
 		ctl.keysize = sizeof(pid_t);
 		ctl.entrysize = sizeof(pg_background_worker_info);
@@ -739,11 +740,10 @@ save_worker_info(pid_t pid, dsm_segment *seg, BackgroundWorkerHandle *handle,
 	GetUserIdAndSecContext(&current_user_id, &sec_context);
 
 	/*
-	 * In the unlikely event that there's an older worker with this PID,
-	 * just detach it - unless it has a different user ID than the
-	 * currently-active one, in which case someone might be trying to pull
-	 * a fast one.  Let's kill the backend to make sure we don't break
-	 * anyone's expectations.
+	 * In the unlikely event that there's an older worker with this PID, just
+	 * detach it - unless it has a different user ID than the currently-active
+	 * one, in which case someone might be trying to pull a fast one.  Let's
+	 * kill the backend to make sure we don't break anyone's expectations.
 	 */
 	if ((info = find_worker_info(pid)) != NULL)
 	{
@@ -751,7 +751,7 @@ save_worker_info(pid_t pid, dsm_segment *seg, BackgroundWorkerHandle *handle,
 			ereport(FATAL,
 					(errcode(ERRCODE_DUPLICATE_OBJECT),
 					 errmsg("background worker with PID \"%d\" already exists",
-						    pid)));
+							pid)));
 		dsm_detach(info->seg);
 	}
 
@@ -773,7 +773,7 @@ save_worker_info(pid_t pid, dsm_segment *seg, BackgroundWorkerHandle *handle,
 static void
 pg_background_error_callback(void *arg)
 {
-	pid_t	pid = * (pid_t *) arg;
+	pid_t		pid = *(pid_t *) arg;
 
 	errcontext("background worker, pid %d", pid);
 }
@@ -816,12 +816,13 @@ pg_background_worker_main(Datum main_arg)
 	if (toc == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-			   errmsg("bad magic number in dynamic shared memory segment")));
+				 errmsg("bad magic number in dynamic shared memory segment")));
 
 	/* Find data structures in dynamic shared memory. */
 	fdata = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_FIXED_DATA, false);
-	 if (fdata == NULL)  // Line 159: Added error handling
-        ereport(ERROR, (errmsg("Failed to allocate memory for fixed data")));
+	if (fdata == NULL)
+//Line 159:Added error handling
+			ereport(ERROR, (errmsg("Failed to allocate memory for fixed data")));
 	sql = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_SQL, false);
 	gucstate = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_GUC, false);
 	mq = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_QUEUE, false);
@@ -830,13 +831,13 @@ pg_background_worker_main(Datum main_arg)
 	responseq = shm_mq_attach(mq, seg, NULL);
 
 	/* Redirect protocol messages to responseq. */
-	//pq_redirect_to_shm_mq(mq, responseq);
+	/* pq_redirect_to_shm_mq(mq, responseq); */
 	pq_redirect_to_shm_mq(seg, responseq);
 
 	/*
-	 * Initialize our user and database ID based on the strings version of
-	 * the data, and then go back and check that we actually got the database
-	 * and user ID that we intended to get.  We do this because it's not
+	 * Initialize our user and database ID based on the strings version of the
+	 * data, and then go back and check that we actually got the database and
+	 * user ID that we intended to get.  We do this because it's not
 	 * impossible for the process that started us to die before we get here,
 	 * and the user or database could be renamed in the meantime.  We don't
 	 * want to latch on the wrong object by accident.  There should probably
@@ -846,14 +847,14 @@ pg_background_worker_main(Datum main_arg)
 	BackgroundWorkerInitializeConnection(NameStr(fdata->database),
 										 NameStr(fdata->authenticated_user)
 #if PG_VERSION_NUM >= 110000
-										 , BGWORKER_BYPASS_ALLOWCONN
+										 ,BGWORKER_BYPASS_ALLOWCONN
 #endif
-										);
+		);
 
 	if (fdata->database_id != MyDatabaseId ||
 		fdata->authenticated_user_id != GetAuthenticatedUserId())
 		ereport(ERROR,
-			(errmsg("user or database renamed during pg_background startup")));
+				(errmsg("user or database renamed during pg_background startup")));
 
 	/* Restore GUC values from launching backend. */
 	StartTransactionCommand();
@@ -897,7 +898,7 @@ exists_binary_recv_fn(Oid type)
 {
 	HeapTuple	typeTuple;
 	Form_pg_type pt;
-	bool exists_rev_fn;
+	bool		exists_rev_fn;
 
 	typeTuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type));
 	if (!HeapTupleIsValid(typeTuple))
@@ -924,8 +925,8 @@ execute_sql_string(const char *sql)
 	ListCell   *lc1;
 	bool		isTopLevel;
 	int			commands_remaining;
-	MemoryContext	parsecontext;
-	MemoryContext	oldcontext;
+	MemoryContext parsecontext;
+	MemoryContext oldcontext;
 
 	/*
 	 * Parse the SQL string into a list of raw parse trees.
@@ -955,19 +956,19 @@ execute_sql_string(const char *sql)
 #if PG_VERSION_NUM < 100000
 		Node	   *parsetree = (Node *) lfirst(lc1);
 #else
-		RawStmt *parsetree = (RawStmt *)  lfirst(lc1);
+		RawStmt    *parsetree = (RawStmt *) lfirst(lc1);
 #endif
 #if PG_VERSION_NUM >= 130000
-		CommandTag commandTag;
+		CommandTag	commandTag;
 #else
 		const char *commandTag;
 #endif
 #if PG_VERSION_NUM < 130000
-		char        completionTag[COMPLETION_TAG_BUFSIZE];
+		char		completionTag[COMPLETION_TAG_BUFSIZE];
 #else
 		QueryCompletion qc;
 #endif
-		List       *querytree_list,
+		List	   *querytree_list,
 				   *plantree_list;
 		bool		snapshot_set = false;
 		Portal		portal;
@@ -1015,9 +1016,9 @@ execute_sql_string(const char *sql)
 
 		plantree_list = pg_plan_queries(querytree_list,
 #if PG_VERSION_NUM >= 130000
-				sql,
+										sql,
 #endif
-				0, NULL);
+										0, NULL);
 
 		/* Done with the snapshot used for parsing/planning */
 		if (snapshot_set)
@@ -1034,7 +1035,7 @@ execute_sql_string(const char *sql)
 		portal->visible = false;
 		PortalDefineQuery(portal, NULL, sql, commandTag, plantree_list, NULL);
 		PortalStart(portal, NULL, 0, InvalidSnapshot);
-		PortalSetResultFormat(portal, 1, &format);		/* binary format */
+		PortalSetResultFormat(portal, 1, &format);	/* binary format */
 
 		/*
 		 * Tuples returned by any command other than the last are simply
@@ -1053,22 +1054,22 @@ execute_sql_string(const char *sql)
 		}
 
 		/*
-		 * Only once the portal and destreceiver have been established can
-		 * we return to the transaction context.  All that stuff needs to
-		 * survive an internal commit inside PortalRun!
+		 * Only once the portal and destreceiver have been established can we
+		 * return to the transaction context.  All that stuff needs to survive
+		 * an internal commit inside PortalRun!
 		 */
 		MemoryContextSwitchTo(oldcontext);
 
 		/* Here's where we actually execute the command. */
 #if PG_VERSION_NUM < 100000
-			(void) PortalRun(portal, FETCH_ALL, isTopLevel, receiver, receiver,
-							 completionTag);
+		(void) PortalRun(portal, FETCH_ALL, isTopLevel, receiver, receiver,
+						 completionTag);
 #elif PG_VERSION_NUM < 130000
-			(void) PortalRun(portal, FETCH_ALL, isTopLevel, true, receiver,
-							 receiver, completionTag);
+		(void) PortalRun(portal, FETCH_ALL, isTopLevel, true, receiver,
+						 receiver, completionTag);
 #else
-			(void) PortalRun(portal, FETCH_ALL, isTopLevel, true, receiver,
-							 receiver, &qc);
+		(void) PortalRun(portal, FETCH_ALL, isTopLevel, true, receiver,
+						 receiver, &qc);
 #endif
 
 		/* Clean up the receiver. */
@@ -1076,8 +1077,8 @@ execute_sql_string(const char *sql)
 
 		/*
 		 * Send a CommandComplete message even if we suppressed the query
-		 * results.  The user backend will report these in the absence of
-		 * any true query results.
+		 * results.  The user backend will report these in the absence of any
+		 * true query results.
 		 */
 #if PG_VERSION_NUM < 130000
 		EndCommand(completionTag, DestRemote);
