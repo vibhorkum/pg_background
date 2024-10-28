@@ -48,6 +48,8 @@
 
 #include "pg_background.h"
 
+// Define constants for magic numbers
+#define SQL_TERMINATOR_LEN 1
 
 /* Table-of-contents constants for our dynamic shared memory segment. */
 #define PG_BACKGROUND_MAGIC				0x50674267
@@ -129,7 +131,7 @@ pg_background_launch(PG_FUNCTION_ARGS)
 	dsm_segment *seg;
 	shm_toc_estimator e;
 	shm_toc    *toc;
-        char	   *sqlp;
+    char	   *sqlp;
 	char	   *gucstate;
 	shm_mq	   *mq;
 	BackgroundWorker worker;
@@ -170,7 +172,9 @@ pg_background_launch(PG_FUNCTION_ARGS)
 	shm_toc_insert(toc, PG_BACKGROUND_KEY_FIXED_DATA, fdata);
 
 	/* Store SQL query in dynamic shared memory. */
-	sqlp = shm_toc_allocate(toc, sql_len + 1);
+	sqlp = shm_toc_allocate(toc, sql_len + SQL_TERMINATOR_LEN);
+	if (sqlp == NULL)  // Line 171: Added error handling
+        ereport(ERROR, (errmsg("Failed to allocate memory for SQL query")));
 	memcpy(sqlp, VARDATA(sql), sql_len);
 	sqlp[sql_len] = '\0';
 	shm_toc_insert(toc, PG_BACKGROUND_KEY_SQL, sqlp);
@@ -203,8 +207,8 @@ pg_background_launch(PG_FUNCTION_ARGS)
 #if PG_VERSION_NUM < 100000
 	worker.bgw_main = NULL;		/* new worker might not have library loaded */
 #endif
-	sprintf(worker.bgw_library_name, "pg_background");
-	sprintf(worker.bgw_function_name, "pg_background_worker_main");
+	snprintf(worker.bgw_library_name,BGW_MAXLEN, "pg_background");
+	snprintf(worker.bgw_function_name, BGW_MAXLEN, "pg_background_worker_main");
 	snprintf(worker.bgw_name, BGW_MAXLEN,
 			 "pg_background by PID %d", MyProcPid);
 #if (PG_VERSION_NUM >= 110000)
@@ -786,6 +790,8 @@ pg_background_worker_main(Datum main_arg)
 
 	/* Find data structures in dynamic shared memory. */
 	fdata = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_FIXED_DATA, false);
+	 if (fdata == NULL)  // Line 159: Added error handling
+        ereport(ERROR, (errmsg("Failed to allocate memory for fixed data")));
 	sql = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_SQL, false);
 	gucstate = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_GUC, false);
 	mq = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_QUEUE, false);
