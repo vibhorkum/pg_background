@@ -45,10 +45,10 @@ Detaches the background worker with process ID `pid`, allowing it to run indepen
 SELECT pg_background_launch('VACUUM VERBOSE public.your_table');
 
 -- Retrieve the result
-SELECT pg_background_result(12345); -- Replace 12345 with the actual pid
+SELECT * FROM pg_background_result(12345) foo(result TEXT); -- Replace 12345 with the actual pid
 
 -- Run a command and wait for the result
-SELECT pg_background_result(pg_background_launch('SELECT count(*) FROM your_table'));
+SELECT * FROM pg_background_result(pg_background_launch('SELECT count(*) FROM your_table')) AS foo(count BIGINT);
 ```
 
 ## Privilege Management
