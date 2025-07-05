@@ -1,6 +1,6 @@
 
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
-\echo Use "ALTER EXTENSION pg_background UPDATE TO '1.3'" to load this file. \quit
+\echo Use "ALTER EXTENSION pg_background UPDATE TO '1.4'" to load this file. \quit
 
 CREATE OR REPLACE FUNCTION grant_pg_background_privileges(
     user_name TEXT,
