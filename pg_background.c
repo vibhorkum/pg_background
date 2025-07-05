@@ -1033,7 +1033,11 @@ execute_sql_string(const char *sql)
 		portal = CreatePortal("", true, true);
 		/* Don't display the portal in pg_cursors */
 		portal->visible = false;
-		PortalDefineQuery(portal, NULL, sql, commandTag, plantree_list, NULL);
++#if PG_VERSION_NUM < 180000
+                PortalDefineQuery(portal, NULL, sql, commandTag, plantree_list, NULL);
++#else
++                PortalDefineQuery(portal, NULL, sql, commandTag, plantree_list, NULL, NULL);
++#endif
 		PortalStart(portal, NULL, 0, InvalidSnapshot);
 		PortalSetResultFormat(portal, 1, &format);	/* binary format */
 
@@ -1067,9 +1071,13 @@ execute_sql_string(const char *sql)
 #elif PG_VERSION_NUM < 130000
 		(void) PortalRun(portal, FETCH_ALL, isTopLevel, true, receiver,
 						 receiver, completionTag);
-#else
+#elif PG_VERSION_NUM < 180000
 		(void) PortalRun(portal, FETCH_ALL, isTopLevel, true, receiver,
 						 receiver, &qc);
+#else
+		(void) PortalRun(portal, FETCH_ALL, isTopLevel, receiver,
+						 receiver, &qc);
+
 #endif
 
 		/* Clean up the receiver. */
