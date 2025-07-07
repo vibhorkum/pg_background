@@ -7,8 +7,10 @@
  * TupleDescAttr was introduced in 9.6.5 and 9.5.9, so allow compilation
  * against those versions just in case.
  */
+#if PG_VERSION_NUM < 180000
 #ifndef TupleDescAttr
 #define TupleDescAttr(tupdesc, i) (&(tupdesc)->attrs[(i)])
+#endif
 #endif
 
 #if PG_VERSION_NUM < 100000
