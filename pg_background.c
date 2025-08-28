@@ -861,9 +861,6 @@ pg_background_worker_main(Datum main_arg)
 	RestoreGUCState(gucstate);
 	CommitTransactionCommand();
 
-	/* Restore user ID and security context. */
-	SetUserIdAndSecContext(fdata->current_user_id, fdata->sec_context);
-
 	/* Prepare to execute the query. */
 	SetCurrentStatementStartTimestamp();
 	debug_query_string = sql;
@@ -873,6 +870,9 @@ pg_background_worker_main(Datum main_arg)
 		enable_timeout_after(STATEMENT_TIMEOUT, StatementTimeout);
 	else
 		disable_timeout(STATEMENT_TIMEOUT, false);
+
+	/* Restore user ID and security context. */
+	SetUserIdAndSecContext(fdata->current_user_id, fdata->sec_context);
 
 	/* Execute the query. */
 	execute_sql_string(sql);
