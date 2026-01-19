@@ -79,6 +79,8 @@ typedef struct pg_background_worker_info
 	BackgroundWorkerHandle *handle;
 	shm_mq_handle *responseq;
 	bool		consumed;
+	bool		detached;    /* true if session has detached */
+	bool		worker_done; /* true if worker has finished */
 }			pg_background_worker_info;
 
 /* Private state maintained across calls to pg_background_result. */
@@ -641,7 +643,7 @@ form_result_tuple(pg_background_result_state * state, TupleDesc tupdesc,
 Datum
 pg_background_detach(PG_FUNCTION_ARGS)
 {
-	int32		pid = PG_GETARG_INT32(0);
+	int32       pid = PG_GETARG_INT32(0);
 	pg_background_worker_info *info;
 
 	info = find_worker_info(pid);
@@ -649,7 +651,23 @@ pg_background_detach(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("PID %d is not attached to this session", pid)));
-	dsm_detach(info->seg);
+
+	info->detached = true;
+
+	/*
+	 * If the worker is already done, we can safely detach the DSM segment now.
+	 * Otherwise, defer DSM cleanup until the worker is finished.
+	 */
+	if (info->worker_done)
+	{
+		dsm_detach(info->seg);
+		if (info->handle != NULL)
+		{
+			pfree(info->handle);
+			info->handle = NULL;
+		}
+		hash_search(worker_hash, (void *) &pid, HASH_REMOVE, NULL);
+	}
 
 	PG_RETURN_VOID();
 }
@@ -661,25 +679,32 @@ pg_background_detach(PG_FUNCTION_ARGS)
 static void
 cleanup_worker_info(dsm_segment *seg, Datum pid_datum)
 {
-	pid_t		pid = DatumGetInt32(pid_datum);
-	bool		found;
+	pid_t       pid = DatumGetInt32(pid_datum);
+	bool        found;
 	pg_background_worker_info *info;
 
 	/* Find any worker info entry for this PID.  If none, we're done. */
 	if ((info = find_worker_info(pid)) == NULL)
 		return;
 
-	/* Free memory used by the BackgroundWorkerHandle. */
-	if (info->handle != NULL)
-	{
-		pfree(info->handle);
-		info->handle = NULL;
-	}
+	info->worker_done = true;
 
-	/* Remove the hashtable entry. */
-	hash_search(worker_hash, (void *) &pid, HASH_REMOVE, &found);
-	if (!found)
-		elog(ERROR, "pg_background worker_hash table corrupted");
+	/*
+	 * If the session has already detached, we can safely detach the DSM segment now.
+	 * Otherwise, defer DSM cleanup until the session calls detach.
+	 */
+	if (info->detached)
+	{
+		dsm_detach(info->seg);
+		if (info->handle != NULL)
+		{
+			pfree(info->handle);
+			info->handle = NULL;
+		}
+		hash_search(worker_hash, (void *) &pid, HASH_REMOVE, &found);
+		if (!found)
+			elog(ERROR, "pg_background worker_hash table corrupted");
+	}
 }
 
 /*
@@ -765,6 +790,8 @@ save_worker_info(pid_t pid, dsm_segment *seg, BackgroundWorkerHandle *handle,
 	info->current_user_id = current_user_id;
 	info->responseq = responseq;
 	info->consumed = false;
+	info->detached = false;
+	info->worker_done = false;
 }
 
 /*
