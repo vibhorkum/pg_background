@@ -34,14 +34,14 @@
 #include "storage/shm_toc.h"
 #include "tcop/pquery.h"
 #include "tcop/utility.h"
+#include "utils/acl.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
 #include "utils/snapmgr.h"
-#include "utils/timeout.h"
 #include "utils/syscache.h"
-#include "utils/acl.h"
+#include "utils/timeout.h"
 #ifdef WIN32
 #include "windows/pg_background_win.h"
 #endif	/* // WIN32 */
@@ -79,8 +79,6 @@ typedef struct pg_background_worker_info
 	BackgroundWorkerHandle *handle;
 	shm_mq_handle *responseq;
 	bool		consumed;
-	bool		detached;    /* true if session has detached */
-	bool		worker_done; /* true if worker has finished */
 }			pg_background_worker_info;
 
 /* Private state maintained across calls to pg_background_result. */
@@ -130,144 +128,180 @@ pg_background_launch(PG_FUNCTION_ARGS)
 	int32		sql_len = VARSIZE_ANY_EXHDR(sql);
 	Size		guc_len;
 	Size		segsize;
-	dsm_segment *seg;
+	dsm_segment *seg = NULL;
 	shm_toc_estimator e;
 	shm_toc    *toc;
 	char	   *sqlp;
 	char	   *gucstate;
 	shm_mq	   *mq;
 	BackgroundWorker worker;
-	BackgroundWorkerHandle *worker_handle;
+	BackgroundWorkerHandle *worker_handle = NULL;
 	pg_background_fixed_data *fdata;
-	pid_t		pid;
+	pid_t		pid = 0;
 	shm_mq_handle *responseq;
 	MemoryContext oldcontext;
+	bool		pinned_segment = false;
 
-	/* Ensure a valid queue size. */
-	if (queue_size < 0 || ((uint64) queue_size) < shm_mq_minimum_size)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("queue size must be at least %zu bytes",
-						shm_mq_minimum_size)));
-
-	/* Create dynamic shared memory and table of contents. */
-	shm_toc_initialize_estimator(&e);
-	shm_toc_estimate_chunk(&e, sizeof(pg_background_fixed_data));
-	shm_toc_estimate_chunk(&e, sql_len + 1);
-	guc_len = EstimateGUCStateSpace();
-	shm_toc_estimate_chunk(&e, guc_len);
-	shm_toc_estimate_chunk(&e, (Size) queue_size);
-	shm_toc_estimate_keys(&e, PG_BACKGROUND_NKEYS);
-	segsize = shm_toc_estimate(&e);
-	seg = dsm_create(segsize, 0);
-	toc = shm_toc_create(PG_BACKGROUND_MAGIC, dsm_segment_address(seg),
-						 segsize);
-
-	/* Store fixed-size data in dynamic shared memory. */
-	fdata = shm_toc_allocate(toc, sizeof(pg_background_fixed_data));
-	fdata->database_id = MyDatabaseId;
-	fdata->authenticated_user_id = GetAuthenticatedUserId();
-	GetUserIdAndSecContext(&fdata->current_user_id, &fdata->sec_context);
-	namestrcpy(&fdata->database, get_database_name(MyDatabaseId));
-	namestrcpy(&fdata->authenticated_user,
-			   GetUserNameFromId(fdata->authenticated_user_id, false));
-	shm_toc_insert(toc, PG_BACKGROUND_KEY_FIXED_DATA, fdata);
-
-	/* Store SQL query in dynamic shared memory. */
-	sqlp = shm_toc_allocate(toc, sql_len + SQL_TERMINATOR_LEN);
-	if (sqlp == NULL)
-//Line 171:Added error handling
-			ereport(ERROR, (errmsg("Failed to allocate memory for SQL query")));
-	memcpy(sqlp, VARDATA(sql), sql_len);
-	sqlp[sql_len] = '\0';
-	shm_toc_insert(toc, PG_BACKGROUND_KEY_SQL, sqlp);
-
-	/* Store GUC state in dynamic shared memory. */
-	gucstate = shm_toc_allocate(toc, guc_len);
-	SerializeGUCState(guc_len, gucstate);
-	shm_toc_insert(toc, PG_BACKGROUND_KEY_GUC, gucstate);
-
-	/* Establish message queue in dynamic shared memory. */
-	mq = shm_mq_create(shm_toc_allocate(toc, (Size) queue_size),
-					   (Size) queue_size);
-	shm_toc_insert(toc, PG_BACKGROUND_KEY_QUEUE, mq);
-	shm_mq_set_receiver(mq, MyProc);
-
-	/*
-	 * Attach the queue before launching a worker, so that we'll automatically
-	 * detach the queue if we error out.  (Otherwise, the worker might sit
-	 * there trying to write the queue long after we've gone away.)
-	 */
-	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
-	responseq = shm_mq_attach(mq, seg, NULL);
-	MemoryContextSwitchTo(oldcontext);
-
-	/* Configure a worker. */
-	worker.bgw_flags =
-		BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
-	worker.bgw_start_time = BgWorkerStart_ConsistentState;
-	worker.bgw_restart_time = BGW_NEVER_RESTART;
-#if PG_VERSION_NUM < 100000
-	worker.bgw_main = NULL;		/* new worker might not have library loaded */
-#endif
-	snprintf(worker.bgw_library_name, BGW_MAXLEN, "pg_background");
-	snprintf(worker.bgw_function_name, BGW_MAXLEN, "pg_background_worker_main");
-	snprintf(worker.bgw_name, BGW_MAXLEN,
-			 "pg_background by PID %d", MyProcPid);
-#if (PG_VERSION_NUM >= 110000)
-	snprintf(worker.bgw_type, BGW_MAXLEN, "pg_background");
-#endif
-	worker.bgw_main_arg = UInt32GetDatum(dsm_segment_handle(seg));
-	/* set bgw_notify_pid, so we can detect if the worker stops */
-	worker.bgw_notify_pid = MyProcPid;
-
-	/*
-	 * Register the worker.
-	 *
-	 * We switch contexts so that the background worker handle can outlast
-	 * this transaction.
-	 */
-	oldcontext = MemoryContextSwitchTo(TopMemoryContext);
-	if (!RegisterDynamicBackgroundWorker(&worker, &worker_handle))
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
-				 errmsg("could not register background process"),
-				 errhint("You may need to increase max_worker_processes.")));
-	MemoryContextSwitchTo(oldcontext);
-	shm_mq_set_handle(responseq, worker_handle);
-
-	/* Wait for the worker to start. */
-	switch (WaitForBackgroundWorkerStartup(worker_handle, &pid))
+	PG_TRY();
 	{
-		case BGWH_STARTED:
-			/* Success. */
-			break;
-		case BGWH_STOPPED:
-			/* Success and already done. */
-			break;
-		case BGWH_POSTMASTER_DIED:
-			pfree(worker_handle);
+		/* Ensure a valid queue size. */
+		if (queue_size < 0 || ((uint64) queue_size) < shm_mq_minimum_size)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("queue size must be at least %zu bytes",
+							shm_mq_minimum_size)));
+
+		/* Create dynamic shared memory and table of contents. */
+		shm_toc_initialize_estimator(&e);
+		shm_toc_estimate_chunk(&e, sizeof(pg_background_fixed_data));
+		shm_toc_estimate_chunk(&e, sql_len + 1);
+		guc_len = EstimateGUCStateSpace();
+		shm_toc_estimate_chunk(&e, guc_len);
+		shm_toc_estimate_chunk(&e, (Size) queue_size);
+		shm_toc_estimate_keys(&e, PG_BACKGROUND_NKEYS);
+		segsize = shm_toc_estimate(&e);
+
+		seg = dsm_create(segsize, 0);
+
+		/*
+		 * Fix for launch/detach race:
+		 *
+		 * dsm_pin_mapping(seg) only pins THIS backend's mapping; it does not
+		 * prevent the segment from being destroyed before the worker attaches.
+		 *
+		 * Pin the segment itself so that an immediate pg_background_detach()
+		 * can't make the worker miss the segment (and therefore miss running).
+		 * The worker will unpin as soon as it successfully attaches.
+		 */
+#if PG_VERSION_NUM >= 100000
+		dsm_pin_segment(seg);
+		pinned_segment = true;
+#endif
+
+		toc = shm_toc_create(PG_BACKGROUND_MAGIC, dsm_segment_address(seg),
+							 segsize);
+
+		/* Store fixed-size data in dynamic shared memory. */
+		fdata = shm_toc_allocate(toc, sizeof(pg_background_fixed_data));
+		fdata->database_id = MyDatabaseId;
+		fdata->authenticated_user_id = GetAuthenticatedUserId();
+		GetUserIdAndSecContext(&fdata->current_user_id, &fdata->sec_context);
+		namestrcpy(&fdata->database, get_database_name(MyDatabaseId));
+		namestrcpy(&fdata->authenticated_user,
+				   GetUserNameFromId(fdata->authenticated_user_id, false));
+		shm_toc_insert(toc, PG_BACKGROUND_KEY_FIXED_DATA, fdata);
+
+		/* Store SQL query in dynamic shared memory. */
+		sqlp = shm_toc_allocate(toc, sql_len + SQL_TERMINATOR_LEN);
+		if (sqlp == NULL)
+			ereport(ERROR, (errmsg("failed to allocate memory for SQL query")));
+		memcpy(sqlp, VARDATA(sql), sql_len);
+		sqlp[sql_len] = '\0';
+		shm_toc_insert(toc, PG_BACKGROUND_KEY_SQL, sqlp);
+
+		/* Store GUC state in dynamic shared memory. */
+		gucstate = shm_toc_allocate(toc, guc_len);
+		SerializeGUCState(guc_len, gucstate);
+		shm_toc_insert(toc, PG_BACKGROUND_KEY_GUC, gucstate);
+
+		/* Establish message queue in dynamic shared memory. */
+		mq = shm_mq_create(shm_toc_allocate(toc, (Size) queue_size),
+						   (Size) queue_size);
+		shm_toc_insert(toc, PG_BACKGROUND_KEY_QUEUE, mq);
+		shm_mq_set_receiver(mq, MyProc);
+
+		/*
+		 * Attach the queue before launching a worker, so that we'll automatically
+		 * detach the queue if we error out.  (Otherwise, the worker might sit
+		 * there trying to write the queue long after we've gone away.)
+		 */
+		oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+		responseq = shm_mq_attach(mq, seg, NULL);
+		MemoryContextSwitchTo(oldcontext);
+
+		/* Configure a worker. */
+		worker.bgw_flags =
+			BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
+		worker.bgw_start_time = BgWorkerStart_ConsistentState;
+		worker.bgw_restart_time = BGW_NEVER_RESTART;
+#if PG_VERSION_NUM < 100000
+		worker.bgw_main = NULL;		/* new worker might not have library loaded */
+#endif
+		snprintf(worker.bgw_library_name, BGW_MAXLEN, "pg_background");
+		snprintf(worker.bgw_function_name, BGW_MAXLEN, "pg_background_worker_main");
+		snprintf(worker.bgw_name, BGW_MAXLEN,
+				 "pg_background by PID %d", MyProcPid);
+#if (PG_VERSION_NUM >= 110000)
+		snprintf(worker.bgw_type, BGW_MAXLEN, "pg_background");
+#endif
+		worker.bgw_main_arg = UInt32GetDatum(dsm_segment_handle(seg));
+		/* set bgw_notify_pid, so we can detect if the worker stops */
+		worker.bgw_notify_pid = MyProcPid;
+
+		/*
+		 * Register the worker.
+		 *
+		 * We switch contexts so that the background worker handle can outlast
+		 * this transaction.
+		 */
+		oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+		if (!RegisterDynamicBackgroundWorker(&worker, &worker_handle))
 			ereport(ERROR,
 					(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
-					 errmsg("cannot start background processes without postmaster"),
-					 errhint("Kill all remaining database processes and restart the database.")));
-			break;
-		default:
-			elog(ERROR, "unexpected bgworker handle status");
-			break;
+					 errmsg("could not register background process"),
+					 errhint("You may need to increase max_worker_processes.")));
+		MemoryContextSwitchTo(oldcontext);
+		shm_mq_set_handle(responseq, worker_handle);
+
+		/* Wait for the worker to start. */
+		switch (WaitForBackgroundWorkerStartup(worker_handle, &pid))
+		{
+			case BGWH_STARTED:
+				/* Success. */
+				break;
+			case BGWH_STOPPED:
+				/* Success and already done. */
+				break;
+			case BGWH_POSTMASTER_DIED:
+				pfree(worker_handle);
+				ereport(ERROR,
+						(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
+						 errmsg("cannot start background processes without postmaster"),
+						 errhint("Kill all remaining database processes and restart the database.")));
+				break;
+			default:
+				elog(ERROR, "unexpected bgworker handle status");
+				break;
+		}
+
+		/* Store the relevant details about this worker for future use. */
+		save_worker_info(pid, seg, worker_handle, responseq);
+
+		/*
+		 * Now that the worker info is saved, we do not need to, and should not,
+		 * automatically detach the segment at resource-owner cleanup time.
+		 */
+		dsm_pin_mapping(seg);
+
+		/* Return the worker's PID. */
+		PG_RETURN_INT32(pid);
 	}
+	PG_CATCH();
+	{
+		/*
+		 * If we pinned the segment itself and then error out before the worker
+		 * gets a chance to attach+unpin, we must unpin here to avoid a leak.
+		 */
+#if PG_VERSION_NUM >= 100000
+		if (seg != NULL && pinned_segment)
+			dsm_unpin_segment(dsm_segment_handle(seg));
+#endif
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 
-	/* Store the relevant details about this worker for future use. */
-	save_worker_info(pid, seg, worker_handle, responseq);
-
-	/*
-	 * Now that the worker info is saved, we do not need to, and should not,
-	 * automatically detach the segment at resource-owner cleanup time.
-	 */
-	dsm_pin_mapping(seg);
-
-	/* Return the worker's PID. */
-	PG_RETURN_INT32(pid);
+	/* not reached */
+	PG_RETURN_NULL();
 }
 
 /*
@@ -652,22 +686,14 @@ pg_background_detach(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("PID %d is not attached to this session", pid)));
 
-	info->detached = true;
+	check_rights(info);
 
 	/*
-	 * If the worker is already done, we can safely detach the DSM segment now.
-	 * Otherwise, defer DSM cleanup until the worker is finished.
+	 * We must actually detach the DSM now. Deferring detach based on a flag
+	 * introduces a cycle: on_dsm_detach callbacks only fire *after* detach.
 	 */
-	if (info->worker_done)
-	{
+	if (info->seg != NULL)
 		dsm_detach(info->seg);
-		if (info->handle != NULL)
-		{
-			pfree(info->handle);
-			info->handle = NULL;
-		}
-		hash_search(worker_hash, (void *) &pid, HASH_REMOVE, NULL);
-	}
 
 	PG_RETURN_VOID();
 }
@@ -683,28 +709,26 @@ cleanup_worker_info(dsm_segment *seg, Datum pid_datum)
 	bool        found;
 	pg_background_worker_info *info;
 
-	/* Find any worker info entry for this PID.  If none, we're done. */
-	if ((info = find_worker_info(pid)) == NULL)
+	(void) seg; /* unused */
+
+	if (worker_hash == NULL)
 		return;
 
-	info->worker_done = true;
-
 	/*
-	 * If the session has already detached, we can safely detach the DSM segment now.
-	 * Otherwise, defer DSM cleanup until the session calls detach.
+	 * on_dsm_detach fires when THIS backend unmaps the DSM. At that point,
+	 * we must drop our local bookkeeping unconditionally. Do not call
+	 * dsm_detach() here; we're already in the detach path.
 	 */
-	if (info->detached)
-	{
-		dsm_detach(info->seg);
-		if (info->handle != NULL)
-		{
-			pfree(info->handle);
-			info->handle = NULL;
-		}
-		hash_search(worker_hash, (void *) &pid, HASH_REMOVE, &found);
-		if (!found)
-			elog(ERROR, "pg_background worker_hash table corrupted");
-	}
+	info = hash_search(worker_hash, (void *) &pid, HASH_FIND, &found);
+	if (!found || info == NULL)
+		return;
+
+	if (info->handle != NULL)
+		pfree(info->handle);
+
+	hash_search(worker_hash, (void *) &pid, HASH_REMOVE, &found);
+	if (!found)
+		elog(ERROR, "pg_background worker_hash table corrupted");
 }
 
 /*
@@ -785,13 +809,12 @@ save_worker_info(pid_t pid, dsm_segment *seg, BackgroundWorkerHandle *handle,
 
 	/* Create a new entry for this worker. */
 	info = hash_search(worker_hash, (void *) &pid, HASH_ENTER, NULL);
+	info->pid = pid;
 	info->seg = seg;
 	info->handle = handle;
 	info->current_user_id = current_user_id;
 	info->responseq = responseq;
 	info->consumed = false;
-	info->detached = false;
-	info->worker_done = false;
 }
 
 /*
@@ -818,6 +841,7 @@ pg_background_worker_main(Datum main_arg)
 	char	   *gucstate;
 	shm_mq	   *mq;
 	shm_mq_handle *responseq;
+	dsm_handle	seg_handle;
 
 	/* Establish signal handlers. */
 	pqsignal(SIGTERM, handle_sigterm);
@@ -832,13 +856,23 @@ pg_background_worker_main(Datum main_arg)
 												 ALLOCSET_DEFAULT_INITSIZE,
 												 ALLOCSET_DEFAULT_MAXSIZE);
 
-
 	/* Connect to the dynamic shared memory segment. */
-	seg = dsm_attach(DatumGetInt32(main_arg));
+	seg_handle = DatumGetUInt32(main_arg);
+
+	seg = dsm_attach(seg_handle);
 	if (seg == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("unable to map dynamic shared memory segment")));
+
+#if PG_VERSION_NUM >= 100000
+	/*
+	 * Release the launcher’s segment pin now that we have successfully attached.
+	 * This is what makes "launch + immediate detach" reliable.
+	 */
+	dsm_unpin_segment(seg_handle);
+#endif
+
 	toc = shm_toc_attach(PG_BACKGROUND_MAGIC, dsm_segment_address(seg));
 	if (toc == NULL)
 		ereport(ERROR,
@@ -848,8 +882,7 @@ pg_background_worker_main(Datum main_arg)
 	/* Find data structures in dynamic shared memory. */
 	fdata = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_FIXED_DATA, false);
 	if (fdata == NULL)
-//Line 159:Added error handling
-			ereport(ERROR, (errmsg("Failed to allocate memory for fixed data")));
+		ereport(ERROR, (errmsg("failed to locate fixed data in shared memory")));
 	sql = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_SQL, false);
 	gucstate = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_GUC, false);
 	mq = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_QUEUE, false);
@@ -864,12 +897,7 @@ pg_background_worker_main(Datum main_arg)
 	/*
 	 * Initialize our user and database ID based on the strings version of the
 	 * data, and then go back and check that we actually got the database and
-	 * user ID that we intended to get.  We do this because it's not
-	 * impossible for the process that started us to die before we get here,
-	 * and the user or database could be renamed in the meantime.  We don't
-	 * want to latch on the wrong object by accident.  There should probably
-	 * be a variant of BackgroundWorkerInitializeConnection that accepts OIDs
-	 * rather than strings.
+	 * user ID that we intended to get.
 	 */
 	BackgroundWorkerInitializeConnection(NameStr(fdata->database),
 										 NameStr(fdata->authenticated_user)
@@ -937,7 +965,6 @@ exists_binary_recv_fn(Oid type)
 
 	return exists_rev_fn;
 }
-
 
 /*
  * Execute given SQL string.
@@ -1032,10 +1059,6 @@ execute_sql_string(const char *sql)
 
 		/*
 		 * OK to analyze, rewrite, and plan this query.
-		 *
-		 * As with parsing, we need to make sure this data outlives the
-		 * transaction, because of the possibility that the statement might
-		 * perform internal transaction control.
 		 */
 		oldcontext = MemoryContextSwitchTo(parsecontext);
 		querytree_list = pg_analyze_and_rewrite_compat(parsetree, sql, NULL, 0,
@@ -1060,7 +1083,7 @@ execute_sql_string(const char *sql)
 		portal = CreatePortal("", true, true);
 		/* Don't display the portal in pg_cursors */
 		portal->visible = false;
-        PortalDefineQuery(portal, NULL, sql, commandTag, plantree_list, NULL);
+		PortalDefineQuery(portal, NULL, sql, commandTag, plantree_list, NULL);
 		PortalStart(portal, NULL, 0, InvalidSnapshot);
 		PortalSetResultFormat(portal, 1, &format);	/* binary format */
 
@@ -1068,8 +1091,7 @@ execute_sql_string(const char *sql)
 		 * Tuples returned by any command other than the last are simply
 		 * discarded; but those returned by the last (or only) command are
 		 * redirected to the shared memory queue we're using for communication
-		 * with the launching backend. If the launching backend is gone or has
-		 * detached us, these messages will just get dropped on the floor.
+		 * with the launching backend.
 		 */
 		--commands_remaining;
 		if (commands_remaining > 0)
@@ -1082,8 +1104,7 @@ execute_sql_string(const char *sql)
 
 		/*
 		 * Only once the portal and destreceiver have been established can we
-		 * return to the transaction context.  All that stuff needs to survive
-		 * an internal commit inside PortalRun!
+		 * return to the transaction context.
 		 */
 		MemoryContextSwitchTo(oldcontext);
 
@@ -1100,7 +1121,6 @@ execute_sql_string(const char *sql)
 #else
 		(void) PortalRun(portal, FETCH_ALL, isTopLevel, receiver,
 						 receiver, &qc);
-
 #endif
 
 		/* Clean up the receiver. */
@@ -1108,8 +1128,7 @@ execute_sql_string(const char *sql)
 
 		/*
 		 * Send a CommandComplete message even if we suppressed the query
-		 * results.  The user backend will report these in the absence of any
-		 * true query results.
+		 * results.
 		 */
 #if PG_VERSION_NUM < 130000
 		EndCommand(completionTag, DestRemote);
