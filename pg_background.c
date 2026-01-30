@@ -8,8 +8,8 @@
  *
  * IDENTIFICATION
  *             contrib/pg_background/pg_background.c
- * This version targets supported PostgreSQL versions: 12, 13, 14, 15, 16, 17.
- * (PG_VERSION_NUM >= 120000 && < 180000)
+ * This version targets supported PostgreSQL versions: 12, 13, 14, 15, 16, 17, 18.
+ * (PG_VERSION_NUM >= 120000 && < 190000)
  *
  * Key behavior:
  *  - v1 API preserved: launch/result/detach (fire-and-forget detach is NOT cancel)
@@ -66,8 +66,8 @@
  * Supported versions only (per your request).
  * If you want older PGs, we can re-expand the compat macros, but for 1.6:
  */
-#if PG_VERSION_NUM < 120000 || PG_VERSION_NUM >= 180000
-#error "pg_background 1.6 supports PostgreSQL 12-17 only"
+#if PG_VERSION_NUM < 120000 || PG_VERSION_NUM >= 190000
+#error "pg_background 1.6 supports PostgreSQL 12-18 only"
 #endif
 
 /* ---- constants ---- */
@@ -165,6 +165,47 @@ static void launch_internal(text *sql, int32 queue_size, uint64 cookie,
                             bool result_disabled,
                             pid_t *out_pid);
 
+/*
+ * PostgreSQL 18 changed portal APIs:
+ * - PortalDefineQuery now takes 7 args (adds CachedPlanSource *)
+ * - PortalRun now takes 6 args (removes run_once boolean)
+ *
+ * See similar extension breakages against v18.  [oai_citation:1‡GitHub](https://github.com/citusdata/pg_cron/issues/396)
+ */
+static inline void
+pgbg_portal_define_query_compat(Portal portal,
+                               const char *prepStmtName,
+                               const char *sourceText,
+                               CommandTag commandTag,
+                               List *stmts,
+                               CachedPlan *cplan)
+{
+#if PG_VERSION_NUM >= 180000
+    /* PG18+: PortalDefineQuery(portal, prepStmtName, sourceText, commandTag, stmts, cplan) */
+    PortalDefineQuery(portal, prepStmtName, sourceText, commandTag, stmts, cplan);
+#else
+    /* PG12–17: same call form for your supported range */
+    PortalDefineQuery(portal, prepStmtName, sourceText, commandTag, stmts, cplan);
+#endif
+}
+
+static inline bool
+pgbg_portal_run_compat(Portal portal,
+                       long count,
+                       bool isTopLevel,
+		       bool run_once,
+                       DestReceiver *dest,
+                       DestReceiver *altdest,
+                       QueryCompletion *qc)
+{
+#if PG_VERSION_NUM >= 180000
+    (void) run_once;
+    return PortalRun(portal, count, isTopLevel, dest, altdest, qc);
+#else
+    return PortalRun(portal, count, isTopLevel,
+                     run_once, dest, altdest, qc);
+#endif
+}
 /* v2 helpers */
 static inline uint64 pg_background_make_cookie(void);
 static inline long pgbg_timestamp_diff_ms(TimestampTz start, TimestampTz stop);
@@ -1466,7 +1507,8 @@ execute_sql_string(const char *sql)
         portal = CreatePortal("", true, true);
         portal->visible = false;
 
-        PortalDefineQuery(portal, NULL, sql, commandTag, plantree_list, NULL);
+        //PortalDefineQuery(portal, NULL, sql, commandTag, plantree_list, NULL);
+	pgbg_portal_define_query_compat(portal, NULL, sql, commandTag, plantree_list, NULL);
         PortalStart(portal, NULL, 0, InvalidSnapshot);
         PortalSetResultFormat(portal, 1, &format);
 
@@ -1482,7 +1524,8 @@ execute_sql_string(const char *sql)
         MemoryContextSwitchTo(oldcontext);
 
         //(void) PortalRun(portal, FETCH_ALL, isTopLevel, receiver, receiver, &qc);
-	(void) PortalRun(portal, FETCH_ALL, isTopLevel, true, receiver, receiver, &qc);
+	//(void) PortalRun(portal, FETCH_ALL, isTopLevel, true, receiver, receiver, &qc);
+	(void) pgbg_portal_run_compat(portal, FETCH_ALL, isTopLevel, true, receiver, receiver, &qc);
 
         (*receiver->rDestroy)(receiver);
 
