@@ -1,14 +1,170 @@
 CREATE EXTENSION pg_background;
+DROP TABLE IF EXISTS t;
 CREATE TABLE t(id integer);
-SELECT * FROM pg_background_result(pg_background_launch('INSERT INTO t SELECT 1')) AS (result TEXT);
-   result   
+
+SELECT pg_background_launch('INSERT INTO t SELECT 1') AS pid \gset
+SELECT * FROM pg_background_result(:pid) AS (result TEXT);
+   result
 ------------
  INSERT 0 1
 (1 row)
 
-SELECT * FROM t;
- id 
+SELECT * FROM t ORDER BY id;
+ id
 ----
   1
 (1 row)
 
+SELECT pg_background_launch('SELECT 1') AS pid \gset
+SELECT pg_background_detach(:pid);
+ pg_background_detach
+---------------------
+
+(1 row)
+
+SELECT (h).pid AS v2_pid, (h).cookie AS v2_cookie
+FROM (SELECT pg_background_launch_v2('INSERT INTO t SELECT 2', 65536) AS h) s
+\gset
+SELECT pg_sleep(0.2);
+ pg_sleep
+----------
+
+(1 row)
+
+SELECT pg_background_detach_v2(:v2_pid, :v2_cookie);
+ pg_background_detach_v2
+------------------------
+
+(1 row)
+
+SELECT pg_sleep(0.5);
+ pg_sleep
+----------
+
+(1 row)
+
+SELECT * FROM t ORDER BY id;
+ id
+----
+  1
+  2
+(2 rows)
+
+SELECT (h).pid AS c_pid, (h).cookie AS c_cookie
+FROM (SELECT pg_background_launch_v2('SELECT pg_sleep(10); INSERT INTO t SELECT 99', 65536) AS h) s
+\gset
+SELECT pg_sleep(0.2);
+ pg_sleep
+----------
+
+(1 row)
+
+SELECT pg_background_cancel_v2(:c_pid, :c_cookie);
+ pg_background_cancel_v2
+------------------------
+
+(1 row)
+
+SELECT pg_sleep(0.5);
+ pg_sleep
+----------
+
+(1 row)
+
+SELECT count(*) AS canceled_insert_count
+FROM t
+WHERE id = 99;
+ canceled_insert_count
+----------------------
+                    0
+(1 row)
+
+CREATE TABLE t_detach_v1(id int);
+SELECT pg_background_detach(
+  pg_background_launch('INSERT INTO t_detach_v1 SELECT 1', 65536)
+);
+ pg_background_detach
+----------------------
+(1 row)
+
+SELECT pg_sleep(0.2);
+ pg_sleep
+----------
+(1 row)
+
+SELECT count(*) FROM t_detach_v1;
+ count
+-------
+     1
+(1 row)
+
+CREATE TABLE t_detach_v2(id int);
+DO $$
+DECLARE h public.pg_background_handle;
+BEGIN
+  SELECT * INTO h FROM pg_background_launch_v2('INSERT INTO t_detach_v2 SELECT 1', 65536);
+  PERFORM pg_background_detach_v2(h.pid, h.cookie);
+END;
+$$;
+DO
+SELECT pg_sleep(0.2);
+ pg_sleep
+----------
+(1 row)
+
+SELECT count(*) FROM t_detach_v2;
+ count
+-------
+     1
+(1 row)
+
+CREATE TABLE t_wait(id int);
+DO $$
+DECLARE h public.pg_background_handle;
+DECLARE s public.pg_background_status;
+DECLARE ok bool;
+BEGIN
+  SELECT * INTO h FROM pg_background_launch_v2('SELECT pg_sleep(2); INSERT INTO t_wait VALUES (1)', 65536);
+
+  s := pg_background_status_v2(h.pid, h.cookie);
+  RAISE NOTICE 'status1=%', s.state;
+
+  ok := pg_background_wait_v2(h.pid, h.cookie, 200);
+  RAISE NOTICE 'wait_short=%', ok;
+
+  ok := pg_background_wait_v2(h.pid, h.cookie, 5000);
+  RAISE NOTICE 'wait_long=%', ok;
+
+  s := pg_background_status_v2(h.pid, h.cookie);
+  RAISE NOTICE 'status2=%', s.state;
+
+  PERFORM pg_background_detach_v2(h.pid, h.cookie);
+END;
+$$;
+NOTICE:  status1=running
+NOTICE:  wait_short=f
+NOTICE:  wait_long=t
+NOTICE:  status2=complete
+DO
+SELECT count(*) FROM t_wait;
+ count
+-------
+     1
+(1 row)
+
+CREATE TABLE t_cancel(id int);
+DO $$
+DECLARE h public.pg_background_handle;
+BEGIN
+  SELECT * INTO h FROM pg_background_launch_v2('SELECT pg_sleep(5); INSERT INTO t_cancel VALUES (1)', 65536);
+  PERFORM pg_background_cancel_v2(h.pid, h.cookie, 500);
+  PERFORM pg_sleep(0.5);
+  PERFORM pg_background_detach_v2(h.pid, h.cookie);
+END;
+$$;
+DO
+SELECT count(*) FROM t_cancel;
+ count
+-------
+     0
+(1 row)
