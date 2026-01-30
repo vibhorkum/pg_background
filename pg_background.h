@@ -43,12 +43,15 @@
         pg_analyze_and_rewrite((parse), (string), (types), (num))
 #endif
 
+/* pg_background.h */
+//extern long pgbg_timestamp_diff_ms(TimestampTz start, TimestampTz stop);
+
 /*
  * TimestampDifferenceMilliseconds changed signature in newer branches.
  * PG17+: long TimestampDifferenceMilliseconds(start, stop)
  * older: void TimestampDifferenceMilliseconds(start, stop, &ms)
  */
-#if PG_VERSION_NUM >= 170000
+/* #if PG_VERSION_NUM >= 170000
 static inline long
 pgbg_timestamp_diff_ms(TimestampTz start, TimestampTz stop)
 {
@@ -62,6 +65,6 @@ pgbg_timestamp_diff_ms(TimestampTz start, TimestampTz stop)
 	TimestampDifferenceMilliseconds(start, stop, &ms);
 	return ms;
 }
-#endif
+#endif */
 
-#endif /* PG_BACKGROUND_H_ */
+#endif  /* PG_BACKGROUND_H_ */
