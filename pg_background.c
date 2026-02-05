@@ -133,6 +133,7 @@ pg_background_launch(PG_FUNCTION_ARGS)
 	shm_toc    *toc;
 	char	   *sqlp;
 	char	   *gucstate;
+	void	   *mq_memory;
 	shm_mq	   *mq;
 	BackgroundWorker worker;
 	BackgroundWorkerHandle *worker_handle = NULL;
@@ -183,6 +184,10 @@ pg_background_launch(PG_FUNCTION_ARGS)
 
 		/* Store fixed-size data in dynamic shared memory. */
 		fdata = shm_toc_allocate(toc, sizeof(pg_background_fixed_data));
+		if (fdata == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_OUT_OF_MEMORY),
+					 errmsg("failed to allocate memory for worker metadata")));
 		fdata->database_id = MyDatabaseId;
 		fdata->authenticated_user_id = GetAuthenticatedUserId();
 		GetUserIdAndSecContext(&fdata->current_user_id, &fdata->sec_context);
@@ -201,12 +206,20 @@ pg_background_launch(PG_FUNCTION_ARGS)
 
 		/* Store GUC state in dynamic shared memory. */
 		gucstate = shm_toc_allocate(toc, guc_len);
+		if (gucstate == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_OUT_OF_MEMORY),
+					 errmsg("failed to allocate memory for GUC state")));
 		SerializeGUCState(guc_len, gucstate);
 		shm_toc_insert(toc, PG_BACKGROUND_KEY_GUC, gucstate);
 
 		/* Establish message queue in dynamic shared memory. */
-		mq = shm_mq_create(shm_toc_allocate(toc, (Size) queue_size),
-						   (Size) queue_size);
+		mq_memory = shm_toc_allocate(toc, (Size) queue_size);
+		if (mq_memory == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_OUT_OF_MEMORY),
+					 errmsg("failed to allocate memory for message queue")));
+		mq = shm_mq_create(mq_memory, (Size) queue_size);
 		shm_toc_insert(toc, PG_BACKGROUND_KEY_QUEUE, mq);
 		shm_mq_set_receiver(mq, MyProc);
 
@@ -325,13 +338,23 @@ throw_untranslated_error(ErrorData translated_edata)
 	UNTRANSLATE(hint);
 	UNTRANSLATE(context);
 
-	ThrowErrorData(&untranslated_edata);
+	PG_TRY();
+	{
+		ThrowErrorData(&untranslated_edata);
+	}
+	PG_FINALLY();
+	{
+		/* Clean up untranslated strings whether we throw or not. */
+		FREE_UNTRANSLATED(message);
+		FREE_UNTRANSLATED(detail);
+		FREE_UNTRANSLATED(detail_log);
+		FREE_UNTRANSLATED(hint);
+		FREE_UNTRANSLATED(context);
+	}
+	PG_END_TRY();
 
-	FREE_UNTRANSLATED(message);
-	FREE_UNTRANSLATED(detail);
-	FREE_UNTRANSLATED(detail_log);
-	FREE_UNTRANSLATED(hint);
-	FREE_UNTRANSLATED(context);
+#undef UNTRANSLATE
+#undef FREE_UNTRANSLATED
 }
 
 /*
@@ -666,7 +689,15 @@ form_result_tuple(pg_background_result_state * state, TupleDesc tupdesc,
 
 	pq_getmsgend(msg);
 
-	return heap_form_tuple(tupdesc, values, isnull);
+	result = heap_form_tuple(tupdesc, values, isnull);
+
+	/* Clean up allocated arrays. */
+	if (values != NULL)
+		pfree(values);
+	if (isnull != NULL)
+		pfree(isnull);
+
+	return result;
 }
 
 /*
@@ -732,7 +763,13 @@ cleanup_worker_info(dsm_segment *seg, Datum pid_datum)
 }
 
 /*
- * Find the background worker information for the worker with a given PID.
+ * find_worker_info
+ *
+ * Locate background worker information by process ID.
+ *
+ * Returns NULL if no worker with the given PID is registered in this session.
+ * Note: PIDs can be reused by the OS, but within a session this provides
+ * sufficient uniqueness for tracking worker state.
  */
 static pg_background_worker_info *
 find_worker_info(pid_t pid)
@@ -764,7 +801,19 @@ check_rights(pg_background_worker_info * info)
 }
 
 /*
- * Save worker information for future IPC.
+ * save_worker_info
+ *
+ * Store information about a newly-launched background worker for future IPC.
+ *
+ * Registers a DSM cleanup callback and creates a hash table entry for the worker.
+ * If a PID collision is detected (worker with same PID already exists), the old
+ * entry is detached if it belongs to the same user, or a FATAL error is raised
+ * if it belongs to a different user (potential security issue).
+ *
+ * The worker info persists until either:
+ * - pg_background_result() consumes the results
+ * - pg_background_detach() is called
+ * - The DSM segment is destroyed
  */
 static void
 save_worker_info(pid_t pid, dsm_segment *seg, BackgroundWorkerHandle *handle,
@@ -809,6 +858,11 @@ save_worker_info(pid_t pid, dsm_segment *seg, BackgroundWorkerHandle *handle,
 
 	/* Create a new entry for this worker. */
 	info = hash_search(worker_hash, (void *) &pid, HASH_ENTER, NULL);
+	if (info == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_OUT_OF_MEMORY),
+				 errmsg("failed to allocate hash table entry for worker PID %d",
+						pid)));
 	info->pid = pid;
 	info->seg = seg;
 	info->handle = handle;
@@ -877,15 +931,30 @@ pg_background_worker_main(Datum main_arg)
 	if (toc == NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("bad magic number in dynamic shared memory segment")));
+				 errmsg("bad magic number in dynamic shared memory segment"),
+				 errdetail("Expected magic number 0x%08X.", PG_BACKGROUND_MAGIC)));
 
 	/* Find data structures in dynamic shared memory. */
 	fdata = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_FIXED_DATA, false);
 	if (fdata == NULL)
-		ereport(ERROR, (errmsg("failed to locate fixed data in shared memory")));
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("failed to locate fixed data in shared memory")));
 	sql = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_SQL, false);
+	if (sql == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("failed to locate SQL query in shared memory")));
 	gucstate = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_GUC, false);
+	if (gucstate == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("failed to locate GUC state in shared memory")));
 	mq = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_QUEUE, false);
+	if (mq == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("failed to locate message queue in shared memory")));
 
 	shm_mq_set_sender(mq, MyProc);
 	responseq = shm_mq_attach(mq, seg, NULL);
@@ -946,7 +1015,15 @@ pg_background_worker_main(Datum main_arg)
 }
 
 /*
- * Check binary input function exists for the given type.
+ * exists_binary_recv_fn
+ *
+ * Check if a binary receive function exists for the given type OID.
+ *
+ * Returns true if the type has a valid typreceive function (meaning it
+ * supports binary protocol transfer), false otherwise.
+ *
+ * This is used to determine whether result data can be transferred in
+ * binary format between the background worker and the launching backend.
  */
 static bool
 exists_binary_recv_fn(Oid type)
@@ -1142,6 +1219,9 @@ execute_sql_string(const char *sql)
 
 	/* Be sure to advance the command counter after the last script command */
 	CommandCounterIncrement();
+
+	/* Clean up parse/plan memory context. */
+	MemoryContextDelete(parsecontext);
 }
 
 /*

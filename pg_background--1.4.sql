@@ -39,17 +39,17 @@ BEGIN
     -- Grant execute permissions on pg_background functions
     EXECUTE format('GRANT EXECUTE ON FUNCTION pg_background_launch(pg_catalog.text, pg_catalog.int4) TO %I', user_name);
     IF print_commands THEN
-      RAISE INFO 'Executed command: GRANT EXECUTE ON FUNCTION pg_background_launch(pg_catalog.text, pg_catalog.int4) TO %', user_name;
+      RAISE INFO 'Executed command: GRANT EXECUTE ON FUNCTION pg_background_launch(pg_catalog.text, pg_catalog.int4) TO %I', user_name;
     END IF;
 
     EXECUTE format('GRANT EXECUTE ON FUNCTION pg_background_result(pg_catalog.int4) TO %I', user_name);
     IF print_commands THEN
-      RAISE INFO 'Executed command: GRANT EXECUTE ON FUNCTION pg_background_result(pg_catalog.int4) TO %', user_name;
+      RAISE INFO 'Executed command: GRANT EXECUTE ON FUNCTION pg_background_result(pg_catalog.int4) TO %I', user_name;
     END IF;
 
     EXECUTE format('GRANT EXECUTE ON FUNCTION pg_background_detach(pg_catalog.int4) TO %I', user_name);
     IF print_commands THEN
-      RAISE INFO 'Executed command: GRANT EXECUTE ON FUNCTION pg_background_detach(pg_catalog.int4) TO %', user_name;
+      RAISE INFO 'Executed command: GRANT EXECUTE ON FUNCTION pg_background_detach(pg_catalog.int4) TO %I', user_name;
     END IF;
 
     RETURN TRUE;
@@ -84,17 +84,17 @@ BEGIN
     -- Revoke execute permissions on pg_background functions
     EXECUTE format('REVOKE EXECUTE ON FUNCTION pg_background_launch(pg_catalog.text, pg_catalog.int4) FROM %I', user_name);
     IF print_commands THEN
-      RAISE INFO 'Executed command: REVOKE EXECUTE ON FUNCTION pg_background_launch(pg_catalog.text, pg_catalog.int4) FROM %', user_name;
+      RAISE INFO 'Executed command: REVOKE EXECUTE ON FUNCTION pg_background_launch(pg_catalog.text, pg_catalog.int4) FROM %I', user_name;
     END IF;
 
     EXECUTE format('REVOKE EXECUTE ON FUNCTION pg_background_result(pg_catalog.int4) FROM %I', user_name);
     IF print_commands THEN
-      RAISE INFO 'Executed command: REVOKE EXECUTE ON FUNCTION pg_background_result(pg_catalog.int4) FROM %', user_name;
+      RAISE INFO 'Executed command: REVOKE EXECUTE ON FUNCTION pg_background_result(pg_catalog.int4) FROM %I', user_name;
     END IF;
 
     EXECUTE format('REVOKE EXECUTE ON FUNCTION pg_background_detach(pg_catalog.int4) FROM %I', user_name);
     IF print_commands THEN
-      RAISE INFO 'Executed command: REVOKE EXECUTE ON FUNCTION pg_background_detach(pg_catalog.int4) FROM %', user_name;
+      RAISE INFO 'Executed command: REVOKE EXECUTE ON FUNCTION pg_background_detach(pg_catalog.int4) FROM %I', user_name;
     END IF;
 
     RETURN TRUE;
