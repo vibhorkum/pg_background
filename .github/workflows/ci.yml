@@ -1,0 +1,260 @@
+name: PostgreSQL Extension CI
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: Lint & Code Style
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Check for trailing whitespace
+      run: |
+        ! git grep -n '[[:blank:]]$' -- '*.c' '*.h' '*.sql'
+
+    - name: Check for tabs in SQL
+      run: |
+        ! git grep -n $'\t' -- '*.sql'
+
+    - name: Verify SQL files end with newline
+      run: |
+        for f in $(find . -name '*.sql'); do
+          if [ -n "$(tail -c 1 "$f")" ]; then
+            echo "File $f does not end with newline"
+            exit 1
+          fi
+        done
+
+  build-and-test:
+    name: Build & Test (PG ${{ matrix.pg }})
+    runs-on: ubuntu-latest
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [12, 13, 14, 15, 16, 17]
+        include:
+          - pg: 12
+            pg_version: "12.21"
+          - pg: 13
+            pg_version: "13.17"
+          - pg: 14
+            pg_version: "14.14"
+          - pg: 15
+            pg_version: "15.9"
+          - pg: 16
+            pg_version: "16.5"
+          - pg: 17
+            pg_version: "17.1"
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install PostgreSQL ${{ matrix.pg }}
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y wget gnupg lsb-release
+        
+        # Add PostgreSQL APT repository
+        echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | \
+          sudo tee /etc/apt/sources.list.d/pgdg.list
+        wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | \
+          sudo apt-key add -
+        
+        sudo apt-get update
+        sudo apt-get install -y \
+          postgresql-${{ matrix.pg }} \
+          postgresql-server-dev-${{ matrix.pg }}
+
+    - name: Build extension
+      run: |
+        export PATH="/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH"
+        make clean
+        make
+      env:
+        PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+
+    - name: Install extension
+      run: |
+        export PATH="/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH"
+        sudo make install
+      env:
+        PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+
+    - name: Start PostgreSQL
+      run: |
+        sudo systemctl start postgresql@${{ matrix.pg }}-main
+        sudo -u postgres psql -c "CREATE DATABASE contrib_regression;"
+
+    - name: Run regression tests
+      run: |
+        export PATH="/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH"
+        make installcheck || {
+          echo "=== Regression diffs ==="
+          cat regression.diffs || true
+          echo "=== Regression output ==="
+          cat results/pg_background.out || true
+          exit 1
+        }
+      env:
+        PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+        PGPORT: 5432
+        PGUSER: postgres
+        PGDATABASE: contrib_regression
+
+    - name: Upload test results on failure
+      if: failure()
+      uses: actions/upload-artifact@v3
+      with:
+        name: test-results-pg${{ matrix.pg }}
+        path: |
+          regression.diffs
+          results/
+          expected/
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  compile-warnings:
+    name: Compiler Warnings Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install PostgreSQL 17 (latest)
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y wget gnupg lsb-release
+        
+        echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | \
+          sudo tee /etc/apt/sources.list.d/pgdg.list
+        wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | \
+          sudo apt-key add -
+        
+        sudo apt-get update
+        sudo apt-get install -y \
+          postgresql-17 \
+          postgresql-server-dev-17
+
+    - name: Build with -Werror
+      run: |
+        export PATH="/usr/lib/postgresql/17/bin:$PATH"
+        make clean
+        make CFLAGS="-Wall -Wextra -Werror -Wno-unused-parameter"
+      env:
+        PG_CONFIG: /usr/lib/postgresql/17/bin/pg_config
+
+  docs-check:
+    name: Documentation Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Check README exists
+      run: |
+        [ -f README.md ] || { echo "README.md not found"; exit 1; }
+
+    - name: Check SQL file headers
+      run: |
+        for f in $(find . -name '*.sql' -not -path './expected/*'); do
+          if ! head -1 "$f" | grep -q "complain if script is sourced"; then
+            echo "WARNING: $f missing standard header"
+          fi
+        done
+
+    - name: Check for TODO/FIXME comments
+      run: |
+        git grep -n -i -E 'TODO|FIXME' -- '*.c' '*.h' || true
+
+  build-matrix-extended:
+    name: Extended Build Matrix (OS Variants)
+    runs-on: ${{ matrix.os }}
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-22.04, ubuntu-20.04]
+        pg: [14, 16, 17]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install PostgreSQL ${{ matrix.pg }}
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y wget gnupg lsb-release
+        
+        echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | \
+          sudo tee /etc/apt/sources.list.d/pgdg.list
+        wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | \
+          sudo apt-key add -
+        
+        sudo apt-get update
+        sudo apt-get install -y \
+          postgresql-${{ matrix.pg }} \
+          postgresql-server-dev-${{ matrix.pg }}
+
+    - name: Build extension
+      run: |
+        export PATH="/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH"
+        make clean
+        make
+      env:
+        PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+
+  summary:
+    name: Test Summary
+    runs-on: ubuntu-latest
+    needs: [lint, build-and-test, security-scan, compile-warnings, docs-check]
+    if: always()
+    
+    steps:
+    - name: Check test results
+      run: |
+        echo "Lint: ${{ needs.lint.result }}"
+        echo "Build & Test: ${{ needs.build-and-test.result }}"
+        echo "Security Scan: ${{ needs.security-scan.result }}"
+        echo "Compiler Warnings: ${{ needs.compile-warnings.result }}"
+        echo "Docs Check: ${{ needs.docs-check.result }}"
+        
+        if [[ "${{ needs.lint.result }}" == "failure" ]] || \
+           [[ "${{ needs.build-and-test.result }}" == "failure" ]] || \
+           [[ "${{ needs.compile-warnings.result }}" == "failure" ]]; then
+          echo "❌ CI Failed"
+          exit 1
+        else
+          echo "✅ CI Passed"
+        fi
