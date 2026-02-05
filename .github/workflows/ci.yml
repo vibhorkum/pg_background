@@ -1,0 +1,144 @@
+name: CI - PostgreSQL Extension Build & Test
+
+on:
+  push:
+    branches: [ main, v1.6, develop ]
+  pull_request:
+    branches: [ main, v1.6 ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: PG ${{ matrix.pg }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+        pg: [12, 13, 14, 15, 16, 17]
+        include:
+          # Test PG 18 (devel) on Ubuntu 24.04 only
+          - os: ubuntu-24.04
+            pg: 18
+        exclude:
+          # PG 18 not on Ubuntu 22.04 (may not be available)
+          - os: ubuntu-22.04
+            pg: 18
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install PostgreSQL ${{ matrix.pg }}
+        run: |
+          # Add PostgreSQL APT repository
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+          sudo apt-get update
+          
+          # Install PostgreSQL and dev headers
+          sudo apt-get install -y \
+            postgresql-${{ matrix.pg }} \
+            postgresql-server-dev-${{ matrix.pg }} \
+            libkrb5-dev \
+            build-essential
+          
+          # Start PostgreSQL
+          sudo systemctl start postgresql@${{ matrix.pg }}-main
+          sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'postgres';"
+
+      - name: Build extension
+        run: |
+          export PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH
+          make clean
+          make
+        env:
+          PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+
+      - name: Install extension
+        run: |
+          export PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH
+          sudo make install
+        env:
+          PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+
+      - name: Run regression tests
+        run: |
+          export PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH
+          sudo -u postgres make installcheck
+        env:
+          PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+          PGPORT: 5432
+          PGHOST: localhost
+          PGUSER: postgres
+          PGPASSWORD: postgres
+
+      - name: Upload regression diffs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-diffs-pg${{ matrix.pg }}-${{ matrix.os }}
+          path: |
+            regression.diffs
+            regression.out
+            results/
+
+  lint:
+    name: Lint & Style Check
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang-format \
+            cppcheck \
+            postgresql-server-dev-16
+
+      - name: Run cppcheck
+        run: |
+          cppcheck --enable=all --inconclusive --std=c11 \
+            --suppress=missingIncludeSystem \
+            --suppress=unusedFunction \
+            --suppress=unmatchedSuppression \
+            --error-exitcode=1 \
+            pg_background.c || true  # Don't fail on warnings for now
+
+      - name: Check code formatting
+        run: |
+          # Run clang-format check (don't modify, just report)
+          clang-format --dry-run --Werror pg_background.c || true  # Informational only
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run CodeQL Analysis
+        uses: github/codeql-action/init@v3
+        with:
+          languages: cpp
+
+      - name: Install PostgreSQL headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-server-dev-16 libkrb5-dev
+
+      - name: Build for CodeQL
+        run: |
+          export PATH=/usr/lib/postgresql/16/bin:$PATH
+          make clean
+          make
+        env:
+          PG_CONFIG: /usr/lib/postgresql/16/bin/pg_config
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
