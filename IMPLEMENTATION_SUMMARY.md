@@ -5,7 +5,7 @@
 This document summarizes the production-quality improvements implemented for pg_background v1.6 based on the comprehensive maintainer review.
 
 **Implementation Date**: 2026-02-05  
-**Branch**: copilot/implement-maintenace-fixes  
+**Branch**: implement-maintenace-fixes  
 **Status**: ✅ Complete
 
 ---
