@@ -650,6 +650,7 @@ form_result_tuple(pg_background_result_state * state, TupleDesc tupdesc,
 	int16		i;
 	Datum	   *values = NULL;
 	bool	   *isnull = NULL;
+	HeapTuple	result;
 	StringInfoData buf;
 
 	if (!state->has_row_description)

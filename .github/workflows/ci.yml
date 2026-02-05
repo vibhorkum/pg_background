@@ -1,0 +1,249 @@
+name: PostgreSQL Extension CI
+
+on:
+  push:
+    branches: [ main, v1.6, 'copilot/**' ]
+  pull_request:
+    branches: [ main, v1.6 ]
+
+jobs:
+  test:
+    name: PG ${{ matrix.pg }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        pg: [12, 13, 14, 15, 16, 17]
+        include:
+          # Test on macOS with latest PG
+          - os: macos-latest
+            pg: 17
+          # Test older versions on Ubuntu 20.04
+          - os: ubuntu-20.04
+            pg: 11
+          - os: ubuntu-20.04
+            pg: 10
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Install PostgreSQL on Ubuntu
+      if: runner.os == 'Linux'
+      run: |
+        # Add PostgreSQL APT repository
+        sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+        wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+        sudo apt-get update
+        
+        # Install PostgreSQL and development files
+        sudo apt-get install -y \
+          postgresql-${{ matrix.pg }} \
+          postgresql-server-dev-${{ matrix.pg }} \
+          postgresql-client-${{ matrix.pg }}
+        
+        # Ensure pg_config is in PATH
+        echo "/usr/lib/postgresql/${{ matrix.pg }}/bin" >> $GITHUB_PATH
+    
+    - name: Install PostgreSQL on macOS
+      if: runner.os == 'macOS'
+      run: |
+        brew install postgresql@${{ matrix.pg }}
+        echo "$(brew --prefix postgresql@${{ matrix.pg }})/bin" >> $GITHUB_PATH
+    
+    - name: Verify PostgreSQL installation
+      run: |
+        pg_config --version
+        which pg_config
+    
+    - name: Build extension
+      run: |
+        make clean
+        make
+    
+    - name: Install extension
+      run: |
+        sudo make install
+    
+    - name: Initialize PostgreSQL cluster (Ubuntu)
+      if: runner.os == 'Linux'
+      run: |
+        sudo systemctl start postgresql
+        sudo -u postgres psql -c "CREATE USER $USER SUPERUSER;"
+        sudo -u postgres createdb $USER
+    
+    - name: Initialize PostgreSQL cluster (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        initdb -D /tmp/pgdata
+        pg_ctl -D /tmp/pgdata -l /tmp/logfile start
+        createdb $USER
+    
+    - name: Run regression tests
+      run: |
+        make installcheck
+    
+    - name: Show regression diffs on failure
+      if: failure()
+      run: |
+        if [ -f regression.diffs ]; then
+          cat regression.diffs
+        fi
+        
+        if [ -f regression.out ]; then
+          echo "=== regression.out ==="
+          cat regression.out
+        fi
+    
+    - name: Upload regression results
+      if: failure()
+      uses: actions/upload-artifact@v3
+      with:
+        name: regression-results-pg${{ matrix.pg }}-${{ matrix.os }}
+        path: |
+          regression.diffs
+          regression.out
+          results/
+
+  lint:
+    name: Code Quality Checks
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Install PostgreSQL development files
+      run: |
+        sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+        wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+        sudo apt-get update
+        sudo apt-get install -y postgresql-server-dev-16
+    
+    - name: Check build with warnings
+      run: |
+        make clean
+        CFLAGS="-Wall -Wextra -Werror -Wmissing-prototypes -Wpointer-arith" make
+    
+    - name: Check for trailing whitespace
+      run: |
+        ! git grep -n '[[:space:]]$' -- '*.c' '*.h' '*.sql'
+    
+    - name: Check for tabs in SQL files
+      run: |
+        ! git grep -n $'\t' -- '*.sql'
+
+  compatibility:
+    name: Version Compatibility Matrix
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        pg: [12, 13, 14, 15, 16, 17]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Install PostgreSQL ${{ matrix.pg }}
+      run: |
+        sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+        wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+        sudo apt-get update
+        sudo apt-get install -y \
+          postgresql-${{ matrix.pg }} \
+          postgresql-server-dev-${{ matrix.pg }}
+        echo "/usr/lib/postgresql/${{ matrix.pg }}/bin" >> $GITHUB_PATH
+    
+    - name: Test compilation
+      run: |
+        make clean
+        make
+        echo "✅ Successfully compiled against PostgreSQL ${{ matrix.pg }}"
+    
+    - name: Test installation
+      run: |
+        sudo make install
+        echo "✅ Successfully installed for PostgreSQL ${{ matrix.pg }}"
+    
+    - name: Verify extension loads
+      run: |
+        sudo systemctl start postgresql
+        sudo -u postgres psql -c "CREATE USER $USER SUPERUSER;"
+        sudo -u postgres createdb $USER
+        psql -c "CREATE EXTENSION pg_background;"
+        psql -c "SELECT extname, extversion FROM pg_extension WHERE extname = 'pg_background';"
+        echo "✅ Extension loads successfully in PostgreSQL ${{ matrix.pg }}"
+
+  smoke-test:
+    name: Smoke Tests
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Install PostgreSQL
+      run: |
+        sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+        wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+        sudo apt-get update
+        sudo apt-get install -y postgresql-16 postgresql-server-dev-16
+        echo "/usr/lib/postgresql/16/bin" >> $GITHUB_PATH
+    
+    - name: Build and install
+      run: |
+        make clean
+        make
+        sudo make install
+    
+    - name: Start PostgreSQL
+      run: |
+        sudo systemctl start postgresql
+        sudo -u postgres psql -c "CREATE USER $USER SUPERUSER;"
+        sudo -u postgres createdb $USER
+    
+    - name: Run smoke tests
+      run: |
+        # Create extension
+        psql -c "CREATE EXTENSION pg_background;"
+        
+        # Test basic launch and result
+        psql -c "
+          CREATE TABLE smoke_test(id INT);
+          SELECT * FROM pg_background_result(
+            pg_background_launch('INSERT INTO smoke_test VALUES (42)')
+          ) AS (result TEXT);
+          SELECT * FROM smoke_test;
+        " | grep -q "42" && echo "✅ Basic smoke test passed"
+        
+        # Test detach
+        psql -c "
+          DO \$\$
+          DECLARE
+            worker_pid INT;
+          BEGIN
+            worker_pid := pg_background_launch('SELECT pg_sleep(0.1)');
+            PERFORM pg_background_detach(worker_pid);
+          END \$\$;
+        " && echo "✅ Detach smoke test passed"
+        
+        # Test error handling
+        psql -c "
+          SELECT * FROM pg_background_result(
+            pg_background_launch('SELECT 1/0')
+          ) AS (result INT);
+        " 2>&1 | grep -q "division by zero" && echo "✅ Error handling smoke test passed"
+        
+        # Test privilege functions
+        psql -c "
+          CREATE ROLE smoke_test_role;
+          SELECT grant_pg_background_privileges('smoke_test_role');
+          SELECT revoke_pg_background_privileges('smoke_test_role');
+          DROP ROLE smoke_test_role;
+        " && echo "✅ Privilege functions smoke test passed"
+        
+        echo ""
+        echo "🎉 All smoke tests passed!"
