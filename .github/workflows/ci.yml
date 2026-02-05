@@ -6,10 +6,16 @@ on:
   pull_request:
     branches: [ main, v1.6 ]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: PG ${{ matrix.pg }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    
+    permissions:
+      contents: read
     
     strategy:
       fail-fast: false
@@ -111,6 +117,9 @@ jobs:
     name: Code Quality Checks
     runs-on: ubuntu-latest
     
+    permissions:
+      contents: read
+    
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -138,6 +147,9 @@ jobs:
   compatibility:
     name: Version Compatibility Matrix
     runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
     
     strategy:
       matrix:
@@ -180,6 +192,9 @@ jobs:
   smoke-test:
     name: Smoke Tests
     runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
     
     steps:
     - name: Checkout code
