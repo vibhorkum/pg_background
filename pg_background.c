@@ -193,7 +193,7 @@ static inline bool
 pgbg_portal_run_compat(Portal portal,
                        long count,
                        bool isTopLevel,
-		       bool run_once,
+                       bool run_once,
                        DestReceiver *dest,
                        DestReceiver *altdest,
                        QueryCompletion *qc)
