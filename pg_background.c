@@ -350,6 +350,20 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
     worker.bgw_notify_pid = MyProcPid;
 
     oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+    /*
+     * C1: BackgroundWorkerHandle lifetime is managed by PostgreSQL.
+     * CRITICAL: Do NOT pfree(worker_handle). PostgreSQL owns this memory
+     * and will clean it up internally. Calling pfree() on this handle
+     * will cause use-after-free bugs and potential crashes.
+     *
+     * The handle remains valid until:
+     * 1. The background worker process exits, OR
+     * 2. The current session ends
+     *
+     * We store the handle in TopMemoryContext to ensure it outlives
+     * transaction boundaries, which is safe because PostgreSQL manages
+     * the underlying memory lifecycle.
+     */
     if (!RegisterDynamicBackgroundWorker(&worker, &worker_handle))
         ereport(ERROR,
                 (errcode(ERRCODE_INSUFFICIENT_RESOURCES),
@@ -598,6 +612,16 @@ pg_background_result(PG_FUNCTION_ARGS)
         Size        nbytes;
         void       *data;
 
+        /*
+         * I3: CHECK_FOR_INTERRUPTS in result loop
+         * 
+         * Allows cancellation of long-running result retrieval (e.g., large
+         * result sets streaming from worker). Without this, Ctrl-C or
+         * pg_terminate_backend() won't interrupt the launcher session while
+         * it's blocked reading results.
+         */
+        CHECK_FOR_INTERRUPTS();
+
         res = shm_mq_receive(state->info->responseq, &nbytes, &data, false);
         if (res != SHM_MQ_SUCCESS)
             break;
@@ -620,15 +644,43 @@ pg_background_result(PG_FUNCTION_ARGS)
 
                 pq_parse_errornotice(&msg, &edata);
 
-                /* remember last_error for list_v2 (best-effort) */
+                /*
+                 * I2: Truncate error messages to prevent memory bloat
+                 * 
+                 * last_error is stored in TopMemoryContext and persists until:
+                 * 1. Worker is detached/canceled, OR
+                 * 2. Session ends
+                 * 
+                 * Long-lived sessions with many workers could accumulate
+                 * unbounded error text. Truncate at 512 bytes - sufficient for
+                 * debugging while preventing DoS via error message spam.
+                 */
                 if (state->info != NULL)
                 {
                     MemoryContext oldcxt = MemoryContextSwitchTo(TopMemoryContext);
                     if (state->info->last_error != NULL)
                         pfree(state->info->last_error);
-                    state->info->last_error = (edata.message != NULL)
-                        ? pstrdup(edata.message)
-                        : pstrdup("unknown error");
+                    
+                    if (edata.message != NULL)
+                    {
+                        size_t msg_len = strlen(edata.message);
+                        if (msg_len > 512)
+                        {
+                            /* Truncate and add ellipsis */
+                            char *truncated = (char *) palloc(513);
+                            memcpy(truncated, edata.message, 509);
+                            strcpy(truncated + 509, "...");
+                            state->info->last_error = truncated;
+                        }
+                        else
+                        {
+                            state->info->last_error = pstrdup(edata.message);
+                        }
+                    }
+                    else
+                    {
+                        state->info->last_error = pstrdup("unknown error");
+                    }
                     MemoryContextSwitchTo(oldcxt);
                 }
 
@@ -655,6 +707,20 @@ pg_background_result(PG_FUNCTION_ARGS)
                 if (state->has_row_description)
                     elog(ERROR, "multiple RowDescription messages");
                 state->has_row_description = true;
+
+                /*
+                 * Bounds checking for natts to prevent allocation attacks
+                 * 
+                 * Malicious or corrupted worker could send huge natts value,
+                 * causing excessive memory allocation or integer overflow.
+                 * PostgreSQL's MaxTupleAttributeNumber is typically 1664.
+                 * Cap at a reasonable value to prevent DoS.
+                 */
+                if (natts < 0 || natts > MaxTupleAttributeNumber)
+                    ereport(ERROR,
+                            (errcode(ERRCODE_PROTOCOL_VIOLATION),
+                             errmsg("invalid column count in RowDescription: %d", natts),
+                             errhint("Column count must be between 0 and %d.", MaxTupleAttributeNumber)));
 
                 if (natts != tupdesc->natts)
                     ereport(ERROR,
@@ -953,8 +1019,26 @@ pg_background_cancel_v2_grace(PG_FUNCTION_ARGS)
                  errmsg("cookie mismatch for PID %d", pid),
                  errhint("The worker may have been restarted or the handle is stale.")));
 
+    /*
+     * C3: Grace Period Overflow Protection
+     * 
+     * BEHAVIOR CHANGE: Cap grace_ms at 3600000 (1 hour) to prevent:
+     * 1. Integer overflow in timestamp arithmetic (TimestampTz is int64 microseconds)
+     * 2. Indefinite blocking that could hang sessions
+     * 3. Resource exhaustion from forgotten workers
+     * 
+     * JUSTIFICATION:
+     * - No legitimate use case for >1 hour grace period in background worker cancellation
+     * - Prevents (int32 grace_ms * 1000) overflow when converting to microseconds
+     * - Enterprise deployments should cancel workers promptly; multi-hour grace
+     *   periods indicate architectural problems
+     * 
+     * RISK: Negligible - any code passing >1h grace period is likely a bug
+     */
     if (grace_ms < 0)
         grace_ms = 0;
+    else if (grace_ms > 3600000)  /* Cap at 1 hour */
+        grace_ms = 3600000;
 
     pgbg_request_cancel(info);
     pgbg_send_cancel_signals(info, grace_ms);
@@ -1161,6 +1245,32 @@ pgbg_send_cancel_signals(pg_background_worker_info *info, int32 grace_ms)
         return;
 
 #ifndef WIN32
+    /*
+     * Windows Cancel Limitations
+     * 
+     * On Unix systems, we use SIGTERM for cooperative cancellation.
+     * Worker checks InterruptPending via CHECK_FOR_INTERRUPTS() in query
+     * execution and can cleanly abort.
+     * 
+     * WINDOWS LIMITATION:
+     * PostgreSQL on Windows does not support signal-based cancellation for
+     * background workers. The kill() call is not available, and Windows uses
+     * events/threads for IPC instead of signals.
+     * 
+     * WORKAROUND:
+     * Workers still check fdata->cancel_requested flag before executing SQL.
+     * This provides limited cancellation:
+     * - WORKS: Cancel before worker starts SQL execution
+     * - DOES NOT WORK: Cancel during long-running query (no mid-query interrupt)
+     * 
+     * PRODUCTION IMPACT:
+     * On Windows, cancel_v2() may not interrupt long-running SQL. Use:
+     * 1. statement_timeout to bound query execution time
+     * 2. Application-level timeouts
+     * 3. Connection pooler limits
+     * 
+     * SEE ALSO: windows/ReadMe.md for Windows-specific build notes
+     */
     if (info->pid > 0)
         (void) kill(info->pid, SIGTERM);
 #endif
@@ -1299,7 +1409,28 @@ save_worker_info(pid_t pid, uint64 cookie, dsm_segment *seg,
 
     GetUserIdAndSecContext(&current_user_id, &sec_context);
 
-    /* If stale entry exists (rare PID reuse inside same session), detach it */
+    /*
+     * C2: PID Reuse Edge Case Protection
+     * 
+     * SCENARIO: On systems with rapid process recycling (high load, small PID space),
+     * a background worker PID could theoretically be reused within the same session
+     * before the cleanup callback fires.
+     * 
+     * SAFETY MECHANISMS:
+     * 1. Cookie validation (v2 API): Even if PID is reused, cookie mismatch
+     *    will prevent operations on wrong worker
+     * 2. User ID check: If PID is reused by different user, we FATAL to prevent
+     *    security breach
+     * 3. Proactive cleanup: Detach stale DSM segment before creating new entry
+     * 
+     * WHY FATAL vs ERROR: A PID collision with different user indicates either:
+     *    a) Severe kernel PID space exhaustion, OR
+     *    b) Potential security attack (impersonation)
+     * Both warrant session termination rather than allowing continued operation.
+     * 
+     * OBSERVABILITY: Monitor for "background worker with PID X already exists"
+     * in logs - this indicates PID space pressure and may require system tuning.
+     */
     info = find_worker_info(pid);
     if (info != NULL)
     {
@@ -1412,8 +1543,32 @@ pg_background_worker_main(Datum main_arg)
     CommitTransactionCommand();
 
     /* If cancel was requested before we began, exit quietly */
-    if (fdata->cancel_requested != 0)
+    /*
+     * I5: Volatile access for cancel flag race protection
+     * 
+     * The cancel_requested field is shared memory accessed by:
+     * 1. Launcher session (writes via pgbg_request_cancel)
+     * 2. Worker process (reads here and potentially in signal handler)
+     * 
+     * Without volatile, compiler could cache the read and miss concurrent updates.
+     * While PostgreSQL's CHECK_FOR_INTERRUPTS() handles most cancellation via
+     * signals, this flag provides best-effort early exit before SQL execution.
+     * 
+     * NOTE: Full memory barrier semantics not required here - we only need to
+     * prevent compiler optimization. Signal handler will set InterruptPending
+     * which is already volatile in PostgreSQL core.
+     */
+    if (*(volatile uint32 *)&fdata->cancel_requested != 0)
+    {
+        /*
+         * Explicitly delete the ResourceOwner before proc_exit to ensure
+         * clean resource cleanup. This prevents warnings about leaked
+         * resources in PostgreSQL debug builds.
+         */
+        ResourceOwnerDelete(CurrentResourceOwner);
+        CurrentResourceOwner = NULL;
         proc_exit(0);
+    }
 
     SetCurrentStatementStartTimestamp();
     debug_query_string = sql;
@@ -1473,12 +1628,29 @@ execute_sql_string(const char *sql)
     int         commands_remaining;
     MemoryContext parsecontext;
     MemoryContext oldcontext;
+    /*
+     * I4: Error context for worker
+     * 
+     * Provides diagnostic context for errors that occur during worker execution.
+     * This helps distinguish worker errors from launcher errors in logs and
+     * makes debugging production issues significantly easier.
+     * 
+     * The context callback will prepend "pg_background worker executing: <sql>"
+     * to any error messages, making it clear which background job failed.
+     */
+    ErrorContextCallback sqlerrcontext;
 
     parsecontext = AllocSetContextCreate(TopMemoryContext,
                                          "pg_background parse/plan",
                                          ALLOCSET_DEFAULT_MINSIZE,
                                          ALLOCSET_DEFAULT_INITSIZE,
                                          ALLOCSET_DEFAULT_MAXSIZE);
+
+    /* Set up error context */
+    sqlerrcontext.callback = pg_background_error_callback;
+    sqlerrcontext.arg = (void *) &MyProcPid;
+    sqlerrcontext.previous = error_context_stack;
+    error_context_stack = &sqlerrcontext;
 
     PG_TRY();
     {
@@ -1559,12 +1731,15 @@ execute_sql_string(const char *sql)
     {
         /* Clean up memory context before re-throwing */
         MemoryContextDelete(parsecontext);
+        /* Restore error context stack */
+        error_context_stack = sqlerrcontext.previous;
         PG_RE_THROW();
     }
     PG_END_TRY();
 
-    /* Normal path: clean up memory context */
+    /* Normal path: clean up memory context and restore error context */
     MemoryContextDelete(parsecontext);
+    error_context_stack = sqlerrcontext.previous;
 }
 
 /* SIGTERM handling */
