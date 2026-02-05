@@ -489,9 +489,11 @@ throw_untranslated_error(ErrorData translated_edata)
     ErrorData untranslated_edata = translated_edata;
 
 #define UNTRANSLATE(field) \
-    if (translated_edata.field != NULL) \
-        untranslated_edata.field = pg_client_to_server(translated_edata.field, \
-                                                      strlen(translated_edata.field))
+    do { \
+        if (translated_edata.field != NULL) \
+            untranslated_edata.field = pg_client_to_server(translated_edata.field, \
+                                                          strlen(translated_edata.field)); \
+    } while (0)
 
     UNTRANSLATE(message);
     UNTRANSLATE(detail);
@@ -752,7 +754,10 @@ pg_background_result(PG_FUNCTION_ARGS)
 
     /* Done: detach DSM (triggers cleanup callback) */
     if (state->info && state->info->seg)
+    {
         dsm_detach(state->info->seg);
+        state->info->seg = NULL;  /* Prevent double-detach */
+    }
 
     SRF_RETURN_DONE(funcctx);
 }
@@ -856,7 +861,10 @@ pg_background_detach(PG_FUNCTION_ARGS)
     }
 
     if (info->seg)
+    {
         dsm_detach(info->seg);
+        info->seg = NULL;  /* Prevent double-detach */
+    }
 
     PG_RETURN_VOID();
 }
@@ -879,8 +887,9 @@ pg_background_detach_v2(PG_FUNCTION_ARGS)
 
     if (info->cookie != (uint64) cookie_in)
         ereport(ERROR,
-                (errcode(ERRCODE_UNDEFINED_OBJECT),
-                 errmsg("PID %d is not attached to this session (cookie mismatch)", pid)));
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("cookie mismatch for PID %d", pid),
+                 errhint("The worker may have been restarted or the handle is stale.")));
 
     if (info->seg && info->mapping_pinned)
     {
@@ -889,7 +898,10 @@ pg_background_detach_v2(PG_FUNCTION_ARGS)
     }
 
     if (info->seg)
+    {
         dsm_detach(info->seg);
+        info->seg = NULL;  /* Prevent double-detach */
+    }
 
     PG_RETURN_VOID();
 }
@@ -912,8 +924,9 @@ pg_background_cancel_v2(PG_FUNCTION_ARGS)
 
     if (info->cookie != (uint64) cookie_in)
         ereport(ERROR,
-                (errcode(ERRCODE_UNDEFINED_OBJECT),
-                 errmsg("PID %d is not attached to this session (cookie mismatch)", pid)));
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("cookie mismatch for PID %d", pid),
+                 errhint("The worker may have been restarted or the handle is stale.")));
 
     pgbg_request_cancel(info);
     pgbg_send_cancel_signals(info, 0);
@@ -936,8 +949,9 @@ pg_background_cancel_v2_grace(PG_FUNCTION_ARGS)
 
     if (info->cookie != (uint64) cookie_in)
         ereport(ERROR,
-                (errcode(ERRCODE_UNDEFINED_OBJECT),
-                 errmsg("PID %d is not attached to this session (cookie mismatch)", pid)));
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("cookie mismatch for PID %d", pid),
+                 errhint("The worker may have been restarted or the handle is stale.")));
 
     if (grace_ms < 0)
         grace_ms = 0;
@@ -965,8 +979,9 @@ pg_background_wait_v2(PG_FUNCTION_ARGS)
 
     if (info->cookie != (uint64) cookie_in)
         ereport(ERROR,
-                (errcode(ERRCODE_UNDEFINED_OBJECT),
-                 errmsg("PID %d is not attached to this session (cookie mismatch)", pid)));
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("cookie mismatch for PID %d", pid),
+                 errhint("The worker may have been restarted or the handle is stale.")));
 
     if (info->handle != NULL)
         (void) WaitForBackgroundWorkerShutdown(info->handle);
@@ -992,8 +1007,9 @@ pg_background_wait_v2_timeout(PG_FUNCTION_ARGS)
 
     if (info->cookie != (uint64) cookie_in)
         ereport(ERROR,
-                (errcode(ERRCODE_UNDEFINED_OBJECT),
-                 errmsg("PID %d is not attached to this session (cookie mismatch)", pid)));
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("cookie mismatch for PID %d", pid),
+                 errhint("The worker may have been restarted or the handle is stale.")));
 
     if (timeout_ms < 0)
         timeout_ms = 0;
@@ -1224,8 +1240,12 @@ cleanup_worker_info(dsm_segment *seg, Datum pid_datum)
     }
 
     hash_search(worker_hash, (void *) &pid, HASH_REMOVE, &found);
+    /*
+     * Don't ERROR if not found - may be concurrent cleanup or already removed.
+     * This can happen during normal operation with concurrent detach/result.
+     */
     if (!found)
-        elog(ERROR, "pg_background worker_hash table corrupted");
+        elog(DEBUG1, "pg_background worker_hash entry for PID %d already removed", (int) pid);
 }
 
 /* Find worker info by pid */
@@ -1460,81 +1480,91 @@ execute_sql_string(const char *sql)
                                          ALLOCSET_DEFAULT_INITSIZE,
                                          ALLOCSET_DEFAULT_MAXSIZE);
 
-    oldcontext = MemoryContextSwitchTo(parsecontext);
-    raw_parsetree_list = pg_parse_query(sql);
-    commands_remaining = list_length(raw_parsetree_list);
-    isTopLevel = (commands_remaining == 1);
-    MemoryContextSwitchTo(oldcontext);
-
-    foreach(lc1, raw_parsetree_list)
+    PG_TRY();
     {
-        RawStmt    *parsetree = (RawStmt *) lfirst(lc1);
-        CommandTag  commandTag;
-        QueryCompletion qc;
-        List       *querytree_list;
-        List       *plantree_list;
-        bool        snapshot_set = false;
-        Portal      portal;
-        DestReceiver *receiver;
-        int16       format = 1;
-
-        if (IsA(parsetree->stmt, TransactionStmt))
-            ereport(ERROR,
-                    (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                     errmsg("transaction control statements are not allowed in pg_background")));
-
-        commandTag = CreateCommandTag_compat(parsetree);
-        set_ps_display_compat(GetCommandTagName(commandTag));
-
-        BeginCommand(commandTag, DestNone);
-
-        if (analyze_requires_snapshot(parsetree))
-        {
-            PushActiveSnapshot(GetTransactionSnapshot());
-            snapshot_set = true;
-        }
-
         oldcontext = MemoryContextSwitchTo(parsecontext);
-        querytree_list = pg_analyze_and_rewrite_compat(parsetree, sql, NULL, 0, NULL);
-
-        plantree_list = pg_plan_queries(querytree_list, sql, 0, NULL);
-
-        if (snapshot_set)
-            PopActiveSnapshot();
-
-        CHECK_FOR_INTERRUPTS();
-
-        portal = CreatePortal("", true, true);
-        portal->visible = false;
-
-        //PortalDefineQuery(portal, NULL, sql, commandTag, plantree_list, NULL);
-	pgbg_portal_define_query_compat(portal, NULL, sql, commandTag, plantree_list, NULL);
-        PortalStart(portal, NULL, 0, InvalidSnapshot);
-        PortalSetResultFormat(portal, 1, &format);
-
-        commands_remaining--;
-        if (commands_remaining > 0)
-            receiver = CreateDestReceiver(DestNone);
-        else
-        {
-            receiver = CreateDestReceiver(DestRemote);
-            SetRemoteDestReceiverParams(receiver, portal);
-        }
-
+        raw_parsetree_list = pg_parse_query(sql);
+        commands_remaining = list_length(raw_parsetree_list);
+        isTopLevel = (commands_remaining == 1);
         MemoryContextSwitchTo(oldcontext);
 
-        //(void) PortalRun(portal, FETCH_ALL, isTopLevel, receiver, receiver, &qc);
-	//(void) PortalRun(portal, FETCH_ALL, isTopLevel, true, receiver, receiver, &qc);
-	(void) pgbg_portal_run_compat(portal, FETCH_ALL, isTopLevel, true, receiver, receiver, &qc);
+        foreach(lc1, raw_parsetree_list)
+        {
+            RawStmt    *parsetree = (RawStmt *) lfirst(lc1);
+            CommandTag  commandTag;
+            QueryCompletion qc;
+            List       *querytree_list;
+            List       *plantree_list;
+            bool        snapshot_set = false;
+            Portal      portal;
+            DestReceiver *receiver;
+            int16       format = 1;
 
-        (*receiver->rDestroy)(receiver);
+            if (IsA(parsetree->stmt, TransactionStmt))
+                ereport(ERROR,
+                        (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                         errmsg("transaction control statements are not allowed in pg_background")));
 
-        EndCommand(&qc, DestRemote, false);
+            commandTag = CreateCommandTag_compat(parsetree);
+            set_ps_display_compat(GetCommandTagName(commandTag));
 
-        PortalDrop(portal, false);
+            BeginCommand(commandTag, DestNone);
+
+            if (analyze_requires_snapshot(parsetree))
+            {
+                PushActiveSnapshot(GetTransactionSnapshot());
+                snapshot_set = true;
+            }
+
+            oldcontext = MemoryContextSwitchTo(parsecontext);
+            querytree_list = pg_analyze_and_rewrite_compat(parsetree, sql, NULL, 0, NULL);
+
+            plantree_list = pg_plan_queries(querytree_list, sql, 0, NULL);
+
+            if (snapshot_set)
+                PopActiveSnapshot();
+
+            CHECK_FOR_INTERRUPTS();
+
+            portal = CreatePortal("", true, true);
+            portal->visible = false;
+
+            pgbg_portal_define_query_compat(portal, NULL, sql, commandTag, plantree_list, NULL);
+            PortalStart(portal, NULL, 0, InvalidSnapshot);
+            PortalSetResultFormat(portal, 1, &format);
+
+            commands_remaining--;
+            if (commands_remaining > 0)
+                receiver = CreateDestReceiver(DestNone);
+            else
+            {
+                receiver = CreateDestReceiver(DestRemote);
+                SetRemoteDestReceiverParams(receiver, portal);
+            }
+
+            MemoryContextSwitchTo(oldcontext);
+
+            (void) pgbg_portal_run_compat(portal, FETCH_ALL, isTopLevel, true, receiver, receiver, &qc);
+
+            (*receiver->rDestroy)(receiver);
+
+            EndCommand(&qc, DestRemote, false);
+
+            PortalDrop(portal, false);
+        }
+
+        CommandCounterIncrement();
     }
+    PG_CATCH();
+    {
+        /* Clean up memory context before re-throwing */
+        MemoryContextDelete(parsecontext);
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
 
-    CommandCounterIncrement();
+    /* Normal path: clean up memory context */
+    MemoryContextDelete(parsecontext);
 }
 
 /* SIGTERM handling */
