@@ -26,7 +26,7 @@ REGRESS_OPTS = --load-extension=$(EXTENSION)
 # Example:
 # REGRESS_OPTS += --launcher="env PGOPTIONS='-c statement_timeout=0'"
 
-PG_CONFIG = pg_config
+PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 

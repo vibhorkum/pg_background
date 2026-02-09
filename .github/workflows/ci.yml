@@ -102,13 +102,25 @@ jobs:
       - name: Build extension
         run: |
           set -euo pipefail
-          PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config make clean
-          PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config make
+          
+          export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+          
+          echo "=== Build Environment Diagnostics ==="
+          echo "PG_CONFIG: $PG_CONFIG"
+          $PG_CONFIG --version
+          $PG_CONFIG --pgxs
+          $PG_CONFIG --includedir-server
+          $PG_CONFIG --pkglibdir
+          echo "======================================"
+          
+          make clean
+          make
 
       - name: Install extension
         run: |
           set -euo pipefail
-          sudo PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config make install
+          export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+          sudo -E make install
 
       - name: Run regression tests
         env:
@@ -120,15 +132,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Ensure we use the pg_regress corresponding to the target major
+          export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
           export PATH="/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH"
 
-          echo "Testing against:"
+          echo "=== Test Environment ==="
+          echo "Testing against PostgreSQL version:"
           psql -c "select version();"
+          echo "========================"
 
-          # Many PGXS tests honor PG* env vars directly.
-          # Append connection options to Makefile's REGRESS_OPTS (which includes --load-extension)
-          PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config \
+          # PGXS regression tests honor PG* env vars and use pg_regress from PATH
           make installcheck REGRESS_OPTS+=" --host=$PGHOST --port=$PGPORT --user=$PGUSER"
 
       - name: Upload regression diffs (on failure)
@@ -186,15 +198,14 @@ jobs:
       - name: Install PostgreSQL headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y postgresql-server-dev-16 libkrb5-dev clang
+          sudo apt-get install -y postgresql-server-dev-16 libkrb5-dev build-essential
 
       - name: Build for CodeQL
         run: |
           export PATH=/usr/lib/postgresql/16/bin:$PATH
+          export PG_CONFIG=/usr/lib/postgresql/16/bin/pg_config
           make clean
           make
-        env:
-          PG_CONFIG: /usr/lib/postgresql/16/bin/pg_config
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
