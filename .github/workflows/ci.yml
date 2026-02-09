@@ -56,12 +56,17 @@ jobs:
             done
           fi
           
-          # PostgreSQL creates cluster automatically during install
           # Stop all PostgreSQL services to ensure clean state
           sudo systemctl stop postgresql@*.service postgresql.service 2>/dev/null || true
           
-          # Start only the specific version we're testing
-          sudo pg_ctlcluster ${{ matrix.pg }} main start || sudo systemctl start postgresql@${{ matrix.pg }}-main
+          # Check if cluster exists, create if it doesn't
+          if ! sudo pg_lsclusters -h | grep -q "^${{ matrix.pg }} main"; then
+            echo "Creating PostgreSQL ${{ matrix.pg }} cluster..."
+            sudo pg_createcluster ${{ matrix.pg }} main --start
+          else
+            echo "PostgreSQL ${{ matrix.pg }} cluster already exists, starting it..."
+            sudo pg_ctlcluster ${{ matrix.pg }} main start || sudo systemctl start postgresql@${{ matrix.pg }}-main
+          fi
           
           # Verify the correct version is running
           sudo -u postgres /usr/lib/postgresql/${{ matrix.pg }}/bin/psql --version
