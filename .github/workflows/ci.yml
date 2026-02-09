@@ -42,11 +42,21 @@ jobs:
             postgresql-${{ matrix.pg }} \
             postgresql-server-dev-${{ matrix.pg }} \
             libkrb5-dev \
-            build-essential
+            build-essential \
+            clang
           
-          # Ensure PostgreSQL is running (use pg_ctlcluster for Debian/Ubuntu)
-          sudo pg_ctlcluster ${{ matrix.pg }} main start || true
-          sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'postgres';"
+          # Create symlink for clang if needed (PostgreSQL may look for specific version)
+          CLANG_VERSION=$(clang --version | head -n1 | grep -oP '\d+' | head -n1)
+          if [ ! -f /usr/bin/clang-${CLANG_VERSION} ]; then
+            sudo ln -sf /usr/bin/clang /usr/bin/clang-${CLANG_VERSION}
+          fi
+          
+          # PostgreSQL creates cluster automatically during install
+          # Ensure it's started (may already be running)
+          sudo systemctl start postgresql || true
+          
+          # Set postgres password
+          sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'postgres';" || true
 
       - name: Build extension
         run: |
@@ -66,6 +76,8 @@ jobs:
       - name: Run regression tests
         run: |
           export PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH
+          # Grant postgres user access to working directory
+          sudo chmod o+rx /home/runner/work/pg_background/pg_background
           sudo -u postgres make installcheck
         env:
           PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
@@ -131,6 +143,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y postgresql-server-dev-16 libkrb5-dev clang
+          
+          # Create symlink for clang if needed (PostgreSQL may look for specific version)
+          CLANG_VERSION=$(clang --version | head -n1 | grep -oP '\d+' | head -n1)
+          if [ ! -f /usr/bin/clang-${CLANG_VERSION} ]; then
+            sudo ln -sf /usr/bin/clang /usr/bin/clang-${CLANG_VERSION}
+          fi
 
       - name: Build for CodeQL
         run: |
