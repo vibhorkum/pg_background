@@ -47,7 +47,7 @@ jobs:
           
           # Create symlink for clang if needed (PostgreSQL may look for specific version)
           CLANG_VERSION=$(clang --version | head -n1 | awk '{print $3}' | cut -d. -f1)
-          if [ ! -f /usr/bin/clang-${CLANG_VERSION} ]; then
+          if [ -n "$CLANG_VERSION" ] && [ ! -f /usr/bin/clang-${CLANG_VERSION} ]; then
             sudo ln -sf /usr/bin/clang /usr/bin/clang-${CLANG_VERSION}
           fi
           
@@ -146,7 +146,7 @@ jobs:
           
           # Create symlink for clang if needed (PostgreSQL may look for specific version)
           CLANG_VERSION=$(clang --version | head -n1 | awk '{print $3}' | cut -d. -f1)
-          if [ ! -f /usr/bin/clang-${CLANG_VERSION} ]; then
+          if [ -n "$CLANG_VERSION" ] && [ ! -f /usr/bin/clang-${CLANG_VERSION} ]; then
             sudo ln -sf /usr/bin/clang /usr/bin/clang-${CLANG_VERSION}
           fi
 
