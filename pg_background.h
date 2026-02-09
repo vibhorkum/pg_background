@@ -25,11 +25,27 @@
 #define CreateCommandTag_compat(p) CreateCommandTag((p)->stmt)
 #endif
 
+/* 
+ * In PG13+, CommandTag became an enum and QueryCompletion was introduced.
+ * In PG12, CommandTag was const char* and there was no QueryCompletion.
+ */
 #if PG_VERSION_NUM < 130000
+/* PG12: CommandTag is const char* */
+typedef const char *CommandTag_compat;
 #define GetCommandTagName(n)    (n)
 #define set_ps_display_compat(tag) set_ps_display((tag), false)
+#define BeginCommand_compat(tag, dest) BeginCommand((tag), (dest))
+#define EndCommand_compat(tag, dest) EndCommand((tag), (dest))
+/* COMPLETION_TAG_BUFSIZE is defined in tcop/dest.h in PG12 */
+#ifndef COMPLETION_TAG_BUFSIZE
+#define COMPLETION_TAG_BUFSIZE 64
+#endif
 #else
+/* PG13+: CommandTag is an enum */
+typedef CommandTag CommandTag_compat;
 #define set_ps_display_compat(tag) set_ps_display((tag))
+#define BeginCommand_compat(tag, dest) BeginCommand((tag), (dest))
+#define EndCommand_compat(qc, dest) EndCommand((qc), (dest), false)
 #endif
 
 #if PG_VERSION_NUM >= 150000

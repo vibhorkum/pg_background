@@ -176,15 +176,15 @@ static inline void
 pgbg_portal_define_query_compat(Portal portal,
                                const char *prepStmtName,
                                const char *sourceText,
-                               CommandTag commandTag,
+                               CommandTag_compat commandTag,
                                List *stmts,
                                CachedPlan *cplan)
 {
-#if PG_VERSION_NUM >= 180000
-    /* PG18+: PortalDefineQuery(portal, prepStmtName, sourceText, commandTag, stmts, cplan) */
+#if PG_VERSION_NUM >= 130000
+    /* PG13+: CommandTag is an enum */
     PortalDefineQuery(portal, prepStmtName, sourceText, commandTag, stmts, cplan);
 #else
-    /* PG12–17: same call form for your supported range */
+    /* PG12: CommandTag is const char* */
     PortalDefineQuery(portal, prepStmtName, sourceText, commandTag, stmts, cplan);
 #endif
 }
@@ -196,14 +196,23 @@ pgbg_portal_run_compat(Portal portal,
                        bool run_once,
                        DestReceiver *dest,
                        DestReceiver *altdest,
-                       QueryCompletion *qc)
+#if PG_VERSION_NUM >= 130000
+                       QueryCompletion *qc
+#else
+                       char *completionTag
+#endif
+                       )
 {
 #if PG_VERSION_NUM >= 180000
     (void) run_once;
     return PortalRun(portal, count, isTopLevel, dest, altdest, qc);
-#else
+#elif PG_VERSION_NUM >= 130000
     return PortalRun(portal, count, isTopLevel,
                      run_once, dest, altdest, qc);
+#else
+    /* PG12: uses completionTag string instead of QueryCompletion */
+    return PortalRun(portal, count, isTopLevel,
+                     run_once, dest, altdest, completionTag);
 #endif
 }
 /* v2 helpers */
@@ -1663,8 +1672,12 @@ execute_sql_string(const char *sql)
         foreach(lc1, raw_parsetree_list)
         {
             RawStmt    *parsetree = (RawStmt *) lfirst(lc1);
-            CommandTag  commandTag;
+            CommandTag_compat  commandTag;
+#if PG_VERSION_NUM >= 130000
             QueryCompletion qc;
+#else
+            char        completionTag[COMPLETION_TAG_BUFSIZE];
+#endif
             List       *querytree_list;
             List       *plantree_list;
             bool        snapshot_set = false;
@@ -1680,7 +1693,7 @@ execute_sql_string(const char *sql)
             commandTag = CreateCommandTag_compat(parsetree);
             set_ps_display_compat(GetCommandTagName(commandTag));
 
-            BeginCommand(commandTag, DestNone);
+            BeginCommand_compat(commandTag, DestNone);
 
             if (analyze_requires_snapshot(parsetree))
             {
@@ -1691,7 +1704,12 @@ execute_sql_string(const char *sql)
             oldcontext = MemoryContextSwitchTo(parsecontext);
             querytree_list = pg_analyze_and_rewrite_compat(parsetree, sql, NULL, 0, NULL);
 
+#if PG_VERSION_NUM >= 130000
             plantree_list = pg_plan_queries(querytree_list, sql, 0, NULL);
+#else
+            /* PG12: pg_plan_queries takes cursorOptions, boundParams */
+            plantree_list = pg_plan_queries(querytree_list, 0, NULL);
+#endif
 
             if (snapshot_set)
                 PopActiveSnapshot();
@@ -1716,11 +1734,19 @@ execute_sql_string(const char *sql)
 
             MemoryContextSwitchTo(oldcontext);
 
+#if PG_VERSION_NUM >= 130000
             (void) pgbg_portal_run_compat(portal, FETCH_ALL, isTopLevel, true, receiver, receiver, &qc);
+#else
+            (void) pgbg_portal_run_compat(portal, FETCH_ALL, isTopLevel, true, receiver, receiver, completionTag);
+#endif
 
             (*receiver->rDestroy)(receiver);
 
-            EndCommand(&qc, DestRemote, false);
+#if PG_VERSION_NUM >= 130000
+            EndCommand_compat(&qc, DestRemote);
+#else
+            EndCommand_compat(commandTag, DestRemote);
+#endif
 
             PortalDrop(portal, false);
         }

@@ -76,8 +76,10 @@ jobs:
       - name: Run regression tests
         run: |
           export PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH
-          # Grant postgres user access to working directory
+          # Grant postgres user access to working directory and parent directories
           sudo chmod o+rx "${GITHUB_WORKSPACE}"
+          sudo chmod o+rx "$(dirname "${GITHUB_WORKSPACE}")"
+          sudo chmod o+rx "$(dirname "$(dirname "${GITHUB_WORKSPACE}")")"
           sudo -u postgres make installcheck
         env:
           PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
