@@ -260,6 +260,26 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y postgresql-server-dev-16 libkrb5-dev build-essential
 
+      - name: Create clang/llvm symlinks
+        run: |
+          # Create symlinks for clang/llvm tools to avoid version mismatch errors
+          # The PGXS build system may expect specific versions (e.g., clang-19, llvm-19)
+          if [ ! -e /usr/bin/clang-19 ]; then
+            sudo ln -sf /usr/bin/clang /usr/bin/clang-19 || true
+          fi
+          if [ ! -d /usr/lib/llvm-19 ]; then
+            # Find the highest llvm version available
+            LLVM_VER=$(ls -d /usr/lib/llvm-* 2>/dev/null | sort -V | tail -1 | sed 's|.*/llvm-||')
+            if [ -z "$LLVM_VER" ]; then
+              # Default to 18 as it's commonly available on Ubuntu 22.04/24.04
+              LLVM_VER=18
+            fi
+            sudo mkdir -p /usr/lib/llvm-19/bin
+            if [ -f "/usr/lib/llvm-${LLVM_VER}/bin/llvm-lto" ]; then
+              sudo ln -sf /usr/lib/llvm-${LLVM_VER}/bin/llvm-lto /usr/lib/llvm-19/bin/llvm-lto || true
+            fi
+          fi
+
       - name: Build for CodeQL
         run: |
           export PATH=/usr/lib/postgresql/16/bin:$PATH
