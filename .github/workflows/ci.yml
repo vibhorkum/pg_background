@@ -26,40 +26,48 @@ jobs:
           - os: ubuntu-24.04
             pg: 12
 
-    services:
-      postgres:
-        image: postgres:${{ matrix.pg }}
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_USER: postgres
-          POSTGRES_DB: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd="pg_isready -U postgres -d postgres"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=20
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install build dependencies + PG dev headers (${{ matrix.pg }})
+      - name: Start PostgreSQL container
         run: |
           set -euo pipefail
+          
+          # Start PostgreSQL in a container
+          docker run --name postgres-test -d \
+            -e POSTGRES_PASSWORD=postgres \
+            -e POSTGRES_USER=postgres \
+            -e POSTGRES_DB=postgres \
+            -p 5432:5432 \
+            postgres:${{ matrix.pg }}
+          
+          # Wait for PostgreSQL to be ready
+          echo "Waiting for PostgreSQL to start..."
+          for i in {1..30}; do
+            if docker exec postgres-test pg_isready -U postgres >/dev/null 2>&1; then
+              echo "PostgreSQL is ready"
+              docker exec postgres-test psql -U postgres -c "SELECT version();"
+              break
+            fi
+            echo "Still waiting... ($i/30)"
+            sleep 2
+          done
 
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
             ca-certificates \
             wget \
             gnupg \
             lsb-release \
             build-essential \
-            clang \
             libkrb5-dev
 
-          # Add PGDG repo (stable approach: keyring + signed-by; no apt-key)
+          # Add PGDG repo
           sudo install -d -m 0755 /usr/share/keyrings
           wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
             | sudo gpg --dearmor -o /usr/share/keyrings/postgresql.gpg
@@ -68,68 +76,126 @@ jobs:
             $(lsb_release -cs)-pgdg main" \
             | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
 
-          sudo apt-get update
+          sudo apt-get update -qq
 
-          # Install only client + server-dev headers for the target major
-          sudo apt-get install -y --no-install-recommends \
+          # Install client + server-dev headers for the target major
+          sudo apt-get install -y -qq \
             postgresql-client-${{ matrix.pg }} \
             postgresql-server-dev-${{ matrix.pg }}
-
-          /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config --version
-          /usr/lib/postgresql/${{ matrix.pg }}/bin/psql --version
-
-      - name: Wait for Postgres container
-        env:
-          PGHOST: 127.0.0.1
-          PGPORT: 5432
-          PGUSER: postgres
-          PGPASSWORD: postgres
-          PGDATABASE: postgres
-        run: |
-          set -euo pipefail
-          for i in {1..30}; do
-            if psql -c "select version();" >/dev/null 2>&1; then
-              echo "Postgres is ready."
-              psql -c "select version();"
-              exit 0
+          
+          # Create symlinks for clang/llvm tools to avoid version mismatch errors
+          # The PGXS build system may expect specific versions (e.g., clang-19, llvm-19)
+          if [ ! -e /usr/bin/clang-19 ]; then
+            sudo ln -sf /usr/bin/clang /usr/bin/clang-19 || true
+          fi
+          if [ ! -d /usr/lib/llvm-19 ]; then
+            # Find the highest llvm version available
+            LLVM_VER=$(ls -d /usr/lib/llvm-* 2>/dev/null | sort -V | tail -1 | sed 's|.*/llvm-||')
+            if [ -z "$LLVM_VER" ]; then
+              # Default to 18 as it's commonly available on Ubuntu 22.04/24.04
+              LLVM_VER=18
             fi
-            echo "Waiting for Postgres... ($i/30)"
-            sleep 2
-          done
-          echo "Postgres did not become ready in time."
-          exit 1
+            sudo mkdir -p /usr/lib/llvm-19/bin
+            if [ -f "/usr/lib/llvm-${LLVM_VER}/bin/llvm-lto" ]; then
+              sudo ln -sf /usr/lib/llvm-${LLVM_VER}/bin/llvm-lto /usr/lib/llvm-19/bin/llvm-lto || true
+            fi
+          fi
+          
+          echo "=== Build Environment ==="
+          /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config --version
+          /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config --includedir-server
+          /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config --pkglibdir
+          echo "========================="
 
       - name: Build extension
         run: |
           set -euo pipefail
-          PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config make clean
-          PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config make
+          
+          export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+          
+          make clean
+          make
+          
+          echo "=== Build artifacts ==="
+          ls -la pg_background.so
+          ls -la pg_background.control
+          echo "======================="
 
-      - name: Install extension
+      - name: Copy extension files into container
         run: |
           set -euo pipefail
-          sudo PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config make install
+          
+          # Get PostgreSQL paths from pg_config
+          PKGLIBDIR=$(/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config --pkglibdir)
+          SHAREDIR=$(/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config --sharedir)
+          
+          echo "Container PostgreSQL paths:"
+          echo "  PKGLIBDIR: $PKGLIBDIR"
+          echo "  SHAREDIR: $SHAREDIR"
+          
+          # Copy the shared library
+          docker exec postgres-test mkdir -p "$PKGLIBDIR"
+          docker cp pg_background.so postgres-test:$PKGLIBDIR/pg_background.so
+          
+          # Copy extension control and SQL files
+          docker exec postgres-test mkdir -p "$SHAREDIR/extension"
+          docker cp pg_background.control postgres-test:$SHAREDIR/extension/
+          docker cp pg_background--1.6.sql postgres-test:$SHAREDIR/extension/
+          docker cp pg_background--1.4--1.6.sql postgres-test:$SHAREDIR/extension/
+          docker cp pg_background--1.5--1.6.sql postgres-test:$SHAREDIR/extension/
+          docker cp pg_background--1.4--1.5.sql postgres-test:$SHAREDIR/extension/
+          docker cp pg_background--1.0--1.4.sql postgres-test:$SHAREDIR/extension/
+          docker cp pg_background--1.1--1.4.sql postgres-test:$SHAREDIR/extension/
+          docker cp pg_background--1.2--1.4.sql postgres-test:$SHAREDIR/extension/
+          docker cp pg_background--1.3--1.4.sql postgres-test:$SHAREDIR/extension/
+          
+          # Optionally copy bitcode if it was built successfully
+          if [ -f pg_background.bc ]; then
+            echo "Copying bitcode file..."
+            docker exec postgres-test mkdir -p "$PKGLIBDIR/bitcode/pg_background"
+            if docker cp pg_background.bc postgres-test:$PKGLIBDIR/bitcode/pg_background/; then
+              echo "Bitcode file copied successfully"
+            else
+              echo "Warning: Failed to copy bitcode file (non-critical)"
+            fi
+          fi
+          
+          echo "=== Verify installation in container ==="
+          docker exec postgres-test ls -la "$PKGLIBDIR/pg_background.so"
+          docker exec postgres-test ls -la "$SHAREDIR/extension/pg_background.control"
 
       - name: Run regression tests
-        env:
-          PGHOST: 127.0.0.1
-          PGPORT: 5432
-          PGUSER: postgres
-          PGPASSWORD: postgres
-          PGDATABASE: postgres
         run: |
           set -euo pipefail
-
-          # Ensure we use the pg_regress corresponding to the target major
+          
+          export PGHOST=127.0.0.1
+          export PGPORT=5432
+          export PGUSER=postgres
+          export PGPASSWORD=postgres
+          export PGDATABASE=postgres
           export PATH="/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH"
-
-          echo "Testing against:"
-          psql -c "select version();"
-
-          # Many PGXS tests honor PG* env vars directly.
-          # Append connection options to Makefile's REGRESS_OPTS (which includes --load-extension)
-          PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config \
+          
+          echo "=== Test Environment ==="
+          psql -c "SELECT version();"
+          psql -c "CREATE EXTENSION pg_background;"
+          psql -c "SELECT * FROM pg_available_extensions WHERE name = 'pg_background';"
+          echo "========================"
+          
+          # Run regression tests - tests connect to the containerized PostgreSQL
+          export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
           make installcheck REGRESS_OPTS+=" --host=$PGHOST --port=$PGPORT --user=$PGUSER"
+
+      - name: Show test results on failure
+        if: failure()
+        run: |
+          echo "=== Regression Diffs ==="
+          cat regression.diffs 2>/dev/null || echo "No diffs file"
+          echo ""
+          echo "=== Regression Out ==="  
+          cat regression.out 2>/dev/null || echo "No out file"
+          echo ""
+          echo "=== Container Logs ==="
+          docker logs postgres-test 2>&1 | tail -100
 
       - name: Upload regression diffs (on failure)
         if: failure()
@@ -140,6 +206,12 @@ jobs:
             regression.diffs
             regression.out
             results/
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker stop postgres-test || true
+          docker rm postgres-test || true
 
   lint:
     name: Lint & Style Check
@@ -186,15 +258,34 @@ jobs:
       - name: Install PostgreSQL headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y postgresql-server-dev-16 libkrb5-dev clang
+          sudo apt-get install -y postgresql-server-dev-16 libkrb5-dev build-essential
+
+      - name: Create clang/llvm symlinks
+        run: |
+          # Create symlinks for clang/llvm tools to avoid version mismatch errors
+          # The PGXS build system may expect specific versions (e.g., clang-19, llvm-19)
+          if [ ! -e /usr/bin/clang-19 ]; then
+            sudo ln -sf /usr/bin/clang /usr/bin/clang-19 || true
+          fi
+          if [ ! -d /usr/lib/llvm-19 ]; then
+            # Find the highest llvm version available
+            LLVM_VER=$(ls -d /usr/lib/llvm-* 2>/dev/null | sort -V | tail -1 | sed 's|.*/llvm-||')
+            if [ -z "$LLVM_VER" ]; then
+              # Default to 18 as it's commonly available on Ubuntu 22.04/24.04
+              LLVM_VER=18
+            fi
+            sudo mkdir -p /usr/lib/llvm-19/bin
+            if [ -f "/usr/lib/llvm-${LLVM_VER}/bin/llvm-lto" ]; then
+              sudo ln -sf /usr/lib/llvm-${LLVM_VER}/bin/llvm-lto /usr/lib/llvm-19/bin/llvm-lto || true
+            fi
+          fi
 
       - name: Build for CodeQL
         run: |
           export PATH=/usr/lib/postgresql/16/bin:$PATH
+          export PG_CONFIG=/usr/lib/postgresql/16/bin/pg_config
           make clean
           make
-        env:
-          PG_CONFIG: /usr/lib/postgresql/16/bin/pg_config
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
