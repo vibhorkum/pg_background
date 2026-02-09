@@ -2,9 +2,9 @@ name: CI - PostgreSQL Extension Build & Test
 
 on:
   push:
-    branches: [ main, v1.6, develop ]
+    branches: [ master, v1.6, develop ]
   pull_request:
-    branches: [ main, v1.6 ]
+    branches: [ master, v1.6 ]
   workflow_dispatch:
 
 jobs:
@@ -44,8 +44,8 @@ jobs:
             libkrb5-dev \
             build-essential
           
-          # Start PostgreSQL
-          sudo systemctl start postgresql@${{ matrix.pg }}-main
+          # Ensure PostgreSQL is running (use pg_ctlcluster for Debian/Ubuntu)
+          sudo pg_ctlcluster ${{ matrix.pg }} main start || true
           sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'postgres';"
 
       - name: Build extension
@@ -130,7 +130,7 @@ jobs:
       - name: Install PostgreSQL headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y postgresql-server-dev-16 libkrb5-dev
+          sudo apt-get install -y postgresql-server-dev-16 libkrb5-dev clang
 
       - name: Build for CodeQL
         run: |
