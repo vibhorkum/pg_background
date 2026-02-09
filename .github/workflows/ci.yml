@@ -127,9 +127,9 @@ jobs:
           psql -c "select version();"
 
           # Many PGXS tests honor PG* env vars directly.
-          # If your Makefile uses REGRESS_OPTS, this helps too.
+          # Append connection options to Makefile's REGRESS_OPTS (which includes --load-extension)
           PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config \
-          make installcheck REGRESS_OPTS="--host=$PGHOST --port=$PGPORT --user=$PGUSER"
+          make installcheck REGRESS_OPTS+=" --host=$PGHOST --port=$PGPORT --user=$PGUSER"
 
       - name: Upload regression diffs (on failure)
         if: failure()
