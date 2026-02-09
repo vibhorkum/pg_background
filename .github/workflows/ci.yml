@@ -11,104 +11,125 @@ jobs:
   test:
     name: PG ${{ matrix.pg }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    
+
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, ubuntu-24.04]
         pg: [12, 13, 14, 15, 16, 17]
         include:
-          # Test PG 18 (devel) on Ubuntu 24.04 only
+          # Attempt PG 18 on Ubuntu 24.04 only (container tag availability may vary)
           - os: ubuntu-24.04
             pg: 18
         exclude:
-          # PG 18 not on Ubuntu 22.04 (may not be available)
-          - os: ubuntu-22.04
-            pg: 18
+          # PG 12 frequently not available / supported well on newer distros
+          - os: ubuntu-24.04
+            pg: 12
+
+    services:
+      postgres:
+        image: postgres:${{ matrix.pg }}
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install PostgreSQL ${{ matrix.pg }}
+      - name: Install build dependencies + PG dev headers (${{ matrix.pg }})
         run: |
-          # Add PostgreSQL APT repository
-          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
-          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+          set -euo pipefail
+
           sudo apt-get update
-          
-          # Install PostgreSQL and dev headers
-          sudo apt-get install -y \
-            postgresql-${{ matrix.pg }} \
-            postgresql-server-dev-${{ matrix.pg }} \
-            libkrb5-dev \
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates \
+            wget \
+            gnupg \
+            lsb-release \
             build-essential \
-            clang
-          
-          # PostgreSQL may look for version-specific clang (e.g., clang-19)
-          # Create symlink from clang-VERSION to clang
-          CLANG_VERSION=$(clang --version | head -n1 | awk '{print $3}' | cut -d. -f1)
-          if [ -n "$CLANG_VERSION" ]; then
-            for ver in 14 15 16 17 18 19; do
-              if [ ! -f /usr/bin/clang-${ver} ]; then
-                sudo ln -sf /usr/bin/clang /usr/bin/clang-${ver}
-              fi
-            done
-          fi
-          
-          # Stop all PostgreSQL services to ensure clean state
-          sudo systemctl stop postgresql@*.service postgresql.service 2>/dev/null || true
-          
-          # Check if cluster exists, create if it doesn't
-          if ! sudo pg_lsclusters -h | grep -q "^${{ matrix.pg }} main"; then
-            echo "Creating PostgreSQL ${{ matrix.pg }} cluster..."
-            sudo pg_createcluster ${{ matrix.pg }} main --start
-          else
-            echo "PostgreSQL ${{ matrix.pg }} cluster already exists, starting it..."
-            sudo pg_ctlcluster ${{ matrix.pg }} main start || sudo systemctl start postgresql@${{ matrix.pg }}-main
-          fi
-          
-          # Verify the correct version is running
-          sudo -u postgres /usr/lib/postgresql/${{ matrix.pg }}/bin/psql --version
-          
-          # Set postgres password
-          sudo -u postgres /usr/lib/postgresql/${{ matrix.pg }}/bin/psql -c "ALTER USER postgres PASSWORD 'postgres';"
+            clang \
+            libkrb5-dev
+
+          # Add PGDG repo (stable approach: keyring + signed-by; no apt-key)
+          sudo install -d -m 0755 /usr/share/keyrings
+          wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor -o /usr/share/keyrings/postgresql.gpg
+
+          echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt \
+            $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+
+          sudo apt-get update
+
+          # Install only client + server-dev headers for the target major
+          sudo apt-get install -y --no-install-recommends \
+            postgresql-client-${{ matrix.pg }} \
+            postgresql-server-dev-${{ matrix.pg }}
+
+          /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config --version
+          /usr/lib/postgresql/${{ matrix.pg }}/bin/psql --version
+
+      - name: Wait for Postgres container
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: 5432
+          PGUSER: postgres
+          PGPASSWORD: postgres
+          PGDATABASE: postgres
+        run: |
+          set -euo pipefail
+          for i in {1..30}; do
+            if psql -c "select version();" >/dev/null 2>&1; then
+              echo "Postgres is ready."
+              psql -c "select version();"
+              exit 0
+            fi
+            echo "Waiting for Postgres... ($i/30)"
+            sleep 2
+          done
+          echo "Postgres did not become ready in time."
+          exit 1
 
       - name: Build extension
         run: |
-          export PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH
-          # Explicitly pass PG_CONFIG to ensure correct version
+          set -euo pipefail
           PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config make clean
           PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config make
 
       - name: Install extension
         run: |
-          export PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH
-          # Pass PG_CONFIG explicitly to sudo to ensure correct version
+          set -euo pipefail
           sudo PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config make install
 
       - name: Run regression tests
-        run: |
-          export PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH
-          # Grant postgres user access to working directory and all parent directories
-          # Use capital X to only add execute permission to directories
-          # Add write permission (w) so postgres can create test output files
-          sudo chmod -R o+rwX "${GITHUB_WORKSPACE}" || true
-          current_dir="${GITHUB_WORKSPACE}"
-          while [ "$current_dir" != "/" ]; do
-            sudo chmod o+rx "$current_dir" || true
-            current_dir=$(dirname "$current_dir")
-          done
-          # Verify we're testing the correct PostgreSQL version
-          echo "Testing PostgreSQL version:"
-          sudo -u postgres /usr/lib/postgresql/${{ matrix.pg }}/bin/psql --version
-          # Pass PG_CONFIG explicitly to ensure correct version is used
-          sudo -u postgres PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH make installcheck
         env:
+          PGHOST: 127.0.0.1
           PGPORT: 5432
-          PGHOST: localhost
           PGUSER: postgres
           PGPASSWORD: postgres
+          PGDATABASE: postgres
+        run: |
+          set -euo pipefail
+
+          # Ensure we use the pg_regress corresponding to the target major
+          export PATH="/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH"
+
+          echo "Testing against:"
+          psql -c "select version();"
+
+          # Many PGXS tests honor PG* env vars directly.
+          # If your Makefile uses REGRESS_OPTS, this helps too.
+          PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config \
+          make installcheck REGRESS_OPTS="--host=$PGHOST --port=$PGPORT --username=$PGUSER"
 
       - name: Upload regression diffs (on failure)
         if: failure()
@@ -123,7 +144,7 @@ jobs:
   lint:
     name: Lint & Style Check
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -147,13 +168,12 @@ jobs:
 
       - name: Check code formatting
         run: |
-          # Run clang-format check (don't modify, just report)
           clang-format --dry-run --Werror pg_background.c || true  # Informational only
 
   security:
     name: Security Scan
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -167,17 +187,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y postgresql-server-dev-16 libkrb5-dev clang
-          
-          # PostgreSQL may look for version-specific clang (e.g., clang-19)
-          # Create symlink from clang-VERSION to clang
-          CLANG_VERSION=$(clang --version | head -n1 | awk '{print $3}' | cut -d. -f1)
-          if [ -n "$CLANG_VERSION" ]; then
-            for ver in 14 15 16 17 18 19; do
-              if [ ! -f /usr/bin/clang-${ver} ]; then
-                sudo ln -sf /usr/bin/clang /usr/bin/clang-${ver}
-              fi
-            done
-          fi
 
       - name: Build for CodeQL
         run: |
