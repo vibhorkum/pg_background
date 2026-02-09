@@ -180,13 +180,8 @@ pgbg_portal_define_query_compat(Portal portal,
                                List *stmts,
                                CachedPlan *cplan)
 {
-#if PG_VERSION_NUM >= 130000
-    /* PG13+: CommandTag is an enum */
+    /* PortalDefineQuery accepts same parameters in PG12-18 */
     PortalDefineQuery(portal, prepStmtName, sourceText, commandTag, stmts, cplan);
-#else
-    /* PG12: CommandTag is const char* */
-    PortalDefineQuery(portal, prepStmtName, sourceText, commandTag, stmts, cplan);
-#endif
 }
 
 static inline bool
@@ -1707,7 +1702,7 @@ execute_sql_string(const char *sql)
 #if PG_VERSION_NUM >= 130000
             plantree_list = pg_plan_queries(querytree_list, sql, 0, NULL);
 #else
-            /* PG12: pg_plan_queries takes cursorOptions, boundParams */
+            /* PG12: pg_plan_queries(querytree_list, cursorOptions=0, boundParams=NULL) */
             plantree_list = pg_plan_queries(querytree_list, 0, NULL);
 #endif
 
