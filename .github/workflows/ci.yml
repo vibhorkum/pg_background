@@ -83,7 +83,8 @@ jobs:
           export PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH
           # Grant postgres user access to working directory and all parent directories
           # Use capital X to only add execute permission to directories
-          sudo chmod -R o+rX "${GITHUB_WORKSPACE}" || true
+          # Add write permission (w) so postgres can create test output files
+          sudo chmod -R o+rwX "${GITHUB_WORKSPACE}" || true
           current_dir="${GITHUB_WORKSPACE}"
           while [ "$current_dir" != "/" ]; do
             sudo chmod o+rx "$current_dir" || true
