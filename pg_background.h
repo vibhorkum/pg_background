@@ -14,14 +14,14 @@
 #endif
 
 /*
- * shm_toc_lookup signature changed in PG 10.
+ * shm_toc_lookup signature changed in PG 10 (before our minimum supported version).
  * For PG 14+, we always use the 3-argument version.
  */
 #define shm_toc_lookup_compat(toc, key, noerr) shm_toc_lookup((toc), (key), (noerr))
 
 /*
- * CreateCommandTag signature - PG 13+ uses (Node *) cast.
- * For PG 14+, we always use the PG 13+ form.
+ * CreateCommandTag signature changed in PG 13.
+ * For PG 14+, we always use the PG 13+ form with (Node *) cast.
  */
 #define CreateCommandTag_compat(p) CreateCommandTag((Node *) (p))
 
