@@ -1694,12 +1694,6 @@ For enterprise support, contact:
 
 **Core Contributors**:
 - **Vibhor Kumar** – Original author and maintainer
-- **@a-mckinley** – v2 API design and implementation
-- **@rjuju** – Bug fixes and PostgreSQL compatibility
-- **@svorcmar** – Windows platform support
-- **@egor-rogov** – Code review and design feedback
-- **@RekGRpth** – Packaging and CI/CD
-- **@Hiroaki-Kubota** – Testing and documentation
 
 **Inspiration**:
 - PostgreSQL Background Worker API
