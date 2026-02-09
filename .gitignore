@@ -13,7 +13,6 @@
 
 # PGXS build artifacts
 .deps/
-*.sql.in
 
 # PostgreSQL regression test outputs
 results/
