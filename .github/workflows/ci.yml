@@ -57,11 +57,17 @@ jobs:
           fi
           
           # PostgreSQL creates cluster automatically during install
-          # Ensure it's started (may already be running)
-          sudo systemctl start postgresql || true
+          # Stop all PostgreSQL services to ensure clean state
+          sudo systemctl stop 'postgresql*' || true
+          
+          # Start only the specific version we're testing
+          sudo pg_ctlcluster ${{ matrix.pg }} main start || sudo systemctl start postgresql@${{ matrix.pg }}-main || true
+          
+          # Verify the correct version is running
+          sudo -u postgres /usr/lib/postgresql/${{ matrix.pg }}/bin/psql --version
           
           # Set postgres password
-          sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'postgres';" || true
+          sudo -u postgres /usr/lib/postgresql/${{ matrix.pg }}/bin/psql -c "ALTER USER postgres PASSWORD 'postgres';" || true
 
       - name: Build extension
         run: |
@@ -88,8 +94,11 @@ jobs:
             sudo chmod o+rx "$current_dir" || true
             current_dir=$(dirname "$current_dir")
           done
+          # Verify we're testing the correct PostgreSQL version
+          echo "Testing PostgreSQL version:"
+          sudo -u postgres /usr/lib/postgresql/${{ matrix.pg }}/bin/psql --version
           # Pass PG_CONFIG explicitly to ensure correct version is used
-          sudo -u postgres PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config make installcheck
+          sudo -u postgres PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH make installcheck
         env:
           PGPORT: 5432
           PGHOST: localhost
