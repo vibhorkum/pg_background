@@ -151,7 +151,7 @@ Comprehensive documentation including:
 - ✅ Troubleshooting guide (7 common issues)
 - ✅ Known limitations (Windows, PID reuse, etc.)
 - ✅ Architecture overview (DSM, shm_mq, worker lifecycle)
-- ✅ PostgreSQL compatibility matrix (PG 12-18)
+- ✅ PostgreSQL compatibility matrix (PG 14-18)
 
 #### CONTRIBUTING.md
 **File**: CONTRIBUTING.md (8.5KB)

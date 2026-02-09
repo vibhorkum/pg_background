@@ -1,6 +1,6 @@
 # pg_background: Production-Grade Async SQL for PostgreSQL
 
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-12%2B-blue.svg)](https://www.postgresql.org/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14%2B-blue.svg)](https://www.postgresql.org/)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green.svg)](LICENSE)
 
 Run arbitrary SQL commands in **background worker processes** within PostgreSQL. Built for asynchronous workflows, autonomous transactions, and long-running operations without blocking your application.
@@ -34,9 +34,9 @@ Run arbitrary SQL commands in **background worker processes** within PostgreSQL.
 | 17 | ✅ Tested | Full support |
 | 16 | ✅ Tested | Recommended |
 | 15 | ✅ Tested | ProcessCompletedNotifies removed |
-| 14 | ✅ Tested | Full support |
-| 13 | ✅ Tested | Full support |
-| 12 | ✅ Tested | Minimum version |
+| 14 | ✅ Tested | Minimum version |
+| 13 | ❌ EOL | Not supported (EOL Nov 2025) |
+| 12 | ❌ EOL | Not supported (EOL Nov 2024) |
 | < 12 | ❌ Not supported | Use pg_background 1.4 |
 
 ---
@@ -44,7 +44,7 @@ Run arbitrary SQL commands in **background worker processes** within PostgreSQL.
 ## Installation
 
 ### Prerequisites
-- PostgreSQL 12 or later
+- PostgreSQL 14 or later
 - `pg_config` in your `PATH`
 - Build tools: `gcc`, `make`
 

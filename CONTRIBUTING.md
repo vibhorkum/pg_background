@@ -25,7 +25,7 @@ This project follows the [PostgreSQL Community Code of Conduct](https://www.post
 
 ### Prerequisites
 
-- PostgreSQL 12 or later (development headers required)
+- PostgreSQL 14 or later (development headers required)
 - GCC or Clang compiler
 - `make` build system
 - `git` for version control
@@ -175,7 +175,7 @@ make installcheckclean
 
 Before submitting a PR:
 
-- [ ] Tested on PostgreSQL 12 (minimum version)
+- [ ] Tested on PostgreSQL 14 (minimum version)
 - [ ] Tested on latest stable PostgreSQL version
 - [ ] No compiler warnings (`-Wall -Wextra`)
 - [ ] No memory leaks (use `valgrind` if available)
@@ -262,7 +262,7 @@ Why is this change needed?
 ## Testing
 - [ ] Regression tests added/updated
 - [ ] Manual testing performed
-- [ ] Tested on PG 12
+- [ ] Tested on PG 14
 - [ ] Tested on latest PG
 
 ## Breaking Changes
@@ -295,7 +295,7 @@ Large PRs should be split into smaller, logical commits for easier review.
 3. **Style**: Follows PostgreSQL conventions?
 4. **Tests**: Adequate test coverage?
 5. **Documentation**: Clear comments and README updates?
-6. **Compatibility**: Works on PG 12-18?
+6. **Compatibility**: Works on PG 14-18?
 
 ### Responding to Feedback
 

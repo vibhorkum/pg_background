@@ -207,16 +207,11 @@ pg_background_launch(PG_FUNCTION_ARGS)
 		BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
 	worker.bgw_start_time = BgWorkerStart_ConsistentState;
 	worker.bgw_restart_time = BGW_NEVER_RESTART;
-#if PG_VERSION_NUM < 100000
-	worker.bgw_main = NULL;		/* new worker might not have library loaded */
-#endif
 	snprintf(worker.bgw_library_name, BGW_MAXLEN, "pg_background");
 	snprintf(worker.bgw_function_name, BGW_MAXLEN, "pg_background_worker_main");
 	snprintf(worker.bgw_name, BGW_MAXLEN,
 			 "pg_background by PID %d", MyProcPid);
-#if (PG_VERSION_NUM >= 110000)
 	snprintf(worker.bgw_type, BGW_MAXLEN, "pg_background");
-#endif
 	worker.bgw_main_arg = UInt32GetDatum(dsm_segment_handle(seg));
 	/* set bgw_notify_pid, so we can detect if the worker stops */
 	worker.bgw_notify_pid = MyProcPid;
@@ -919,11 +914,8 @@ pg_background_worker_main(Datum main_arg)
 	 * rather than strings.
 	 */
 	BackgroundWorkerInitializeConnection(NameStr(fdata->database),
-										 NameStr(fdata->authenticated_user)
-#if PG_VERSION_NUM >= 110000
-										 , BGWORKER_BYPASS_ALLOWCONN
-#endif
-										);
+										 NameStr(fdata->authenticated_user),
+										 BGWORKER_BYPASS_ALLOWCONN);
 
 	if (fdata->database_id != MyDatabaseId ||
 		fdata->authenticated_user_id != GetAuthenticatedUserId())
@@ -954,9 +946,6 @@ pg_background_worker_main(Datum main_arg)
 	/* Post-execution cleanup. */
 	disable_timeout(STATEMENT_TIMEOUT, false);
 	CommitTransactionCommand();
-#if PG_VERSION_NUM < 150000
-	ProcessCompletedNotifies();
-#endif
 	pgstat_report_activity(STATE_IDLE, sql);
 	pgstat_report_stat(true);
 
@@ -1027,21 +1016,9 @@ execute_sql_string(const char *sql)
 	 */
 	foreach(lc1, raw_parsetree_list)
 	{
-#if PG_VERSION_NUM < 100000
-		Node	   *parsetree = (Node *) lfirst(lc1);
-#else
 		RawStmt *parsetree = (RawStmt *)  lfirst(lc1);
-#endif
-#if PG_VERSION_NUM >= 130000
 		CommandTag commandTag;
-#else
-		const char *commandTag;
-#endif
-#if PG_VERSION_NUM < 130000
-		char        completionTag[COMPLETION_TAG_BUFSIZE];
-#else
 		QueryCompletion qc;
-#endif
 		List       *querytree_list,
 				   *plantree_list;
 		bool		snapshot_set = false;
@@ -1088,11 +1065,7 @@ execute_sql_string(const char *sql)
 		querytree_list = pg_analyze_and_rewrite_compat(parsetree, sql, NULL, 0,
 													   NULL);
 
-		plantree_list = pg_plan_queries(querytree_list,
-#if PG_VERSION_NUM >= 130000
-				sql,
-#endif
-				0, NULL);
+		plantree_list = pg_plan_queries(querytree_list, sql, 0, NULL);
 
 		/* Done with the snapshot used for parsing/planning */
 		if (snapshot_set)
@@ -1135,16 +1108,8 @@ execute_sql_string(const char *sql)
 		MemoryContextSwitchTo(oldcontext);
 
 		/* Here's where we actually execute the command. */
-#if PG_VERSION_NUM < 100000
-			(void) PortalRun(portal, FETCH_ALL, isTopLevel, receiver, receiver,
-							 completionTag);
-#elif PG_VERSION_NUM < 130000
-			(void) PortalRun(portal, FETCH_ALL, isTopLevel, true, receiver,
-							 receiver, completionTag);
-#else
-			(void) PortalRun(portal, FETCH_ALL, isTopLevel, true, receiver,
-							 receiver, &qc);
-#endif
+		(void) PortalRun(portal, FETCH_ALL, isTopLevel, true, receiver,
+						 receiver, &qc);
 
 		/* Clean up the receiver. */
 		(*receiver->rDestroy) (receiver);
@@ -1154,11 +1119,7 @@ execute_sql_string(const char *sql)
 		 * results.  The user backend will report these in the absence of
 		 * any true query results.
 		 */
-#if PG_VERSION_NUM < 130000
-		EndCommand(completionTag, DestRemote);
-#else
 		EndCommand(&qc, DestRemote, false);
-#endif
 
 		/* Clean up the portal. */
 		PortalDrop(portal, false);
