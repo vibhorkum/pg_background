@@ -69,16 +69,12 @@ jobs:
           # Explicitly pass PG_CONFIG to ensure correct version
           PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config make clean
           PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config make
-        env:
-          PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
 
       - name: Install extension
         run: |
           export PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH
           # Pass PG_CONFIG explicitly to sudo to ensure correct version
           sudo PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config make install
-        env:
-          PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
 
       - name: Run regression tests
         run: |
@@ -95,7 +91,6 @@ jobs:
           # Pass PG_CONFIG explicitly to ensure correct version is used
           sudo -u postgres PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config make installcheck
         env:
-          PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
           PGPORT: 5432
           PGHOST: localhost
           PGUSER: postgres
