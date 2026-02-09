@@ -45,10 +45,15 @@ jobs:
             build-essential \
             clang
           
-          # Create symlink for clang if needed (PostgreSQL may look for specific version)
+          # PostgreSQL may look for version-specific clang (e.g., clang-19)
+          # Create symlink from clang-VERSION to clang
           CLANG_VERSION=$(clang --version | head -n1 | awk '{print $3}' | cut -d. -f1)
-          if [ -n "$CLANG_VERSION" ] && [ ! -f /usr/bin/clang-${CLANG_VERSION} ]; then
-            sudo ln -sf /usr/bin/clang /usr/bin/clang-${CLANG_VERSION}
+          if [ -n "$CLANG_VERSION" ]; then
+            for ver in 14 15 16 17 18 19; do
+              if [ ! -f /usr/bin/clang-${ver} ]; then
+                sudo ln -sf /usr/bin/clang /usr/bin/clang-${ver}
+              fi
+            done
           fi
           
           # PostgreSQL creates cluster automatically during install
@@ -76,10 +81,14 @@ jobs:
       - name: Run regression tests
         run: |
           export PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH
-          # Grant postgres user access to working directory and parent directories
-          sudo chmod o+rx "${GITHUB_WORKSPACE}"
-          sudo chmod o+rx "$(dirname "${GITHUB_WORKSPACE}")"
-          sudo chmod o+rx "$(dirname "$(dirname "${GITHUB_WORKSPACE}")")"
+          # Grant postgres user access to working directory and all parent directories
+          # Set permissions on the workspace and all ancestors up to root
+          sudo chmod -R o+rx "${GITHUB_WORKSPACE}" || true
+          current_dir="${GITHUB_WORKSPACE}"
+          while [ "$current_dir" != "/" ]; do
+            sudo chmod o+rx "$current_dir" || true
+            current_dir=$(dirname "$current_dir")
+          done
           sudo -u postgres make installcheck
         env:
           PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
@@ -146,10 +155,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y postgresql-server-dev-16 libkrb5-dev clang
           
-          # Create symlink for clang if needed (PostgreSQL may look for specific version)
+          # PostgreSQL may look for version-specific clang (e.g., clang-19)
+          # Create symlink from clang-VERSION to clang
           CLANG_VERSION=$(clang --version | head -n1 | awk '{print $3}' | cut -d. -f1)
-          if [ -n "$CLANG_VERSION" ] && [ ! -f /usr/bin/clang-${CLANG_VERSION} ]; then
-            sudo ln -sf /usr/bin/clang /usr/bin/clang-${CLANG_VERSION}
+          if [ -n "$CLANG_VERSION" ]; then
+            for ver in 14 15 16 17 18 19; do
+              if [ ! -f /usr/bin/clang-${ver} ]; then
+                sudo ln -sf /usr/bin/clang /usr/bin/clang-${ver}
+              fi
+            done
           fi
 
       - name: Build for CodeQL
