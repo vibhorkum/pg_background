@@ -58,16 +58,16 @@ jobs:
           
           # PostgreSQL creates cluster automatically during install
           # Stop all PostgreSQL services to ensure clean state
-          sudo systemctl stop 'postgresql*' || true
+          sudo systemctl stop postgresql@*.service postgresql.service 2>/dev/null || true
           
           # Start only the specific version we're testing
-          sudo pg_ctlcluster ${{ matrix.pg }} main start || sudo systemctl start postgresql@${{ matrix.pg }}-main || true
+          sudo pg_ctlcluster ${{ matrix.pg }} main start || sudo systemctl start postgresql@${{ matrix.pg }}-main
           
           # Verify the correct version is running
           sudo -u postgres /usr/lib/postgresql/${{ matrix.pg }}/bin/psql --version
           
           # Set postgres password
-          sudo -u postgres /usr/lib/postgresql/${{ matrix.pg }}/bin/psql -c "ALTER USER postgres PASSWORD 'postgres';" || true
+          sudo -u postgres /usr/lib/postgresql/${{ matrix.pg }}/bin/psql -c "ALTER USER postgres PASSWORD 'postgres';"
 
       - name: Build extension
         run: |
