@@ -129,7 +129,7 @@ jobs:
           # Many PGXS tests honor PG* env vars directly.
           # If your Makefile uses REGRESS_OPTS, this helps too.
           PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config \
-          make installcheck REGRESS_OPTS="--host=$PGHOST --port=$PGPORT --username=$PGUSER"
+          make installcheck REGRESS_OPTS="--host=$PGHOST --port=$PGPORT --user=$PGUSER"
 
       - name: Upload regression diffs (on failure)
         if: failure()
