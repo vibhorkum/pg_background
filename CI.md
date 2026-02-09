@@ -193,8 +193,14 @@ docker run --name pg-test -d \
   postgres:${PG_VERSION}
 
 # Wait for ready
-sleep 5
-docker exec pg-test pg_isready -U postgres
+for i in {1..30}; do
+  if docker exec pg-test pg_isready -U postgres >/dev/null 2>&1; then
+    echo "PostgreSQL is ready"
+    break
+  fi
+  echo "Waiting... ($i/30)"
+  sleep 2
+done
 
 # Build
 export PG_CONFIG=/usr/lib/postgresql/${PG_VERSION}/bin/pg_config
@@ -247,8 +253,14 @@ sudo ln -sf /usr/bin/clang /usr/bin/clang-19
 
 # Find available llvm and create llvm-19 symlink
 LLVM_VER=$(ls -d /usr/lib/llvm-* 2>/dev/null | sort -V | tail -1 | sed 's|.*/llvm-||')
+if [ -z "$LLVM_VER" ]; then
+  # Default to 18 as it's commonly available on Ubuntu 22.04/24.04
+  LLVM_VER=18
+fi
 sudo mkdir -p /usr/lib/llvm-19/bin
-sudo ln -sf /usr/lib/llvm-${LLVM_VER}/bin/llvm-lto /usr/lib/llvm-19/bin/llvm-lto
+if [ -f "/usr/lib/llvm-${LLVM_VER}/bin/llvm-lto" ]; then
+  sudo ln -sf /usr/lib/llvm-${LLVM_VER}/bin/llvm-lto /usr/lib/llvm-19/bin/llvm-lto
+fi
 ```
 
 ### Tests Fail with Connection Errors
