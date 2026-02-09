@@ -12,7 +12,7 @@ The pg_background CI pipeline uses GitHub Actions with containerized PostgreSQL 
    - Uses official `postgres` Docker images for runtime testing
    - Builds extension on Ubuntu runner with matching PostgreSQL dev headers
    - Copies built artifacts into container for testing
-   - Tests against PostgreSQL 12-18 (version 18 on Ubuntu 24.04 only)
+   - Tests against PostgreSQL 14-18
    - Runs on both Ubuntu 22.04 and 24.04
 
 2. **Lint Job**: Runs static analysis checks
@@ -26,10 +26,8 @@ The pg_background CI pipeline uses GitHub Actions with containerized PostgreSQL 
 ### Test Matrix
 
 The test job runs against multiple combinations:
-- Ubuntu 22.04: PostgreSQL 12, 13, 14, 15, 16, 17
-- Ubuntu 24.04: PostgreSQL 13, 14, 15, 16, 17, 18
-
-PostgreSQL 12 is excluded from Ubuntu 24.04 due to package availability.
+- Ubuntu 22.04: PostgreSQL 14, 15, 16, 17, 18
+- Ubuntu 24.04: PostgreSQL 14, 15, 16, 17, 18
 
 ### Build and Test Flow
 

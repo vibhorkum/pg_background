@@ -16,15 +16,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, ubuntu-24.04]
-        pg: [12, 13, 14, 15, 16, 17]
-        include:
-          # Attempt PG 18 on Ubuntu 24.04 only (container tag availability may vary)
-          - os: ubuntu-24.04
-            pg: 18
-        exclude:
-          # PG 12 frequently not available / supported well on newer distros
-          - os: ubuntu-24.04
-            pg: 12
+        pg: [14, 15, 16, 17, 18]
 
     steps:
       - name: Checkout code

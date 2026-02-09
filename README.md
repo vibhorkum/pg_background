@@ -1,6 +1,6 @@
 # pg_background: Production-Grade Background SQL for PostgreSQL
 
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-12--18-blue.svg)](https://www.postgresql.org/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14--18-blue.svg)](https://www.postgresql.org/)
 [![Version](https://img.shields.io/badge/version-1.6-brightgreen.svg)](https://github.com/vibhorkum/pg_background)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green.svg)](LICENSE)
 
@@ -88,9 +88,9 @@ Execute arbitrary SQL commands in **background worker processes** within Postgre
 | **17** | ✅ Fully Tested | Recommended for new deployments |
 | **16** | ✅ Fully Tested | Production-ready |
 | **15** | ✅ Fully Tested | ProcessCompletedNotifies removed |
-| **14** | ✅ Fully Tested | Production-ready |
-| **13** | ✅ Fully Tested | Production-ready |
-| **12** | ✅ Fully Tested | Minimum supported version |
+| **14** | ✅ Fully Tested | Minimum supported version |
+| **13** | ❌ End of Life | Not supported (EOL Nov 2025) |
+| **12** | ❌ End of Life | Not supported (EOL Nov 2024) |
 | **< 12** | ❌ Not Supported | Use pg_background 1.4 or earlier |
 
 **Note**: Each PostgreSQL major version requires extension rebuild against its headers.
@@ -101,7 +101,7 @@ Execute arbitrary SQL commands in **background worker processes** within Postgre
 
 ### Prerequisites
 
-- PostgreSQL 12+ with development headers (`postgresql-server-dev-*` or `postgresql##-devel`)
+- PostgreSQL 14+ with development headers (`postgresql-server-dev-*` or `postgresql##-devel`)
 - `pg_config` in `$PATH`
 - Build essentials: `gcc`, `make`
 - Superuser privileges for `CREATE EXTENSION`

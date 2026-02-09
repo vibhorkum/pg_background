@@ -8,8 +8,8 @@
  *
  * IDENTIFICATION
  *             contrib/pg_background/pg_background.c
- * This version targets supported PostgreSQL versions: 12, 13, 14, 15, 16, 17, 18.
- * (PG_VERSION_NUM >= 120000 && < 190000)
+ * This version targets supported PostgreSQL versions: 14, 15, 16, 17, 18.
+ * (PG_VERSION_NUM >= 140000 && < 190000)
  *
  * Key behavior:
  *  - v1 API preserved: launch/result/detach (fire-and-forget detach is NOT cancel)
@@ -66,8 +66,8 @@
  * Supported versions only (per your request).
  * If you want older PGs, we can re-expand the compat macros, but for 1.6:
  */
-#if PG_VERSION_NUM < 120000 || PG_VERSION_NUM >= 190000
-#error "pg_background 1.6 supports PostgreSQL 12-18 only"
+#if PG_VERSION_NUM < 140000 || PG_VERSION_NUM >= 190000
+#error "pg_background 1.6 supports PostgreSQL 14-18 only"
 #endif
 
 /* ---- constants ---- */
@@ -180,7 +180,7 @@ pgbg_portal_define_query_compat(Portal portal,
                                List *stmts,
                                CachedPlan *cplan)
 {
-    /* PortalDefineQuery accepts same parameters in PG12-18 */
+    /* PortalDefineQuery accepts same parameters in PG14-18 */
     PortalDefineQuery(portal, prepStmtName, sourceText, commandTag, stmts, cplan);
 }
 
@@ -191,23 +191,15 @@ pgbg_portal_run_compat(Portal portal,
                        bool run_once,
                        DestReceiver *dest,
                        DestReceiver *altdest,
-#if PG_VERSION_NUM >= 130000
                        QueryCompletion *qc
-#else
-                       char *completionTag
-#endif
                        )
 {
 #if PG_VERSION_NUM >= 180000
     (void) run_once;
     return PortalRun(portal, count, isTopLevel, dest, altdest, qc);
-#elif PG_VERSION_NUM >= 130000
+#else
     return PortalRun(portal, count, isTopLevel,
                      run_once, dest, altdest, qc);
-#else
-    /* PG12: uses completionTag string instead of QueryCompletion */
-    return PortalRun(portal, count, isTopLevel,
-                     run_once, dest, altdest, completionTag);
 #endif
 }
 /* v2 helpers */
@@ -1592,11 +1584,6 @@ pg_background_worker_main(Datum main_arg)
     disable_timeout(STATEMENT_TIMEOUT, false);
     CommitTransactionCommand();
 
-    /* In PG15+, notifies are handled differently; keep legacy call only < 15 */
-#if PG_VERSION_NUM < 150000
-    ProcessCompletedNotifies();
-#endif
-
     pgstat_report_activity(STATE_IDLE, sql);
     pgstat_report_stat(true);
 
@@ -1668,11 +1655,7 @@ execute_sql_string(const char *sql)
         {
             RawStmt    *parsetree = (RawStmt *) lfirst(lc1);
             CommandTag_compat  commandTag;
-#if PG_VERSION_NUM >= 130000
             QueryCompletion qc;
-#else
-            char        completionTag[COMPLETION_TAG_BUFSIZE];
-#endif
             List       *querytree_list;
             List       *plantree_list;
             bool        snapshot_set = false;
@@ -1699,12 +1682,7 @@ execute_sql_string(const char *sql)
             oldcontext = MemoryContextSwitchTo(parsecontext);
             querytree_list = pg_analyze_and_rewrite_compat(parsetree, sql, NULL, 0, NULL);
 
-#if PG_VERSION_NUM >= 130000
             plantree_list = pg_plan_queries(querytree_list, sql, 0, NULL);
-#else
-            /* PG12: pg_plan_queries(querytree_list, cursorOptions=0, boundParams=NULL) */
-            plantree_list = pg_plan_queries(querytree_list, 0, NULL);
-#endif
 
             if (snapshot_set)
                 PopActiveSnapshot();
@@ -1729,19 +1707,11 @@ execute_sql_string(const char *sql)
 
             MemoryContextSwitchTo(oldcontext);
 
-#if PG_VERSION_NUM >= 130000
             (void) pgbg_portal_run_compat(portal, FETCH_ALL, isTopLevel, true, receiver, receiver, &qc);
-#else
-            (void) pgbg_portal_run_compat(portal, FETCH_ALL, isTopLevel, true, receiver, receiver, completionTag);
-#endif
 
             (*receiver->rDestroy)(receiver);
 
-#if PG_VERSION_NUM >= 130000
             EndCommand_compat(&qc, DestRemote);
-#else
-            EndCommand_compat(commandTag, DestRemote);
-#endif
 
             PortalDrop(portal, false);
         }
