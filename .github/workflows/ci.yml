@@ -2,77 +2,134 @@ name: CI - PostgreSQL Extension Build & Test
 
 on:
   push:
-    branches: [ main, v1.6, develop ]
+    branches: [ master, v1.6, develop ]
   pull_request:
-    branches: [ main, v1.6 ]
+    branches: [ master, v1.6 ]
   workflow_dispatch:
 
 jobs:
   test:
     name: PG ${{ matrix.pg }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    
+
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, ubuntu-24.04]
         pg: [12, 13, 14, 15, 16, 17]
         include:
-          # Test PG 18 (devel) on Ubuntu 24.04 only
+          # Attempt PG 18 on Ubuntu 24.04 only (container tag availability may vary)
           - os: ubuntu-24.04
             pg: 18
         exclude:
-          # PG 18 not on Ubuntu 22.04 (may not be available)
-          - os: ubuntu-22.04
-            pg: 18
+          # PG 12 frequently not available / supported well on newer distros
+          - os: ubuntu-24.04
+            pg: 12
+
+    services:
+      postgres:
+        image: postgres:${{ matrix.pg }}
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d postgres"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install PostgreSQL ${{ matrix.pg }}
+      - name: Install build dependencies + PG dev headers (${{ matrix.pg }})
         run: |
-          # Add PostgreSQL APT repository
-          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
-          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+          set -euo pipefail
+
           sudo apt-get update
-          
-          # Install PostgreSQL and dev headers
-          sudo apt-get install -y \
-            postgresql-${{ matrix.pg }} \
-            postgresql-server-dev-${{ matrix.pg }} \
-            libkrb5-dev \
-            build-essential
-          
-          # Start PostgreSQL
-          sudo systemctl start postgresql@${{ matrix.pg }}-main
-          sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'postgres';"
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates \
+            wget \
+            gnupg \
+            lsb-release \
+            build-essential \
+            clang \
+            libkrb5-dev
+
+          # Add PGDG repo (stable approach: keyring + signed-by; no apt-key)
+          sudo install -d -m 0755 /usr/share/keyrings
+          wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor -o /usr/share/keyrings/postgresql.gpg
+
+          echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt \
+            $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+
+          sudo apt-get update
+
+          # Install only client + server-dev headers for the target major
+          sudo apt-get install -y --no-install-recommends \
+            postgresql-client-${{ matrix.pg }} \
+            postgresql-server-dev-${{ matrix.pg }}
+
+          /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config --version
+          /usr/lib/postgresql/${{ matrix.pg }}/bin/psql --version
+
+      - name: Wait for Postgres container
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: 5432
+          PGUSER: postgres
+          PGPASSWORD: postgres
+          PGDATABASE: postgres
+        run: |
+          set -euo pipefail
+          for i in {1..30}; do
+            if psql -c "select version();" >/dev/null 2>&1; then
+              echo "Postgres is ready."
+              psql -c "select version();"
+              exit 0
+            fi
+            echo "Waiting for Postgres... ($i/30)"
+            sleep 2
+          done
+          echo "Postgres did not become ready in time."
+          exit 1
 
       - name: Build extension
         run: |
-          export PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH
-          make clean
-          make
-        env:
-          PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+          set -euo pipefail
+          PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config make clean
+          PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config make
 
       - name: Install extension
         run: |
-          export PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH
-          sudo make install
-        env:
-          PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+          set -euo pipefail
+          sudo PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config make install
 
       - name: Run regression tests
-        run: |
-          export PATH=/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH
-          sudo -u postgres make installcheck
         env:
-          PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+          PGHOST: 127.0.0.1
           PGPORT: 5432
-          PGHOST: localhost
           PGUSER: postgres
           PGPASSWORD: postgres
+          PGDATABASE: postgres
+        run: |
+          set -euo pipefail
+
+          # Ensure we use the pg_regress corresponding to the target major
+          export PATH="/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH"
+
+          echo "Testing against:"
+          psql -c "select version();"
+
+          # Many PGXS tests honor PG* env vars directly.
+          # Append connection options to Makefile's REGRESS_OPTS (which includes --load-extension)
+          PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config \
+          make installcheck REGRESS_OPTS+=" --host=$PGHOST --port=$PGPORT --user=$PGUSER"
 
       - name: Upload regression diffs (on failure)
         if: failure()
@@ -87,7 +144,7 @@ jobs:
   lint:
     name: Lint & Style Check
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -111,13 +168,12 @@ jobs:
 
       - name: Check code formatting
         run: |
-          # Run clang-format check (don't modify, just report)
           clang-format --dry-run --Werror pg_background.c || true  # Informational only
 
   security:
     name: Security Scan
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -130,7 +186,7 @@ jobs:
       - name: Install PostgreSQL headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y postgresql-server-dev-16 libkrb5-dev
+          sudo apt-get install -y postgresql-server-dev-16 libkrb5-dev clang
 
       - name: Build for CodeQL
         run: |
