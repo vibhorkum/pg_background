@@ -327,3 +327,17 @@ ASALocalRun/
 
 # MFractors (Xamarin productivity tool) working folder 
 .mfractor/
+
+# PostgreSQL extension build artifacts
+*.o
+*.so
+*.bc
+*.a
+*.pc
+results/
+regression.diffs
+regression.out
+tmp_check/
+tmp_check_iso/
+log/
+output_iso/

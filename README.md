@@ -104,7 +104,27 @@ Execute arbitrary SQL commands in **background worker processes** within Postgre
 - PostgreSQL 12+ with development headers (`postgresql-server-dev-*` or `postgresql##-devel`)
 - `pg_config` in `$PATH`
 - Build essentials: `gcc`, `make`
+- Kerberos development libraries (`libkrb5-dev` on Debian/Ubuntu, `krb5-devel` on RHEL/CentOS)
 - Superuser privileges for `CREATE EXTENSION`
+
+#### Ubuntu/Debian Installation
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  postgresql-server-dev-16 \
+  libkrb5-dev \
+  build-essential
+```
+
+#### RHEL/CentOS Installation
+
+```bash
+sudo yum install -y \
+  postgresql16-devel \
+  krb5-devel \
+  gcc make
+```
 
 ### Build from Source
 
