@@ -184,6 +184,7 @@ typedef struct pg_background_worker_info
     bool        consumed;               /* True if results have been read */
     bool        mapping_pinned;         /* True if DSM mapping is pinned */
     bool        result_disabled;        /* True if launched via submit_v2 (fire-and-forget) */
+    bool        canceled;               /* True if cancel_v2 was called on this worker */
     TimestampTz launched_at;            /* Launch timestamp for monitoring */
     int32       queue_size;             /* Queue size used for this worker */
     char        sql_preview[PGBG_SQL_PREVIEW_LEN + 1];  /* SQL preview for list_v2 */
@@ -692,7 +693,15 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
     char preview[PGBG_SQL_PREVIEW_LEN + 1];
     int preview_len;
 
-    if (queue_size < 0 || ((uint64) queue_size) < shm_mq_minimum_size)
+    /*
+     * Apply default queue size from GUC if not specified (0 or negative).
+     * This allows users to control the default via pg_background.default_queue_size
+     * without having to specify it on every function call.
+     */
+    if (queue_size <= 0)
+        queue_size = pgbg_default_queue_size;
+
+    if (((uint64) queue_size) < shm_mq_minimum_size)
         ereport(ERROR,
                 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
                  errmsg("queue size must be at least %zu bytes",
@@ -801,6 +810,8 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
     if (!RegisterDynamicBackgroundWorker(&worker, &worker_handle))
     {
         MemoryContextSwitchTo(oldcontext);
+        /* Clean up DSM segment to prevent resource leak */
+        dsm_detach(seg);
         ereport(ERROR,
                 (errcode(ERRCODE_INSUFFICIENT_RESOURCES),
                  errmsg("could not register background process"),
@@ -872,7 +883,8 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
  *
  * Parameters:
  *     sql        - SQL command(s) to execute (text)
- *     queue_size - Shared memory queue size in bytes (default 65536)
+ *     queue_size - Shared memory queue size in bytes (default: uses
+ *                  pg_background.default_queue_size GUC, typically 64KB)
  *
  * Returns: Worker process ID (int4)
  *
@@ -903,7 +915,8 @@ pg_background_launch(PG_FUNCTION_ARGS)
  *
  * Parameters:
  *     sql        - SQL command(s) to execute (text)
- *     queue_size - Shared memory queue size in bytes (default 65536)
+ *     queue_size - Shared memory queue size in bytes (default: uses
+ *                  pg_background.default_queue_size GUC, typically 64KB)
  *
  * Returns: pg_background_handle composite (pid int4, cookie int8)
  *
@@ -933,7 +946,8 @@ pg_background_launch_v2(PG_FUNCTION_ARGS)
  *
  * Parameters:
  *     sql        - SQL command(s) to execute (text)
- *     queue_size - Shared memory queue size in bytes (default 65536)
+ *     queue_size - Shared memory queue size in bytes (default: uses
+ *                  pg_background.default_queue_size GUC, typically 64KB)
  *
  * Returns: pg_background_handle composite (pid int4, cookie int8)
  *
@@ -1534,6 +1548,9 @@ pg_background_cancel_v2(PG_FUNCTION_ARGS)
                  errmsg("cookie mismatch for PID %d", pid),
                  errhint("The worker may have been restarted or the handle is stale.")));
 
+    /* Mark as canceled for statistics tracking */
+    info->canceled = true;
+
     pgbg_request_cancel(info);
     pgbg_send_cancel_signals(info, 0);
     PG_RETURN_VOID();
@@ -1574,6 +1591,9 @@ pg_background_cancel_v2_grace(PG_FUNCTION_ARGS)
         grace_ms = 0;
     else if (grace_ms > PGBG_GRACE_MS_MAX)
         grace_ms = PGBG_GRACE_MS_MAX;
+
+    /* Mark as canceled for statistics tracking */
+    info->canceled = true;
 
     pgbg_request_cancel(info);
     pgbg_send_cancel_signals(info, grace_ms);
@@ -1998,15 +2018,30 @@ cleanup_worker_info(dsm_segment *seg, Datum pid_datum)
             if (execution_us > 0)
                 session_stats.total_execution_us += execution_us;
 
-            if (info->last_error != NULL)
+            /*
+             * Categorize worker outcome:
+             * 1. Canceled takes priority (explicit user action)
+             * 2. Failed if there was an error
+             * 3. Completed otherwise
+             */
+            if (info->canceled)
+            {
+                session_stats.workers_canceled++;
+            }
+            else if (info->last_error != NULL)
             {
                 session_stats.workers_failed++;
-                pfree(info->last_error);
-                info->last_error = NULL;
             }
             else
             {
                 session_stats.workers_completed++;
+            }
+
+            /* Free error message if allocated */
+            if (info->last_error != NULL)
+            {
+                pfree(info->last_error);
+                info->last_error = NULL;
             }
         }
     }
@@ -2153,6 +2188,7 @@ save_worker_info(pid_t pid, uint64 cookie, dsm_segment *seg,
     info->consumed = false;
     info->mapping_pinned = false;
     info->result_disabled = result_disabled;
+    info->canceled = false;
 
     info->launched_at = GetCurrentTimestamp();
     info->queue_size = queue_size;
@@ -2524,6 +2560,7 @@ handle_sigterm(SIGNAL_ARGS)
  *   - workers_launched: total workers launched this session
  *   - workers_completed: workers that completed successfully
  *   - workers_failed: workers that failed with an error
+ *   - workers_canceled: workers that were explicitly canceled
  *   - workers_active: currently active workers
  *   - avg_execution_ms: average execution time in milliseconds
  *   - max_workers: current pg_background.max_workers setting
@@ -2532,12 +2569,12 @@ Datum
 pg_background_stats_v2(PG_FUNCTION_ARGS)
 {
     TupleDesc   tupdesc;
-    Datum       values[6];
-    bool        nulls[6];
+    Datum       values[7];
+    bool        nulls[7];
     HeapTuple   tuple;
     int         active_workers;
     float8      avg_execution_ms;
-    int64       completed_total;
+    int64       finished_total;
 
     if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
         ereport(ERROR,
@@ -2548,10 +2585,12 @@ pg_background_stats_v2(PG_FUNCTION_ARGS)
     /* Calculate active workers */
     active_workers = (worker_hash != NULL) ? hash_get_num_entries(worker_hash) : 0;
 
-    /* Calculate average execution time */
-    completed_total = session_stats.workers_completed + session_stats.workers_failed;
-    if (completed_total > 0)
-        avg_execution_ms = (float8) session_stats.total_execution_us / completed_total / 1000.0;
+    /* Calculate average execution time (includes all finished workers) */
+    finished_total = session_stats.workers_completed +
+                     session_stats.workers_failed +
+                     session_stats.workers_canceled;
+    if (finished_total > 0)
+        avg_execution_ms = (float8) session_stats.total_execution_us / finished_total / 1000.0;
     else
         avg_execution_ms = 0.0;
 
@@ -2560,9 +2599,10 @@ pg_background_stats_v2(PG_FUNCTION_ARGS)
     values[0] = Int64GetDatum(session_stats.workers_launched);
     values[1] = Int64GetDatum(session_stats.workers_completed);
     values[2] = Int64GetDatum(session_stats.workers_failed);
-    values[3] = Int32GetDatum(active_workers);
-    values[4] = Float8GetDatum(avg_execution_ms);
-    values[5] = Int32GetDatum(pgbg_max_workers);
+    values[3] = Int64GetDatum(session_stats.workers_canceled);
+    values[4] = Int32GetDatum(active_workers);
+    values[5] = Float8GetDatum(avg_execution_ms);
+    values[6] = Int32GetDatum(pgbg_max_workers);
 
     tuple = heap_form_tuple(tupdesc, values, nulls);
     PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
@@ -2618,13 +2658,29 @@ pg_background_progress(PG_FUNCTION_ARGS)
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                  errmsg("cannot find fixed data in shared memory")));
 
-    /* Update progress atomically (volatile for visibility) */
-    *(volatile int32 *)&fdata->progress_pct = pct;
-
+    /*
+     * Write progress_msg first, then progress_pct with a write barrier.
+     * This ensures the reader (using read barrier) sees consistent data:
+     * - Writer: msg -> write_barrier -> pct
+     * - Reader: pct -> read_barrier -> msg
+     * When reader sees updated pct, msg is guaranteed to be visible.
+     */
     if (msg != NULL)
     {
         int msg_len = VARSIZE_ANY_EXHDR(msg);
-        int copy_len = Min(msg_len, (int) sizeof(fdata->progress_msg) - 1);
+        int max_len = (int) sizeof(fdata->progress_msg) - 1;
+        int copy_len;
+
+        /*
+         * UTF-8 aware truncation: pg_mbcliplen() ensures we don't cut
+         * multi-byte characters in the middle, which would produce
+         * invalid UTF-8 sequences.
+         */
+        if (msg_len > max_len)
+            copy_len = pg_mbcliplen(VARDATA_ANY(msg), msg_len, max_len);
+        else
+            copy_len = msg_len;
+
         memcpy(fdata->progress_msg, VARDATA_ANY(msg), copy_len);
         fdata->progress_msg[copy_len] = '\0';
     }
@@ -2632,6 +2688,12 @@ pg_background_progress(PG_FUNCTION_ARGS)
     {
         fdata->progress_msg[0] = '\0';
     }
+
+    /* Write barrier ensures msg is visible before pct update */
+    pg_write_barrier();
+
+    /* Update progress percentage (volatile for cross-process visibility) */
+    *(volatile int32 *)&fdata->progress_pct = pct;
 
     PG_RETURN_VOID();
 }
@@ -2682,12 +2744,19 @@ pg_background_get_progress_v2(PG_FUNCTION_ARGS)
     if (fdata == NULL)
         PG_RETURN_NULL();
 
-    /* Read progress (use volatile to ensure fresh read) */
+    /*
+     * Read progress with memory barrier for consistency.
+     * The worker writes: progress_msg then progress_pct.
+     * We read: progress_pct then progress_msg.
+     * The read barrier ensures we see the message that was written
+     * before the percentage was updated.
+     */
     progress_pct = *(volatile int32 *)&fdata->progress_pct;
     if (progress_pct < 0)
         PG_RETURN_NULL();  /* Progress not reported yet */
 
-    strlcpy(progress_msg, fdata->progress_msg, sizeof(progress_msg));
+    pg_read_barrier();
+    strlcpy(progress_msg, (volatile char *)fdata->progress_msg, sizeof(progress_msg));
 
     /* Build result tuple */
     if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)

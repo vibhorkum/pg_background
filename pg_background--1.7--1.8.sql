@@ -14,6 +14,7 @@ CREATE TYPE public.pg_background_stats AS (
     workers_launched   pg_catalog.int8,
     workers_completed  pg_catalog.int8,
     workers_failed     pg_catalog.int8,
+    workers_canceled   pg_catalog.int8,
     workers_active     pg_catalog.int4,
     avg_execution_ms   pg_catalog.float8,
     max_workers        pg_catalog.int4
@@ -31,7 +32,7 @@ AS 'MODULE_PATHNAME', 'pg_background_stats_v2'
 LANGUAGE C;
 
 COMMENT ON FUNCTION pg_background_stats_v2() IS
-'Returns session-local statistics about background workers: launched, completed, failed, active count, and average execution time.';
+'Returns session-local statistics about background workers: launched, completed, failed, canceled, active count, and average execution time.';
 
 -- Progress reporting (called from worker SQL)
 CREATE FUNCTION pg_background_progress(

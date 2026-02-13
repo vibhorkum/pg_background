@@ -23,7 +23,7 @@
 
 CREATE FUNCTION pg_background_launch(
     sql pg_catalog.text,
-    queue_size pg_catalog.int4 DEFAULT 65536
+    queue_size pg_catalog.int4 DEFAULT 0
 )
 RETURNS pg_catalog.int4
 AS 'MODULE_PATHNAME'
@@ -58,7 +58,7 @@ CREATE TYPE public.pg_background_handle AS (
 
 CREATE FUNCTION pg_background_launch_v2(
     sql pg_catalog.text,
-    queue_size pg_catalog.int4 DEFAULT 65536
+    queue_size pg_catalog.int4 DEFAULT 0
 )
 RETURNS public.pg_background_handle
 AS 'MODULE_PATHNAME', 'pg_background_launch_v2'
@@ -66,7 +66,7 @@ LANGUAGE C STRICT;
 
 CREATE FUNCTION pg_background_submit_v2(
     sql pg_catalog.text,
-    queue_size pg_catalog.int4 DEFAULT 65536
+    queue_size pg_catalog.int4 DEFAULT 0
 )
 RETURNS public.pg_background_handle
 AS 'MODULE_PATHNAME', 'pg_background_submit_v2'
@@ -138,6 +138,7 @@ CREATE TYPE public.pg_background_stats AS (
     workers_launched   pg_catalog.int8,
     workers_completed  pg_catalog.int8,
     workers_failed     pg_catalog.int8,
+    workers_canceled   pg_catalog.int8,
     workers_active     pg_catalog.int4,
     avg_execution_ms   pg_catalog.float8,
     max_workers        pg_catalog.int4
@@ -159,7 +160,7 @@ AS 'MODULE_PATHNAME', 'pg_background_stats_v2'
 LANGUAGE C;
 
 COMMENT ON FUNCTION pg_background_stats_v2() IS
-'Returns session-local statistics about background workers: launched, completed, failed, active count, and average execution time.';
+'Returns session-local statistics about background workers: launched, completed, failed, canceled, active count, and average execution time.';
 
 -- Progress reporting (called from worker SQL)
 CREATE FUNCTION pg_background_progress(

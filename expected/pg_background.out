@@ -431,13 +431,14 @@ SELECT
   workers_launched > 0 AS has_launched,
   workers_completed >= 0 AS has_completed_field,
   workers_failed >= 0 AS has_failed_field,
+  workers_canceled >= 0 AS has_canceled_field,
   workers_active >= 0 AS has_active_field,
   avg_execution_ms >= 0 AS has_avg_time,
   max_workers > 0 AS has_max_workers
 FROM pg_background_stats_v2();
- has_launched | has_completed_field | has_failed_field | has_active_field | has_avg_time | has_max_workers
---------------+---------------------+------------------+------------------+--------------+-----------------
- t            | t                   | t                | t                | t            | t
+ has_launched | has_completed_field | has_failed_field | has_canceled_field | has_active_field | has_avg_time | has_max_workers
+--------------+---------------------+------------------+--------------------+------------------+--------------+-----------------
+ t            | t                   | t                | t                  | t                | t            | t
 (1 row)
 
 -- -------------------------------------------------------------------------
@@ -559,10 +560,11 @@ SELECT
   workers_launched AS total_launched,
   workers_completed AS total_completed,
   workers_failed AS total_failed,
+  workers_canceled AS total_canceled,
   workers_active AS currently_active
 FROM pg_background_stats_v2();
- total_launched | total_completed | total_failed | currently_active
-----------------+-----------------+--------------+------------------
-             14 |              11 |            0 |                0
+ total_launched | total_completed | total_failed | total_canceled | currently_active
+----------------+-----------------+--------------+----------------+------------------
+             14 |               8 |            0 |              3 |                0
 (1 row)
 

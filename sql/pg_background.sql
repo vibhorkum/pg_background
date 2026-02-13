@@ -288,6 +288,7 @@ SELECT
   workers_launched > 0 AS has_launched,
   workers_completed >= 0 AS has_completed_field,
   workers_failed >= 0 AS has_failed_field,
+  workers_canceled >= 0 AS has_canceled_field,
   workers_active >= 0 AS has_active_field,
   avg_execution_ms >= 0 AS has_avg_time,
   max_workers > 0 AS has_max_workers
@@ -378,5 +379,6 @@ SELECT
   workers_launched AS total_launched,
   workers_completed AS total_completed,
   workers_failed AS total_failed,
+  workers_canceled AS total_canceled,
   workers_active AS currently_active
 FROM pg_background_stats_v2();
