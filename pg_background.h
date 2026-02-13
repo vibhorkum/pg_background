@@ -19,10 +19,14 @@
  * ============================================================================
  *
  * TupleDescAttr macro for accessing tuple descriptor attributes.
- * Standard in PostgreSQL 9.6.5+ but we define it for safety.
+ * In PostgreSQL 18+, TupleDescAttr is provided by the system and the
+ * TupleDescData structure changed (attrs is no longer a direct member).
+ * Only define our fallback for older versions.
  */
+#if PG_VERSION_NUM < 180000
 #ifndef TupleDescAttr
 #define TupleDescAttr(tupdesc, i) (&(tupdesc)->attrs[(i)])
+#endif
 #endif
 
 /*
