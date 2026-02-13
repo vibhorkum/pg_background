@@ -565,6 +565,6 @@ SELECT
 FROM pg_background_stats_v2();
  total_launched | total_completed | total_failed | total_canceled | currently_active
 ----------------+-----------------+--------------+----------------+------------------
-             14 |               8 |            0 |              3 |                0
+             14 |               9 |            0 |              5 |                0
 (1 row)
 

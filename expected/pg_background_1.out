@@ -387,7 +387,7 @@ SELECT *
 FROM pg_background_list_v2()
   AS (pid int4, cookie int8, launched_at timestamptz, user_id oid,
       queue_size int4, state text, sql_preview text, last_error text, consumed bool);
- pid | cookie | launched_at | user_id | queue_size | state | sql_preview | last_error | consumed
+ pid | cookie | launched_at | user_id | queue_size | state | sql_preview | last_error | consumed 
 -----+--------+-------------+---------+------------+-------+-------------+------------+----------
 (0 rows)
 
@@ -396,19 +396,19 @@ FROM pg_background_list_v2()
 -- -------------------------------------------------------------------------
 -- Show default GUC values
 SHOW pg_background.max_workers;
- pg_background.max_workers
+ pg_background.max_workers 
 ---------------------------
  16
 (1 row)
 
 SHOW pg_background.default_queue_size;
- pg_background.default_queue_size
+ pg_background.default_queue_size 
 ----------------------------------
  64kB
 (1 row)
 
 SHOW pg_background.worker_timeout;
- pg_background.worker_timeout
+ pg_background.worker_timeout 
 ------------------------------
  0
 (1 row)
@@ -416,7 +416,7 @@ SHOW pg_background.worker_timeout;
 -- Test max_workers limit
 SET pg_background.max_workers = 2;
 SHOW pg_background.max_workers;
- pg_background.max_workers
+ pg_background.max_workers 
 ---------------------------
  2
 (1 row)
@@ -436,7 +436,7 @@ SELECT
   avg_execution_ms >= 0 AS has_avg_time,
   max_workers > 0 AS has_max_workers
 FROM pg_background_stats_v2();
- has_launched | has_completed_field | has_failed_field | has_canceled_field | has_active_field | has_avg_time | has_max_workers
+ has_launched | has_completed_field | has_failed_field | has_canceled_field | has_active_field | has_avg_time | has_max_workers 
 --------------+---------------------+------------------+--------------------+------------------+--------------+-----------------
  t            | t                   | t                | t                  | t                | t            | t
 (1 row)
@@ -460,7 +460,7 @@ $$, 65536) AS h) s
 \gset
 -- Give worker time to start and report progress
 SELECT pg_sleep(0.15);
- pg_sleep
+ pg_sleep 
 ----------
 
 (1 row)
@@ -469,28 +469,28 @@ SELECT pg_sleep(0.15);
 SELECT
   CASE WHEN progress_pct >= 0 THEN 'progress_reported' ELSE 'no_progress' END AS progress_status
 FROM pg_background_get_progress_v2(:p_pid, :p_cookie);
-  progress_status
+  progress_status 
 -------------------
  progress_reported
 (1 row)
 
 -- Wait for completion
 SELECT pg_background_wait_v2_timeout(:p_pid, :p_cookie, 5000) AS progress_worker_done;
- progress_worker_done
+ progress_worker_done 
 ----------------------
  t
 (1 row)
 
 -- Verify work was done
 SELECT count(*) AS progress_insert_count FROM t_progress;
- progress_insert_count
+ progress_insert_count 
 -----------------------
                      1
 (1 row)
 
 -- Cleanup
 SELECT pg_background_detach_v2(:p_pid, :p_cookie);
- pg_background_detach_v2
+ pg_background_detach_v2 
 -------------------------
 
 (1 row)
@@ -505,7 +505,7 @@ SELECT (h).pid AS mw_pid, (h).cookie AS mw_cookie
 FROM (SELECT pg_background_launch_v2('SELECT pg_sleep(2)', 65536) AS h) s
 \gset
 SELECT pg_sleep(0.1);
- pg_sleep
+ pg_sleep 
 ----------
 
 (1 row)
@@ -522,19 +522,19 @@ $$;
 NOTICE:  max_workers_test=correctly_limited
 -- Cancel and cleanup the first worker
 SELECT pg_background_cancel_v2(:mw_pid, :mw_cookie);
- pg_background_cancel_v2
+ pg_background_cancel_v2 
 -------------------------
 
 (1 row)
 
 SELECT pg_sleep(0.2);
- pg_sleep
+ pg_sleep 
 ----------
 
 (1 row)
 
 SELECT pg_background_detach_v2(:mw_pid, :mw_cookie);
- pg_background_detach_v2
+ pg_background_detach_v2 
 -------------------------
 
 (1 row)
@@ -547,7 +547,7 @@ RESET pg_background.max_workers;
 -- Test that worker_timeout can be set
 SET pg_background.worker_timeout = '1s';
 SHOW pg_background.worker_timeout;
- pg_background.worker_timeout
+ pg_background.worker_timeout 
 ------------------------------
  1s
 (1 row)
@@ -563,8 +563,8 @@ SELECT
   workers_canceled AS total_canceled,
   workers_active AS currently_active
 FROM pg_background_stats_v2();
- total_launched | total_completed | total_failed | total_canceled | currently_active
+ total_launched | total_completed | total_failed | total_canceled | currently_active 
 ----------------+-----------------+--------------+----------------+------------------
-             14 |               8 |            0 |              3 |                0
+             14 |               9 |            0 |              5 |                0
 (1 row)
 
