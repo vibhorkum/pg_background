@@ -1,11 +1,27 @@
+/*--------------------------------------------------------------------------
+ *
+ * pg_background.h
+ *     Header file for pg_background extension.
+ *
+ * This file contains compatibility macros for supporting multiple
+ * PostgreSQL versions (14-18).
+ *
+ * Copyright (C) 2014, PostgreSQL Global Development Group
+ *
+ * -------------------------------------------------------------------------
+ */
 #ifndef PG_BACKGROUND_H_
 #define PG_BACKGROUND_H_
 
-/* Various macros for backward compatibility */
-
 /*
- * TupleDescAttr was introduced in 9.6.5 and 9.5.9.
- * Still needed for PG < 18.
+ * ============================================================================
+ * TUPLE DESCRIPTOR COMPATIBILITY
+ * ============================================================================
+ *
+ * TupleDescAttr macro for accessing tuple descriptor attributes.
+ * In PostgreSQL 18+, TupleDescAttr is provided by the system and the
+ * TupleDescData structure changed (attrs is no longer a direct member).
+ * Only define our fallback for older versions.
  */
 #if PG_VERSION_NUM < 180000
 #ifndef TupleDescAttr
@@ -14,28 +30,40 @@
 #endif
 
 /*
- * shm_toc_lookup signature changed in PG 10 (before our minimum supported version).
- * For PG 14+, we always use the 3-argument version.
+ * ============================================================================
+ * SHARED MEMORY TOC COMPATIBILITY
+ * ============================================================================
+ *
+ * shm_toc_lookup signature is stable since PG 10.
+ * We use the 3-argument version (with noerror flag).
  */
 #define shm_toc_lookup_compat(toc, key, noerr) shm_toc_lookup((toc), (key), (noerr))
 
 /*
- * CreateCommandTag signature changed in PG 13.
- * For PG 14+, we always use the PG 13+ form with (Node *) cast.
+ * ============================================================================
+ * COMMAND TAG COMPATIBILITY
+ * ============================================================================
+ *
+ * CreateCommandTag changed in PG 13 to take Node* instead of specific types.
+ * CommandTag became an enum and QueryCompletion was introduced.
  */
 #define CreateCommandTag_compat(p) CreateCommandTag((Node *) (p))
-
-/* 
- * In PG13+, CommandTag became an enum and QueryCompletion was introduced.
- * For PG 14+, we always use the PG 13+ form.
- */
 typedef CommandTag CommandTag_compat;
+
+/* Process status display */
 #define set_ps_display_compat(tag) set_ps_display((tag))
+
+/* Command lifecycle functions */
 #define BeginCommand_compat(tag, dest) BeginCommand((tag), (dest))
 #define EndCommand_compat(qc, dest) EndCommand((qc), (dest), false)
 
 /*
- * pg_analyze_and_rewrite signature changed in PG 15.
+ * ============================================================================
+ * QUERY ANALYSIS COMPATIBILITY
+ * ============================================================================
+ *
+ * pg_analyze_and_rewrite was renamed to pg_analyze_and_rewrite_fixedparams
+ * in PostgreSQL 15 when pg_analyze_and_rewrite_varparams was added.
  */
 #if PG_VERSION_NUM >= 150000
 #define pg_analyze_and_rewrite_compat(parse, string, types, num, env) \
