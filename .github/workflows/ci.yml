@@ -76,6 +76,9 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Disable problematic Microsoft repositories (known to return 403 on GitHub runners)
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list || true
+
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             ca-certificates \
@@ -252,6 +255,9 @@ jobs:
 
       - name: Install dependencies
         run: |
+          # Disable problematic Microsoft repositories (known to return 403 on GitHub runners)
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list || true
+
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             ca-certificates \
@@ -311,6 +317,9 @@ jobs:
 
       - name: Install PostgreSQL headers
         run: |
+          # Disable problematic Microsoft repositories (known to return 403 on GitHub runners)
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list || true
+
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             ca-certificates \
