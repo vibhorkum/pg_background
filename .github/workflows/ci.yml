@@ -298,8 +298,6 @@ jobs:
     name: Security Scan
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Only run on main branches and PRs to avoid excessive CodeQL runs
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
 
     permissions:
       security-events: write
