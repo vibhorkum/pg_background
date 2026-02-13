@@ -21,9 +21,9 @@ DATA = \
 # Regression
 REGRESS = pg_background
 
-# Load extension before running sql/pg_background.sql
-# (Keeps expected output clean, avoids "already exists" noise)
-REGRESS_OPTS = --load-extension=$(EXTENSION)
+# Note: The test SQL file handles CREATE EXTENSION itself,
+# so we don't use --load-extension here.
+# REGRESS_OPTS = --load-extension=$(EXTENSION)
 
 # If your regression needs longer than default (yours has pg_sleep),
 # you can tune timeouts via PGOPTIONS if needed.

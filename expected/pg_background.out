@@ -404,7 +404,7 @@ SHOW pg_background.max_workers;
 SHOW pg_background.default_queue_size;
  pg_background.default_queue_size
 ----------------------------------
- 65536
+ 64kB
 (1 row)
 
 SHOW pg_background.worker_timeout;
