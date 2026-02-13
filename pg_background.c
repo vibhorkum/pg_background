@@ -436,9 +436,8 @@ _PG_init(void)
                             NULL);
 
     /* Define pg_background.default_queue_size */
-    /* Compile-time check: ensure shm_mq_minimum_size fits in int for GUC */
-    StaticAssertStmt(shm_mq_minimum_size <= PG_INT32_MAX,
-                     "shm_mq_minimum_size exceeds INT_MAX");
+    /* Runtime check: ensure shm_mq_minimum_size fits in int for GUC */
+    Assert(shm_mq_minimum_size <= PG_INT32_MAX);
     DefineCustomIntVariable("pg_background.default_queue_size",
                             "Default shared memory queue size for workers.",
                             "Can be overridden per-worker. Larger sizes support bigger result sets.",
@@ -579,9 +578,12 @@ pgbg_timestamp_diff_ms(TimestampTz start, TimestampTz stop)
     if (diff_us < 0)
         return 0;
 
-    /* Overflow protection: cap at LONG_MAX milliseconds (~24 days on 32-bit) */
-    /* Check before division to avoid potential overflow in comparison */
-    if (diff_us > (int64) LONG_MAX * 1000)
+    /*
+     * Overflow protection: cap at LONG_MAX milliseconds (~24 days on 32-bit).
+     * Division cannot overflow; comparing result against LONG_MAX works because
+     * LONG_MAX is promoted to int64 for comparison on 32-bit systems.
+     */
+    if (diff_us / 1000 > LONG_MAX)
         return LONG_MAX;
 
     return (long) (diff_us / 1000);
