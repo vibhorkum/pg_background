@@ -7,7 +7,7 @@ CREATE TABLE t(id integer);
 -- ----------------------------------------------------------------------
 SELECT pg_background_launch('INSERT INTO t SELECT 1') AS pid \gset
 SELECT * FROM pg_background_result(:pid) AS (result TEXT);
-   result
+   result   
 ------------
  INSERT 0 1
 (1 row)
@@ -462,14 +462,14 @@ $$, 65536) AS h) s
 SELECT pg_sleep(0.15);
  pg_sleep 
 ----------
-
+ 
 (1 row)
 
 -- Check progress (should be >= 0 if reported)
 SELECT
   CASE WHEN progress_pct >= 0 THEN 'progress_reported' ELSE 'no_progress' END AS progress_status
 FROM pg_background_get_progress_v2(:p_pid, :p_cookie);
-  progress_status 
+  progress_status  
 -------------------
  progress_reported
 (1 row)
@@ -492,7 +492,7 @@ SELECT count(*) AS progress_insert_count FROM t_progress;
 SELECT pg_background_detach_v2(:p_pid, :p_cookie);
  pg_background_detach_v2 
 -------------------------
-
+ 
 (1 row)
 
 -- -------------------------------------------------------------------------
@@ -507,7 +507,7 @@ FROM (SELECT pg_background_launch_v2('SELECT pg_sleep(2)', 65536) AS h) s
 SELECT pg_sleep(0.1);
  pg_sleep 
 ----------
-
+ 
 (1 row)
 
 -- Try to launch another (should fail due to limit)
@@ -524,19 +524,19 @@ NOTICE:  max_workers_test=correctly_limited
 SELECT pg_background_cancel_v2(:mw_pid, :mw_cookie);
  pg_background_cancel_v2 
 -------------------------
-
+ 
 (1 row)
 
 SELECT pg_sleep(0.2);
  pg_sleep 
 ----------
-
+ 
 (1 row)
 
 SELECT pg_background_detach_v2(:mw_pid, :mw_cookie);
  pg_background_detach_v2 
 -------------------------
-
+ 
 (1 row)
 
 -- Reset limit
