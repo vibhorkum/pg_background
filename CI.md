@@ -2,64 +2,110 @@
 
 ## Overview
 
-The pg_background CI pipeline uses GitHub Actions with containerized PostgreSQL to ensure consistent, deterministic testing across multiple PostgreSQL versions. The workflow builds the extension on the Ubuntu runner (with proper dev headers) and then copies the built artifacts into a PostgreSQL Docker container for testing.
+The pg_background CI pipeline uses GitHub Actions with containerized PostgreSQL to ensure consistent, deterministic testing across multiple PostgreSQL versions (14-18). The workflow builds the extension on Ubuntu runners with proper development headers and copies the built artifacts into PostgreSQL Docker containers for testing.
 
-## Architecture
+## Quick Start
 
-### Workflow Components
+### Local Testing with Docker
 
-1. **Test Job**: Builds and tests the extension against multiple PostgreSQL versions
-   - Uses official `postgres` Docker images for runtime testing
-   - Builds extension on Ubuntu runner with matching PostgreSQL dev headers
-   - Copies built artifacts into container for testing
-   - Tests against PostgreSQL 14-18
-   - Runs on both Ubuntu 22.04 and 24.04
+The easiest way to run tests locally is using the provided `test-local.sh` script:
 
-2. **Lint Job**: Runs static analysis checks
-   - `cppcheck` for C code analysis
-   - `clang-format` for code style verification
+```bash
+# Test with default PostgreSQL version (17)
+./test-local.sh
 
-3. **Security Job**: Performs CodeQL security scanning
-   - Analyzes code for security vulnerabilities
-   - Uses PostgreSQL 16 headers for build
+# Test with a specific version
+./test-local.sh 14
+./test-local.sh 15
+./test-local.sh 16
+./test-local.sh 17
+./test-local.sh 18
+
+# Test all supported versions (14-18)
+./test-local.sh all
+```
+
+**Requirements**: Docker must be installed and running. No local PostgreSQL installation required.
+
+## CI Workflow Architecture
+
+### Jobs
+
+| Job | Purpose | Runs On | Timeout |
+|-----|---------|---------|---------|
+| **test** | Build and test against PostgreSQL matrix | ubuntu-22.04, ubuntu-24.04 | 15 min |
+| **test-summary** | Aggregate test results | ubuntu-latest | - |
+| **lint** | Static analysis (cppcheck, clang-format) | ubuntu-latest | 10 min |
+| **security** | CodeQL security scanning | ubuntu-latest | 20 min |
 
 ### Test Matrix
 
-The test job runs against multiple combinations:
-- Ubuntu 22.04: PostgreSQL 14, 15, 16, 17, 18
-- Ubuntu 24.04: PostgreSQL 14, 15, 16, 17, 18
+The test job runs against all combinations:
 
-### Build and Test Flow
+| Ubuntu Version | PostgreSQL Versions |
+|----------------|---------------------|
+| 22.04 | 14, 15, 16, 17, 18 |
+| 24.04 | 14, 15, 16, 17, 18 |
 
-1. **Start Container**: PostgreSQL container is started with `docker run`
-2. **Build on Runner**: Extension is built on the runner with dev headers for the target PostgreSQL version
-3. **Copy Artifacts**: Built `.so` file and extension SQL files are copied into the running container
-4. **Run Tests**: Regression tests connect to the containerized PostgreSQL and verify functionality
+**Total: 10 parallel test jobs**
 
-This hybrid approach ensures:
-- Consistent build environment (runner with PGDG packages)
-- Isolated runtime environment (containerized PostgreSQL)
-- No dependency on pre-installed PostgreSQL on runners
-- Reproducible local testing with Docker
+### Workflow Triggers
 
-## Local Reproduction
+- **Push**: `master`, `main`, `develop`, `v1.*`, `improvements/*` branches
+- **Tags**: `v*` (releases)
+- **Pull Requests**: To `master` or `main`
+- **Manual**: Via `workflow_dispatch`
 
-### Prerequisites
+### Concurrency Control
 
-- Docker installed and running
-- PostgreSQL client tools (psql)
-- Build tools (gcc, make)
-- PostgreSQL development headers
+The workflow automatically cancels in-progress runs when new commits are pushed to the same branch, saving CI minutes and providing faster feedback.
 
-### Testing Against a Specific PostgreSQL Version
+## Build and Test Flow
 
-To test the extension locally against a specific PostgreSQL version, follow these steps:
+```
+┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
+│  Start Docker   │────▶│  Build on Runner │────▶│ Copy to Docker  │
+│  PostgreSQL     │     │  (with dev hdrs) │     │   Container     │
+└─────────────────┘     └──────────────────┘     └────────┬────────┘
+                                                          │
+                                                          ▼
+                                                 ┌─────────────────┐
+                                                 │ Run Regression  │
+                                                 │     Tests       │
+                                                 └─────────────────┘
+```
 
-#### 1. Start PostgreSQL Container
+1. **Start Container**: PostgreSQL container started with `docker run`
+2. **Build on Runner**: Extension built with PGDG development headers
+3. **Copy Artifacts**: Built `.so` and SQL files copied into running container
+4. **Run Tests**: Regression tests connect to containerized PostgreSQL
+
+### Key Features
+
+- **APT Package Caching**: Faster subsequent runs
+- **Parallel Matrix Execution**: All 10 test combinations run simultaneously
+- **Artifact Upload on Failure**: Regression diffs available for debugging
+- **clang/llvm Symlink Handling**: Automatic compatibility for PGXS requirements
+
+## Extension Features Tested
+
+The regression tests verify all pg_background v1.8 functionality:
+
+- **v1 API**: `pg_background_launch()`, `pg_background_result()`, `pg_background_detach()`
+- **v2 API**: `pg_background_launch_v2()`, `pg_background_detach_v2()`, `pg_background_cancel_v2()`
+- **Wait Functions**: `pg_background_wait_v2()`, `pg_background_wait_v2_timeout()`
+- **Progress Reporting**: `pg_background_progress()`, `pg_background_get_progress_v2()`
+- **Statistics**: `pg_background_stats_v2()`, `pg_background_list_v2()`
+- **GUC Settings**: `pg_background.max_workers`, `pg_background.default_queue_size`, `pg_background.worker_timeout`
+
+## Manual Local Testing
+
+If you prefer not to use `test-local.sh`, follow these steps:
+
+### 1. Start PostgreSQL Container
 
 ```bash
-# Choose your PostgreSQL version (12-18)
-PG_VERSION=16
+PG_VERSION=17
 
 docker run --name postgres-test -d \
   -e POSTGRES_PASSWORD=postgres \
@@ -79,12 +125,12 @@ for i in {1..30}; do
 done
 ```
 
-#### 2. Install PostgreSQL Development Headers
+### 2. Install Build Dependencies
 
 ```bash
 # Add PostgreSQL APT repository
 sudo apt-get update
-sudo apt-get install -y ca-certificates wget gnupg lsb-release
+sudo apt-get install -y ca-certificates wget gnupg lsb-release build-essential libkrb5-dev
 
 sudo install -d -m 0755 /usr/share/keyrings
 wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
@@ -95,204 +141,91 @@ echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] \
   $(lsb_release -cs)-pgdg main" \
   | sudo tee /etc/apt/sources.list.d/pgdg.list
 
-# Install headers and client tools
 sudo apt-get update
 sudo apt-get install -y \
-  build-essential \
   postgresql-client-${PG_VERSION} \
-  postgresql-server-dev-${PG_VERSION} \
-  libkrb5-dev
+  postgresql-server-dev-${PG_VERSION}
 ```
 
-#### 3. Build the Extension
+### 3. Build the Extension
 
 ```bash
-export PG_CONFIG=/usr/lib/postgresql/${PG_VERSION}/bin/pg_config
-
-# Verify pg_config
-$PG_CONFIG --version
-
-# Build
-make clean
-make
-```
-
-#### 4. Copy Extension Files to Container
-
-```bash
-# Get PostgreSQL paths
-PKGLIBDIR=$($PG_CONFIG --pkglibdir)
-SHAREDIR=$($PG_CONFIG --sharedir)
-
-# Copy shared library
-docker exec postgres-test mkdir -p "$PKGLIBDIR"
-docker cp pg_background.so postgres-test:$PKGLIBDIR/pg_background.so
-
-# Copy extension files
-docker exec postgres-test mkdir -p "$SHAREDIR/extension"
-docker cp pg_background.control postgres-test:$SHAREDIR/extension/
-docker cp pg_background--1.6.sql postgres-test:$SHAREDIR/extension/
-for f in pg_background--*.sql; do
-  docker cp "$f" postgres-test:$SHAREDIR/extension/
-done
-
-# Verify
-docker exec postgres-test ls -la "$PKGLIBDIR/pg_background.so"
-docker exec postgres-test ls -la "$SHAREDIR/extension/pg_background.control"
-```
-
-#### 5. Run Tests
-
-```bash
-# Set connection parameters
-export PGHOST=127.0.0.1
-export PGPORT=5432
-export PGUSER=postgres
-export PGPASSWORD=postgres
-export PGDATABASE=postgres
-
-# Add PostgreSQL binaries to PATH
-export PATH=/usr/lib/postgresql/${PG_VERSION}/bin:$PATH
-
-# Test extension loads
-psql -c "CREATE EXTENSION pg_background;"
-psql -c "SELECT * FROM pg_available_extensions WHERE name = 'pg_background';"
-
-# Run regression tests
-make installcheck \
-  REGRESS_OPTS+=" --host=$PGHOST --port=$PGPORT --user=$PGUSER"
-```
-
-#### 6. Cleanup
-
-```bash
-docker stop postgres-test
-docker rm postgres-test
-```
-
-### Quick Test Script
-
-Create a `test-local.sh` script:
-
-```bash
-#!/bin/bash
-set -euo pipefail
-
-PG_VERSION=${1:-16}
-
-echo "Testing pg_background with PostgreSQL $PG_VERSION"
-
-# Start container
-docker run --name pg-test -d \
-  -e POSTGRES_PASSWORD=postgres \
-  -e POSTGRES_USER=postgres \
-  -e POSTGRES_DB=postgres \
-  -p 5432:5432 \
-  postgres:${PG_VERSION}
-
-# Wait for ready
-for i in {1..30}; do
-  if docker exec pg-test pg_isready -U postgres >/dev/null 2>&1; then
-    echo "PostgreSQL is ready"
-    break
-  fi
-  echo "Waiting... ($i/30)"
-  sleep 2
-done
-
-# Build
 export PG_CONFIG=/usr/lib/postgresql/${PG_VERSION}/bin/pg_config
 make clean && make
+```
 
-# Copy files
+### 4. Copy to Container
+
+```bash
 PKGLIBDIR=$($PG_CONFIG --pkglibdir)
 SHAREDIR=$($PG_CONFIG --sharedir)
-docker exec pg-test mkdir -p "$PKGLIBDIR" "$SHAREDIR/extension"
-docker cp pg_background.so pg-test:$PKGLIBDIR/
-docker cp pg_background.control pg-test:$SHAREDIR/extension/
-for f in pg_background--*.sql; do docker cp "$f" pg-test:$SHAREDIR/extension/; done
 
-# Test
+docker exec postgres-test mkdir -p "$PKGLIBDIR" "$SHAREDIR/extension"
+docker cp pg_background.so postgres-test:$PKGLIBDIR/
+docker cp pg_background.control postgres-test:$SHAREDIR/extension/
+for f in pg_background--*.sql; do docker cp "$f" postgres-test:$SHAREDIR/extension/; done
+```
+
+### 5. Run Tests
+
+```bash
 export PGHOST=127.0.0.1 PGPORT=5432 PGUSER=postgres PGPASSWORD=postgres PGDATABASE=postgres
 export PATH=/usr/lib/postgresql/${PG_VERSION}/bin:$PATH
 make installcheck REGRESS_OPTS+=" --host=$PGHOST --port=$PGPORT --user=$PGUSER"
-
-# Cleanup
-docker stop pg-test && docker rm pg-test
-
-echo "Tests passed!"
 ```
 
-Run with: `bash test-local.sh 16`
+### 6. Cleanup
+
+```bash
+docker stop postgres-test && docker rm postgres-test
+```
 
 ## Troubleshooting
 
 ### Build Fails with "Cannot find postgres.h"
 
-**Problem**: The compiler cannot find PostgreSQL header files.
-
-**Solution**: Ensure `PG_CONFIG` environment variable points to the correct `pg_config` binary:
+Ensure `PG_CONFIG` points to the correct `pg_config`:
 
 ```bash
 export PG_CONFIG=/usr/lib/postgresql/${PG_VERSION}/bin/pg_config
-$PG_CONFIG --includedir-server  # Should show the header directory
+$PG_CONFIG --includedir-server  # Should show header directory
 make clean && make
 ```
 
-### Build Fails with clang-19 or llvm-lto not found
+### Build Fails with clang-19 or llvm-lto Not Found
 
-**Problem**: PGXS expects specific clang/llvm tool versions that may not be installed.
-
-**Solution**: The CI workflow creates symlinks to available versions. You can do the same locally:
+PGXS may expect specific clang/llvm versions. Create symlinks:
 
 ```bash
-# Create clang-19 symlink
 sudo ln -sf /usr/bin/clang /usr/bin/clang-19
 
-# Find available llvm and create llvm-19 symlink
 LLVM_VER=$(ls -d /usr/lib/llvm-* 2>/dev/null | sort -V | tail -1 | sed 's|.*/llvm-||')
-if [ -z "$LLVM_VER" ]; then
-  # Default to 18 as it's commonly available on Ubuntu 22.04/24.04
-  LLVM_VER=18
-fi
 sudo mkdir -p /usr/lib/llvm-19/bin
-if [ -f "/usr/lib/llvm-${LLVM_VER}/bin/llvm-lto" ]; then
-  sudo ln -sf /usr/lib/llvm-${LLVM_VER}/bin/llvm-lto /usr/lib/llvm-19/bin/llvm-lto
-fi
+sudo ln -sf /usr/lib/llvm-${LLVM_VER}/bin/llvm-lto /usr/lib/llvm-19/bin/llvm-lto
 ```
 
 ### Tests Fail with Connection Errors
 
-**Problem**: Tests cannot connect to the PostgreSQL container.
+Verify container is running:
 
-**Solution**: 
-1. Verify the container is running and healthy:
-   ```bash
-   docker ps
-   docker exec postgres-test pg_isready -U postgres
-   ```
-
-2. Check connection parameters match:
-   ```bash
-   psql -h 127.0.0.1 -p 5432 -U postgres -d postgres -c "SELECT version();"
-   ```
+```bash
+docker ps
+docker exec postgres-test pg_isready -U postgres
+psql -h 127.0.0.1 -p 5432 -U postgres -d postgres -c "SELECT version();"
+```
 
 ### Extension Not Found After Copying
 
-**Problem**: `CREATE EXTENSION` fails with "extension not available".
-
-**Solution**: Verify files were copied to the correct locations:
+Verify paths match `pg_config`:
 
 ```bash
 docker exec postgres-test ls -la /usr/lib/postgresql/${PG_VERSION}/lib/pg_background.so
 docker exec postgres-test ls -la /usr/share/postgresql/${PG_VERSION}/extension/pg_background.control
 ```
 
-Ensure the paths match what `pg_config` reports.
+### Regression Test Diffs
 
-### Regression Diffs
-
-If regression tests fail, check the diff output:
+Check the diff output:
 
 ```bash
 cat regression.diffs
@@ -300,68 +233,31 @@ cat regression.out
 ls results/
 ```
 
-## CI Workflow Details
+## CI Environment Variables
 
-### Key Environment Variables
-
-- `PG_CONFIG`: Path to the pg_config binary for the target PostgreSQL version
-- `PGHOST`: PostgreSQL host (127.0.0.1 for container)
-- `PGPORT`: PostgreSQL port (5432)
-- `PGUSER`: Database user (postgres)
-- `PGPASSWORD`: Database password (postgres)
-- `PGDATABASE`: Database name (postgres)
-
-### Docker Container Configuration
-
-The PostgreSQL container is started with:
-
-```yaml
-docker run --name postgres-test -d \
-  -e POSTGRES_PASSWORD=postgres \
-  -e POSTGRES_USER=postgres \
-  -e POSTGRES_DB=postgres \
-  -p 5432:5432 \
-  postgres:${{ matrix.pg }}
-```
-
-The container is automatically stopped and removed in the cleanup step.
-
-### Makefile PG_CONFIG Override
-
-The Makefile uses `PG_CONFIG ?= pg_config` which allows the variable to be overridden from:
-1. Environment variables
-2. Command-line arguments
-
-This ensures the correct PostgreSQL version is targeted during build, install, and test phases.
-
-### Why This Architecture?
-
-**Previous Approach (Service Containers)**:
-- Used GitHub Actions service containers
-- Built on runner, installed on runner
-- Tried to connect to containerized PostgreSQL
-- ❌ Extension files not available in container
-
-**Current Approach (Docker + Copy)**:
-- Start PostgreSQL container explicitly with `docker run`
-- Build on runner with proper dev headers
-- Copy built artifacts into container
-- ✅ Extension available in container for testing
-- ✅ Full control over container lifecycle
-- ✅ Easy to reproduce locally
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `PG_CONFIG` | Path to pg_config binary | `/usr/lib/postgresql/17/bin/pg_config` |
+| `PGHOST` | PostgreSQL host | `127.0.0.1` |
+| `PGPORT` | PostgreSQL port | `5432` |
+| `PGUSER` | Database user | `postgres` |
+| `PGPASSWORD` | Database password | `postgres` |
+| `PGDATABASE` | Database name | `postgres` |
+| `DEFAULT_PG_VERSION` | Default PG version for lint/security | `17` |
 
 ## Contributing
 
 When modifying CI:
 
-1. Test changes locally using Docker first (see Quick Test Script above)
-2. Ensure all matrix combinations are considered
+1. Test changes locally using `./test-local.sh` first
+2. Consider all matrix combinations (10 total)
 3. Update this documentation if workflow changes
-4. Keep YAML readable; complex logic can go in the workflow steps
+4. Keep YAML readable; complex logic goes in step scripts
 
 ## References
 
 - [PostgreSQL Docker Hub](https://hub.docker.com/_/postgres)
-- [GitHub Actions Docker](https://docs.github.com/en/actions/using-containerized-services/about-service-containers)
+- [GitHub Actions Documentation](https://docs.github.com/en/actions)
 - [PGXS Build System](https://www.postgresql.org/docs/current/extend-pgxs.html)
-- [PostgreSQL Global Development Group APT Repository](https://wiki.postgresql.org/wiki/Apt)
+- [PostgreSQL APT Repository](https://wiki.postgresql.org/wiki/Apt)
+- [CodeQL for C/C++](https://codeql.github.com/docs/codeql-language-guides/codeql-for-cpp/)

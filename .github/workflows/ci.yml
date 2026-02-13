@@ -2,15 +2,26 @@ name: CI - PostgreSQL Extension Build & Test
 
 on:
   push:
-    branches: [ master, v1.6, develop ]
+    branches: [ master, main, develop, 'v1.*', 'improvements/*' ]
+    tags: [ 'v*' ]
   pull_request:
-    branches: [ master, v1.6 ]
+    branches: [ master, main ]
   workflow_dispatch:
+
+# Cancel in-progress runs when a new commit is pushed to the same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Default PostgreSQL version for lint/security jobs
+  DEFAULT_PG_VERSION: "17"
 
 jobs:
   test:
     name: PG ${{ matrix.pg }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
 
     strategy:
       fail-fast: false
@@ -22,10 +33,21 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Cache APT packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            /var/cache/apt/archives
+            ~/apt-cache
+          key: apt-${{ matrix.os }}-pg${{ matrix.pg }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-${{ matrix.os }}-pg${{ matrix.pg }}-
+            apt-${{ matrix.os }}-
+
       - name: Start PostgreSQL container
         run: |
           set -euo pipefail
-          
+
           # Start PostgreSQL in a container
           docker run --name postgres-test -d \
             -e POSTGRES_PASSWORD=postgres \
@@ -33,7 +55,7 @@ jobs:
             -e POSTGRES_DB=postgres \
             -p 5432:5432 \
             postgres:${{ matrix.pg }}
-          
+
           # Wait for PostgreSQL to be ready
           echo "Waiting for PostgreSQL to start..."
           for i in {1..30}; do
@@ -42,6 +64,10 @@ jobs:
               docker exec postgres-test psql -U postgres -c "SELECT version();"
               break
             fi
+            if [ "$i" -eq 30 ]; then
+              echo "::error::PostgreSQL failed to start within 60 seconds"
+              exit 1
+            fi
             echo "Still waiting... ($i/30)"
             sleep 2
           done
@@ -49,7 +75,7 @@ jobs:
       - name: Install build dependencies
         run: |
           set -euo pipefail
-          
+
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             ca-certificates \
@@ -74,40 +100,40 @@ jobs:
           sudo apt-get install -y -qq \
             postgresql-client-${{ matrix.pg }} \
             postgresql-server-dev-${{ matrix.pg }}
-          
+
+      - name: Setup clang/llvm symlinks
+        run: |
           # Create symlinks for clang/llvm tools to avoid version mismatch errors
           # The PGXS build system may expect specific versions (e.g., clang-19, llvm-19)
-          if [ ! -e /usr/bin/clang-19 ]; then
-            sudo ln -sf /usr/bin/clang /usr/bin/clang-19 || true
-          fi
-          if [ ! -d /usr/lib/llvm-19 ]; then
-            # Find the highest llvm version available
-            LLVM_VER=$(ls -d /usr/lib/llvm-* 2>/dev/null | sort -V | tail -1 | sed 's|.*/llvm-||')
-            if [ -z "$LLVM_VER" ]; then
-              # Default to 18 as it's commonly available on Ubuntu 22.04/24.04
-              LLVM_VER=18
+          for target_ver in 19 18; do
+            if [ ! -e "/usr/bin/clang-${target_ver}" ]; then
+              sudo ln -sf /usr/bin/clang "/usr/bin/clang-${target_ver}" 2>/dev/null || true
             fi
-            sudo mkdir -p /usr/lib/llvm-19/bin
-            if [ -f "/usr/lib/llvm-${LLVM_VER}/bin/llvm-lto" ]; then
-              sudo ln -sf /usr/lib/llvm-${LLVM_VER}/bin/llvm-lto /usr/lib/llvm-19/bin/llvm-lto || true
+            if [ ! -d "/usr/lib/llvm-${target_ver}" ]; then
+              # Find the highest llvm version available
+              LLVM_VER=$(ls -d /usr/lib/llvm-* 2>/dev/null | sort -V | tail -1 | sed 's|.*/llvm-||' || echo "")
+              if [ -n "$LLVM_VER" ] && [ -d "/usr/lib/llvm-${LLVM_VER}" ]; then
+                sudo mkdir -p "/usr/lib/llvm-${target_ver}/bin"
+                if [ -f "/usr/lib/llvm-${LLVM_VER}/bin/llvm-lto" ]; then
+                  sudo ln -sf "/usr/lib/llvm-${LLVM_VER}/bin/llvm-lto" "/usr/lib/llvm-${target_ver}/bin/llvm-lto" || true
+                fi
+              fi
             fi
-          fi
-          
-          echo "=== Build Environment ==="
-          /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config --version
-          /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config --includedir-server
-          /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config --pkglibdir
-          echo "========================="
+          done
 
       - name: Build extension
         run: |
           set -euo pipefail
-          
+
           export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
-          
+
+          echo "=== Build Environment ==="
+          $PG_CONFIG --version
+          echo "========================="
+
           make clean
           make
-          
+
           echo "=== Build artifacts ==="
           ls -la pg_background.so
           ls -la pg_background.control
@@ -116,19 +142,19 @@ jobs:
       - name: Copy extension files into container
         run: |
           set -euo pipefail
-          
+
           # Get PostgreSQL paths from pg_config
           PKGLIBDIR=$(/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config --pkglibdir)
           SHAREDIR=$(/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config --sharedir)
-          
+
           echo "Container PostgreSQL paths:"
           echo "  PKGLIBDIR: $PKGLIBDIR"
           echo "  SHAREDIR: $SHAREDIR"
-          
+
           # Copy the shared library
           docker exec postgres-test mkdir -p "$PKGLIBDIR"
           docker cp pg_background.so postgres-test:$PKGLIBDIR/pg_background.so
-          
+
           # Copy extension control and SQL files
           docker exec postgres-test mkdir -p "$SHAREDIR/extension"
           docker cp pg_background.control postgres-test:$SHAREDIR/extension/
@@ -138,18 +164,14 @@ jobs:
             echo "Copying $sqlfile..."
             docker cp "$sqlfile" postgres-test:$SHAREDIR/extension/
           done
-          
+
           # Optionally copy bitcode if it was built successfully
           if [ -f pg_background.bc ]; then
             echo "Copying bitcode file..."
             docker exec postgres-test mkdir -p "$PKGLIBDIR/bitcode/pg_background"
-            if docker cp pg_background.bc postgres-test:$PKGLIBDIR/bitcode/pg_background/; then
-              echo "Bitcode file copied successfully"
-            else
-              echo "Warning: Failed to copy bitcode file (non-critical)"
-            fi
+            docker cp pg_background.bc postgres-test:$PKGLIBDIR/bitcode/pg_background/ || echo "Warning: Failed to copy bitcode (non-critical)"
           fi
-          
+
           echo "=== Verify installation in container ==="
           docker exec postgres-test ls -la "$PKGLIBDIR/pg_background.so"
           docker exec postgres-test ls -la "$SHAREDIR/extension/pg_background.control"
@@ -157,20 +179,20 @@ jobs:
       - name: Run regression tests
         run: |
           set -euo pipefail
-          
+
           export PGHOST=127.0.0.1
           export PGPORT=5432
           export PGUSER=postgres
           export PGPASSWORD=postgres
           export PGDATABASE=postgres
           export PATH="/usr/lib/postgresql/${{ matrix.pg }}/bin:$PATH"
-          
+
           echo "=== Test Environment ==="
           psql -c "SELECT version();"
           psql -c "CREATE EXTENSION pg_background;"
           psql -c "SELECT * FROM pg_available_extensions WHERE name = 'pg_background';"
           echo "========================"
-          
+
           # Run regression tests - tests connect to the containerized PostgreSQL
           export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
           make installcheck REGRESS_OPTS+=" --host=$PGHOST --port=$PGPORT --user=$PGUSER"
@@ -181,7 +203,7 @@ jobs:
           echo "=== Regression Diffs ==="
           cat regression.diffs 2>/dev/null || echo "No diffs file"
           echo ""
-          echo "=== Regression Out ==="  
+          echo "=== Regression Out ==="
           cat regression.out 2>/dev/null || echo "No out file"
           echo ""
           echo "=== Container Logs ==="
@@ -196,16 +218,33 @@ jobs:
             regression.diffs
             regression.out
             results/
+          retention-days: 7
 
       - name: Cleanup
         if: always()
         run: |
-          docker stop postgres-test || true
-          docker rm postgres-test || true
+          docker stop postgres-test 2>/dev/null || true
+          docker rm postgres-test 2>/dev/null || true
+
+  # Summary job that depends on all test matrix jobs
+  test-summary:
+    name: Test Summary
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: always()
+    steps:
+      - name: Check test results
+        run: |
+          if [ "${{ needs.test.result }}" != "success" ]; then
+            echo "::error::Some test jobs failed"
+            exit 1
+          fi
+          echo "All test jobs passed!"
 
   lint:
     name: Lint & Style Check
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout code
@@ -213,69 +252,81 @@ jobs:
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
             clang-format \
             cppcheck \
-            postgresql-server-dev-16
+            postgresql-server-dev-${{ env.DEFAULT_PG_VERSION }}
 
       - name: Run cppcheck
         run: |
+          echo "=== Running cppcheck ==="
           cppcheck --enable=all --inconclusive --std=c11 \
             --suppress=missingIncludeSystem \
             --suppress=unusedFunction \
             --suppress=unmatchedSuppression \
             --error-exitcode=1 \
-            pg_background.c || true  # Don't fail on warnings for now
+            pg_background.c || echo "::warning::cppcheck found issues (non-blocking)"
 
       - name: Check code formatting
         run: |
-          clang-format --dry-run --Werror pg_background.c || true  # Informational only
+          echo "=== Checking code formatting ==="
+          clang-format --dry-run --Werror pg_background.c 2>&1 || echo "::notice::Code formatting differs from clang-format style (informational)"
 
   security:
     name: Security Scan
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Only run on main branches and PRs to avoid excessive CodeQL runs
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Run CodeQL Analysis
+      - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
           languages: cpp
 
       - name: Install PostgreSQL headers
         run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-server-dev-16 libkrb5-dev build-essential
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            postgresql-server-dev-${{ env.DEFAULT_PG_VERSION }} \
+            libkrb5-dev \
+            build-essential
 
-      - name: Create clang/llvm symlinks
+      - name: Setup clang/llvm symlinks
         run: |
-          # Create symlinks for clang/llvm tools to avoid version mismatch errors
-          # The PGXS build system may expect specific versions (e.g., clang-19, llvm-19)
-          if [ ! -e /usr/bin/clang-19 ]; then
-            sudo ln -sf /usr/bin/clang /usr/bin/clang-19 || true
-          fi
-          if [ ! -d /usr/lib/llvm-19 ]; then
-            # Find the highest llvm version available
-            LLVM_VER=$(ls -d /usr/lib/llvm-* 2>/dev/null | sort -V | tail -1 | sed 's|.*/llvm-||')
-            if [ -z "$LLVM_VER" ]; then
-              # Default to 18 as it's commonly available on Ubuntu 22.04/24.04
-              LLVM_VER=18
+          for target_ver in 19 18; do
+            if [ ! -e "/usr/bin/clang-${target_ver}" ]; then
+              sudo ln -sf /usr/bin/clang "/usr/bin/clang-${target_ver}" 2>/dev/null || true
             fi
-            sudo mkdir -p /usr/lib/llvm-19/bin
-            if [ -f "/usr/lib/llvm-${LLVM_VER}/bin/llvm-lto" ]; then
-              sudo ln -sf /usr/lib/llvm-${LLVM_VER}/bin/llvm-lto /usr/lib/llvm-19/bin/llvm-lto || true
+            if [ ! -d "/usr/lib/llvm-${target_ver}" ]; then
+              LLVM_VER=$(ls -d /usr/lib/llvm-* 2>/dev/null | sort -V | tail -1 | sed 's|.*/llvm-||' || echo "")
+              if [ -n "$LLVM_VER" ] && [ -d "/usr/lib/llvm-${LLVM_VER}" ]; then
+                sudo mkdir -p "/usr/lib/llvm-${target_ver}/bin"
+                if [ -f "/usr/lib/llvm-${LLVM_VER}/bin/llvm-lto" ]; then
+                  sudo ln -sf "/usr/lib/llvm-${LLVM_VER}/bin/llvm-lto" "/usr/lib/llvm-${target_ver}/bin/llvm-lto" || true
+                fi
+              fi
             fi
-          fi
+          done
 
       - name: Build for CodeQL
         run: |
-          export PATH=/usr/lib/postgresql/16/bin:$PATH
-          export PG_CONFIG=/usr/lib/postgresql/16/bin/pg_config
+          export PATH=/usr/lib/postgresql/${{ env.DEFAULT_PG_VERSION }}/bin:$PATH
+          export PG_CONFIG=/usr/lib/postgresql/${{ env.DEFAULT_PG_VERSION }}/bin/pg_config
           make clean
           make
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:cpp"
