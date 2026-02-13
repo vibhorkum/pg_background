@@ -5,6 +5,8 @@ EXTENSION = pg_background
 
 # Ship the base + upgrade scripts you support
 DATA = \
+	pg_background--1.8.sql \
+	pg_background--1.7--1.8.sql \
 	pg_background--1.7.sql \
 	pg_background--1.6--1.7.sql \
 	pg_background--1.6.sql \
@@ -19,9 +21,9 @@ DATA = \
 # Regression
 REGRESS = pg_background
 
-# Load extension before running sql/pg_background.sql
-# (Keeps expected output clean, avoids "already exists" noise)
-REGRESS_OPTS = --load-extension=$(EXTENSION)
+# Note: The test SQL file handles CREATE EXTENSION itself,
+# so we don't use --load-extension here.
+# REGRESS_OPTS = --load-extension=$(EXTENSION)
 
 # If your regression needs longer than default (yours has pg_sleep),
 # you can tune timeouts via PGOPTIONS if needed.

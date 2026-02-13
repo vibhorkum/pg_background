@@ -262,3 +262,123 @@ SELECT *
 FROM pg_background_list_v2()
   AS (pid int4, cookie int8, launched_at timestamptz, user_id oid,
       queue_size int4, state text, sql_preview text, last_error text, consumed bool);
+
+-- -------------------------------------------------------------------------
+-- v1.8: GUC settings
+-- -------------------------------------------------------------------------
+
+-- Show default GUC values
+SHOW pg_background.max_workers;
+SHOW pg_background.default_queue_size;
+SHOW pg_background.worker_timeout;
+
+-- Test max_workers limit
+SET pg_background.max_workers = 2;
+SHOW pg_background.max_workers;
+
+-- Reset to default
+RESET pg_background.max_workers;
+
+-- -------------------------------------------------------------------------
+-- v1.8: stats_v2 - session statistics
+-- -------------------------------------------------------------------------
+
+-- Stats should show some activity from previous tests
+SELECT
+  workers_launched > 0 AS has_launched,
+  workers_completed >= 0 AS has_completed_field,
+  workers_failed >= 0 AS has_failed_field,
+  workers_canceled >= 0 AS has_canceled_field,
+  workers_active >= 0 AS has_active_field,
+  avg_execution_ms >= 0 AS has_avg_time,
+  max_workers > 0 AS has_max_workers
+FROM pg_background_stats_v2();
+
+-- -------------------------------------------------------------------------
+-- v1.8: progress reporting
+-- -------------------------------------------------------------------------
+
+DROP TABLE IF EXISTS t_progress;
+CREATE TABLE t_progress(id int);
+
+-- Launch worker that reports progress
+SELECT (h).pid AS p_pid, (h).cookie AS p_cookie
+FROM (SELECT pg_background_launch_v2($$
+  SELECT pg_background_progress(0, 'Starting');
+  SELECT pg_sleep(0.1);
+  SELECT pg_background_progress(50, 'Halfway');
+  SELECT pg_sleep(0.1);
+  SELECT pg_background_progress(100, 'Done');
+  INSERT INTO t_progress VALUES (1);
+$$, 65536) AS h) s
+\gset
+
+-- Give worker time to start and report progress
+SELECT pg_sleep(0.15);
+
+-- Check progress (should be >= 0 if reported)
+SELECT
+  CASE WHEN progress_pct >= 0 THEN 'progress_reported' ELSE 'no_progress' END AS progress_status
+FROM pg_background_get_progress_v2(:p_pid, :p_cookie);
+
+-- Wait for completion
+SELECT pg_background_wait_v2_timeout(:p_pid, :p_cookie, 5000) AS progress_worker_done;
+
+-- Verify work was done
+SELECT count(*) AS progress_insert_count FROM t_progress;
+
+-- Cleanup
+SELECT pg_background_detach_v2(:p_pid, :p_cookie);
+
+-- -------------------------------------------------------------------------
+-- v1.8: max_workers enforcement
+-- -------------------------------------------------------------------------
+
+-- Set very low limit
+SET pg_background.max_workers = 1;
+
+-- Launch one worker (should succeed)
+SELECT (h).pid AS mw_pid, (h).cookie AS mw_cookie
+FROM (SELECT pg_background_launch_v2('SELECT pg_sleep(2)', 65536) AS h) s
+\gset
+
+SELECT pg_sleep(0.1);
+
+-- Try to launch another (should fail due to limit)
+DO $$
+BEGIN
+  PERFORM pg_background_launch_v2('SELECT 1', 65536);
+  RAISE NOTICE 'max_workers_test=should_have_failed';
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'max_workers_test=correctly_limited';
+END;
+$$;
+
+-- Cancel and cleanup the first worker
+SELECT pg_background_cancel_v2(:mw_pid, :mw_cookie);
+SELECT pg_sleep(0.2);
+SELECT pg_background_detach_v2(:mw_pid, :mw_cookie);
+
+-- Reset limit
+RESET pg_background.max_workers;
+
+-- -------------------------------------------------------------------------
+-- v1.8: worker_timeout GUC
+-- -------------------------------------------------------------------------
+
+-- Test that worker_timeout can be set
+SET pg_background.worker_timeout = '1s';
+SHOW pg_background.worker_timeout;
+RESET pg_background.worker_timeout;
+
+-- -------------------------------------------------------------------------
+-- Final stats check
+-- -------------------------------------------------------------------------
+
+SELECT
+  workers_launched AS total_launched,
+  workers_completed AS total_completed,
+  workers_failed AS total_failed,
+  workers_canceled AS total_canceled,
+  workers_active AS currently_active
+FROM pg_background_stats_v2();
