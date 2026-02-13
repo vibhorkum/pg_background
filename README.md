@@ -2,7 +2,7 @@
 
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14--18-blue.svg)](https://www.postgresql.org/)
 [![Version](https://img.shields.io/badge/version-1.8-brightgreen.svg)](https://github.com/vibhorkum/pg_background)
-[![License](https://img.shields.io/badge/license-GPL--3.0-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-PostgreSQL-green.svg)](LICENSE)
 
 Execute arbitrary SQL commands in **background worker processes** within PostgreSQL. Built for production workloads requiring asynchronous execution, autonomous transactions, and long-running operations without blocking client sessions.
 
@@ -38,7 +38,7 @@ Execute arbitrary SQL commands in **background worker processes** within Postgre
 - [Migration Guide](#migration-guide)
 - [Contributing](#contributing)
 - [License](#license)
-- [Support](#support)
+- [Author](#author)
 
 ---
 
@@ -1785,38 +1785,15 @@ make installcheck
 
 ## License
 
-GNU General Public License v3.0
+PostgreSQL License
 
 See [LICENSE](LICENSE) for full text.
 
 ---
 
-## Support
+## Author
 
-### Reporting Issues
-
-- **Bugs**: https://github.com/vibhorkum/pg_background/issues
-- **Security**: See [SECURITY.md](SECURITY.md)
-- **Discussions**: https://github.com/vibhorkum/pg_background/discussions
-
-### Community
-
-- **Mailing List**: pgsql-general@postgresql.org
-- **IRC**: #postgresql on Libera.Chat
-- **Slack**: [PostgreSQL Slack](https://postgres-slack.herokuapp.com/)
-
-### Professional Support
-
-For enterprise support, contact:
-- **Author**: Vibhor Kumar (vibhor.aim@gmail.com)
-- **Commercial PostgreSQL Support**: Major vendors offer pg_background support
-
----
-
-## Acknowledgments
-
-**Core Contributors**:
-- **Vibhor Kumar** – Original author and maintainer
+**Vibhor Kumar** – Original author and maintainer
 
 **Inspiration**:
 - PostgreSQL Background Worker API
