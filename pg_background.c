@@ -77,7 +77,7 @@
 
 /*
  * Supported versions only (per your request).
- * If you want older PGs, we can re-expand the compat macros, but for 1.6:
+ * If you want older PGs, we can re-expand the compat macros, but for 1.7:
  */
 #if PG_VERSION_NUM < 140000 || PG_VERSION_NUM >= 190000
 #error "pg_background 1.7 supports PostgreSQL 14-18 only"
