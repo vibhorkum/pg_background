@@ -395,6 +395,9 @@ PG_FUNCTION_INFO_V1(pg_background_list_v2);
 /* Worker entry point (called by PostgreSQL background worker infrastructure) */
 PGDLLEXPORT void pg_background_worker_main(Datum);
 
+/* Module initialization */
+PGDLLEXPORT void _PG_init(void);
+
 /* Statistics retrieval function */
 PG_FUNCTION_INFO_V1(pg_background_stats_v2);
 
@@ -460,7 +463,13 @@ _PG_init(void)
                             NULL,
                             NULL);
 
+    /*
+     * MarkGUCPrefixReserved was added in PostgreSQL 15.
+     * In earlier versions, GUC prefix reservation is not available.
+     */
+#if PG_VERSION_NUM >= 150000
     MarkGUCPrefixReserved("pg_background");
+#endif
 }
 
 /* ============================================================================
@@ -2746,17 +2755,24 @@ pg_background_get_progress_v2(PG_FUNCTION_ARGS)
 
     /*
      * Read progress with memory barrier for consistency.
-     * The worker writes: progress_msg then progress_pct.
-     * We read: progress_pct then progress_msg.
-     * The read barrier ensures we see the message that was written
-     * before the percentage was updated.
+     * The worker writes: progress_msg then progress_pct (with write barrier).
+     * We read: progress_pct then progress_msg (with read barrier).
+     * The barriers ensure we see the message that was written before
+     * the percentage was updated.
      */
     progress_pct = *(volatile int32 *)&fdata->progress_pct;
     if (progress_pct < 0)
         PG_RETURN_NULL();  /* Progress not reported yet */
 
     pg_read_barrier();
-    strlcpy(progress_msg, (volatile char *)fdata->progress_msg, sizeof(progress_msg));
+
+    /*
+     * After the read barrier, memory is synchronized. Copy the message
+     * using memcpy to avoid volatile qualifier warnings with strlcpy.
+     * The source is guaranteed to be null-terminated (max 63 chars + null).
+     */
+    memcpy(progress_msg, fdata->progress_msg, sizeof(progress_msg));
+    progress_msg[sizeof(progress_msg) - 1] = '\0';  /* Ensure null termination */
 
     /* Build result tuple */
     if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
