@@ -254,9 +254,24 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
+            ca-certificates \
+            wget \
+            gnupg \
+            lsb-release \
             clang-format \
-            cppcheck \
-            postgresql-server-dev-${{ env.DEFAULT_PG_VERSION }}
+            cppcheck
+
+          # Add PGDG repo for PostgreSQL dev headers
+          sudo install -d -m 0755 /usr/share/keyrings
+          wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor -o /usr/share/keyrings/postgresql.gpg
+
+          echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt \
+            $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-server-dev-${{ env.DEFAULT_PG_VERSION }}
 
       - name: Run cppcheck
         run: |

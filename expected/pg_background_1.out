@@ -7,9 +7,9 @@ CREATE TABLE t(id integer);
 -- ----------------------------------------------------------------------
 SELECT pg_background_launch('INSERT INTO t SELECT 1') AS pid \gset
 SELECT * FROM pg_background_result(:pid) AS (result TEXT);
- result 
---------
- INSERT
+   result
+------------
+ INSERT 0 1
 (1 row)
 
 SELECT * FROM t ORDER BY id;
