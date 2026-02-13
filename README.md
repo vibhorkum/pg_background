@@ -1,7 +1,7 @@
 # pg_background: Production-Grade Background SQL for PostgreSQL
 
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14--18-blue.svg)](https://www.postgresql.org/)
-[![Version](https://img.shields.io/badge/version-1.6-brightgreen.svg)](https://github.com/vibhorkum/pg_background)
+[![Version](https://img.shields.io/badge/version-1.8-brightgreen.svg)](https://github.com/vibhorkum/pg_background)
 [![License](https://img.shields.io/badge/license-GPL--3.0-green.svg)](LICENSE)
 
 Execute arbitrary SQL commands in **background worker processes** within PostgreSQL. Built for production workloads requiring asynchronous execution, autonomous transactions, and long-running operations without blocking client sessions.
@@ -72,11 +72,18 @@ Execute arbitrary SQL commands in **background worker processes** within Postgre
 - ✅ **Production-Hardened Security**: NOLOGIN role, privilege helpers, zero PUBLIC access  
 
 ### V2 API Enhancements (v1.6+)
-- **Cookie-Based Identity**: `(pid, cookie)` tuples prevent PID reuse confusion  
-- **Explicit Cancellation**: `cancel_v2()` distinct from `detach_v2()`  
-- **Synchronous Wait**: `wait_v2()` blocks until completion or timeout  
-- **Worker Observability**: `list_v2()` for real-time monitoring and cleanup  
-- **Fire-and-Forget Submit**: `submit_v2()` for side-effect queries  
+- **Cookie-Based Identity**: `(pid, cookie)` tuples prevent PID reuse confusion
+- **Explicit Cancellation**: `cancel_v2()` distinct from `detach_v2()`
+- **Synchronous Wait**: `wait_v2()` blocks until completion or timeout
+- **Worker Observability**: `list_v2()` for real-time monitoring and cleanup
+- **Fire-and-Forget Submit**: `submit_v2()` for side-effect queries
+
+### V1.8 Enhancements
+- **Session Statistics**: `stats_v2()` provides worker counts, success/failure rates, and execution times
+- **Progress Reporting**: Workers can report progress via `pg_background_progress()`
+- **GUC Configuration**: `pg_background.max_workers`, `worker_timeout`, `default_queue_size`
+- **Resource Limits**: Built-in max workers enforcement per session
+- **Enhanced Robustness**: Overflow protection, UTF-8 aware truncation, race condition fixes  
 
 ---
 
@@ -84,14 +91,13 @@ Execute arbitrary SQL commands in **background worker processes** within Postgre
 
 | PostgreSQL Version | Support Status | Notes |
 |--------------------|----------------|-------|
-| **18** | ✅ Fully Supported | Portal API compatibility layer |
+| **18** | ✅ Fully Supported | TupleDescAttr compatibility layer |
 | **17** | ✅ Fully Tested | Recommended for new deployments |
 | **16** | ✅ Fully Tested | Production-ready |
-| **15** | ✅ Fully Tested | ProcessCompletedNotifies removed |
+| **15** | ✅ Fully Tested | pg_analyze_and_rewrite_fixedparams |
 | **14** | ✅ Fully Tested | Minimum supported version |
-| **13** | ❌ End of Life | Not supported (EOL Nov 2025) |
-| **12** | ❌ End of Life | Not supported (EOL Nov 2024) |
-| **< 12** | ❌ Not Supported | Use pg_background 1.4 or earlier |
+| **13** | ❌ Not Supported | Use pg_background 1.6 or earlier |
+| **< 13** | ❌ Not Supported | Use pg_background 1.4 or earlier |
 
 **Note**: Each PostgreSQL major version requires extension rebuild against its headers.
 
@@ -130,9 +136,9 @@ CREATE EXTENSION pg_background;
 -- Verify installation
 SELECT extname, extversion FROM pg_extension WHERE extname = 'pg_background';
 -- Expected output:
---    extname     | extversion 
+--    extname     | extversion
 -- ---------------+------------
---  pg_background | 1.6
+--  pg_background | 1.8
 ```
 
 ### Configure PostgreSQL
@@ -147,6 +153,25 @@ SELECT pg_reload_conf();
 -- Verify setting
 SHOW max_worker_processes;
 ```
+
+### Extension GUC Settings (v1.8+)
+
+```sql
+-- Limit concurrent workers per session (default: 16)
+SET pg_background.max_workers = 10;
+
+-- Set default queue size for workers (default: 64KB)
+SET pg_background.default_queue_size = '256KB';
+
+-- Set worker execution timeout (default: 0 = no limit)
+SET pg_background.worker_timeout = '5min';
+```
+
+| GUC Parameter | Default | Range | Description |
+|---------------|---------|-------|-------------|
+| `pg_background.max_workers` | 16 | 1-1000 | Max concurrent workers per session |
+| `pg_background.default_queue_size` | 65536 | 4KB-256MB | Default shared memory queue size |
+| `pg_background.worker_timeout` | 0 | 0-∞ | Worker execution timeout (0 = no limit) |
 
 ---
 
@@ -238,6 +263,45 @@ ORDER BY launched_at DESC;
 - `canceled`: Terminated via `cancel_v2()`
 - `error`: Failed with error (see `last_error`)
 
+#### 7. View Session Statistics (v1.8+)
+
+```sql
+-- Get session-wide worker statistics
+SELECT * FROM pg_background_stats_v2();
+
+-- Output:
+--  workers_launched | workers_completed | workers_failed | workers_active | avg_execution_ms | max_workers
+-- ------------------+-------------------+----------------+----------------+------------------+-------------
+--                42 |                38 |              2 |              2 |           1234.5 |          16
+```
+
+#### 8. Progress Reporting (v1.8+)
+
+**From within worker SQL** (report progress):
+```sql
+-- Launch a worker that reports progress
+SELECT * FROM pg_background_launch_v2($$
+  SELECT pg_background_progress(0, 'Starting...');
+  -- Do some work...
+  SELECT pg_background_progress(25, 'Phase 1 complete');
+  -- More work...
+  SELECT pg_background_progress(50, 'Halfway done');
+  -- Final work...
+  SELECT pg_background_progress(100, 'Complete');
+$$) AS h \gset;
+```
+
+**From launcher** (check progress):
+```sql
+-- Poll worker progress
+SELECT * FROM pg_background_get_progress_v2(:'h.pid', :'h.cookie');
+
+-- Output:
+--  progress_pct | progress_msg
+-- --------------+---------------
+--            50 | Halfway done
+```
+
 ### V1 API (Legacy)
 
 The v1 API is retained for backward compatibility but **lacks cookie-based PID reuse protection**.
@@ -272,6 +336,9 @@ SELECT pg_background_detach(:pid);
 | `pg_background_wait_v2(pid, cookie)` | `void` | Block until worker completes | Synchronous barrier |
 | `pg_background_wait_v2_timeout(pid, cookie, timeout_ms)` | `bool` | Wait with timeout (returns `true` if done) | Bounded blocking |
 | `pg_background_list_v2()` | `SETOF record` | List known workers in current session | Monitoring, debugging, cleanup |
+| `pg_background_stats_v2()` | `pg_background_stats` | Session statistics (v1.8+) | Monitoring, debugging |
+| `pg_background_progress(pct, msg)` | `void` | Report progress from worker (v1.8+) | Long-running task feedback |
+| `pg_background_get_progress_v2(pid, cookie)` | `pg_background_progress` | Get worker progress (v1.8+) | Monitor long-running tasks |
 
 **Parameters**:
 - `sql`: SQL command(s) to execute (multiple statements allowed)
@@ -286,6 +353,26 @@ SELECT pg_background_detach(:pid);
 CREATE TYPE public.pg_background_handle AS (
   pid    int4,   -- Process ID
   cookie int8    -- Unique identifier (prevents PID reuse)
+);
+```
+
+**Statistics Type** (v1.8+):
+```sql
+CREATE TYPE public.pg_background_stats AS (
+  workers_launched   int8,    -- Total workers launched this session
+  workers_completed  int8,    -- Workers completed successfully
+  workers_failed     int8,    -- Workers that failed with error
+  workers_active     int4,    -- Currently active workers
+  avg_execution_ms   float8,  -- Average execution time
+  max_workers        int4     -- Current max_workers setting
+);
+```
+
+**Progress Type** (v1.8+):
+```sql
+CREATE TYPE public.pg_background_progress AS (
+  progress_pct  int4,   -- Progress percentage (0-100)
+  progress_msg  text    -- Brief status message
 );
 ```
 
@@ -1369,13 +1456,18 @@ SELECT pg_background_launch_v2($$
 $$);
 ```
 
-### 3. No Per-User Worker Quotas
+### 3. Per-Session Worker Limits (v1.8+)
 
-**Limitation**: No built-in enforcement of max workers per user/database.
+**v1.8 Improvement**: Built-in `pg_background.max_workers` GUC limits concurrent workers per session.
 
-**Impact**: Malicious user can exhaust `max_worker_processes`.
+```sql
+-- Limit to 10 concurrent workers per session
+SET pg_background.max_workers = 10;
+```
 
-**Workaround**: Implement application-level quotas (see [Security](#security-model)).
+**Remaining Limitation**: No per-user or per-database quotas across sessions.
+
+**Workaround**: Implement application-level quotas for cross-session limits (see [Security](#security-model)).
 
 ### 4. Result Consumption is One-Time
 
@@ -1570,6 +1662,37 @@ SELECT pg_background_wait_v2(:'h.pid', :'h.cookie');  -- Should error gracefully
 
 ## Migration Guide
 
+### Upgrading from v1.7 to v1.8
+
+```sql
+ALTER EXTENSION pg_background UPDATE TO '1.8';
+```
+
+**New Features**:
+- ✅ `pg_background_stats_v2()` - Session statistics
+- ✅ `pg_background_progress()` - Worker progress reporting
+- ✅ `pg_background_get_progress_v2()` - Get worker progress
+- ✅ GUCs: `max_workers`, `worker_timeout`, `default_queue_size`
+- ✅ Built-in max workers enforcement
+- ✅ Enhanced robustness (overflow protection, UTF-8 truncation)
+
+**Action Items**:
+1. Review new GUC settings and configure as needed
+2. Consider using progress reporting for long-running workers
+3. Use `stats_v2()` for monitoring
+
+### Upgrading from v1.6 to v1.7
+
+```sql
+ALTER EXTENSION pg_background UPDATE TO '1.7';
+```
+
+**Changes**:
+- ✅ Cryptographically secure cookie generation
+- ✅ Dedicated memory context (prevents session bloat)
+- ✅ Exponential backoff polling (reduces CPU usage)
+- ⚠️ No breaking changes
+
 ### Upgrading from v1.5 to v1.6
 
 ```sql
@@ -1718,7 +1841,7 @@ For enterprise support, contact:
 4. **Test** disaster recovery scenarios (restarts, crashes)
 5. **Audit** privilege grants regularly
 
-**Version**: 1.6  
-**Last Updated**: 2024-02-05  
-**Minimum PostgreSQL**: 12  
+**Version**: 1.8
+**Last Updated**: 2025-02-12
+**Minimum PostgreSQL**: 14
 **Tested Through**: PostgreSQL 18
