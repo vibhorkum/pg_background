@@ -239,7 +239,7 @@ static Datum build_handle_tuple(FunctionCallInfo fcinfo, pid_t pid, uint64 cooki
 static void ensure_worker_info_memory_context(void);
 
 /* Polling with exponential backoff */
-static void pgbg_sleep_with_backoff(long *interval_us);
+static void pgbg_sleep_with_backoff(long *interval_us, long remaining_us);
 
 /*
  * PostgreSQL 18 changed portal APIs:
@@ -417,13 +417,22 @@ pgbg_timestamp_diff_ms(TimestampTz start, TimestampTz stop)
  * The interval doubles each call up to PGBG_POLL_INTERVAL_MAX_US.
  *
  * Parameters:
- *     interval_us - Pointer to current interval in microseconds.
- *                   Updated to next interval after sleeping.
+ *     interval_us   - Pointer to current interval in microseconds.
+ *                     Updated to next interval after sleeping.
+ *     remaining_us  - Maximum time to sleep (0 = use interval_us).
+ *                     Prevents overshooting timeouts/grace periods.
  */
 static void
-pgbg_sleep_with_backoff(long *interval_us)
+pgbg_sleep_with_backoff(long *interval_us, long remaining_us)
 {
-    pg_usleep(*interval_us);
+    long sleep_time = *interval_us;
+
+    /* Cap sleep time to remaining time if specified */
+    if (remaining_us > 0 && sleep_time > remaining_us)
+        sleep_time = remaining_us;
+
+    if (sleep_time > 0)
+        pg_usleep(sleep_time);
 
     /* Exponential backoff with cap */
     *interval_us *= PGBG_POLL_BACKOFF_FACTOR;
@@ -1457,6 +1466,8 @@ pg_background_wait_v2_timeout(PG_FUNCTION_ARGS)
     {
         pid_t wpid = 0;
         BgwHandleStatus hs;
+        long elapsed_ms;
+        long remaining_us;
 
         if (info->handle == NULL)
             PG_RETURN_BOOL(true);
@@ -1465,11 +1476,15 @@ pg_background_wait_v2_timeout(PG_FUNCTION_ARGS)
         if (hs == BGWH_STOPPED)
             PG_RETURN_BOOL(true);
 
-        if (pgbg_timestamp_diff_ms(start, GetCurrentTimestamp()) >= timeout_ms)
+        elapsed_ms = pgbg_timestamp_diff_ms(start, GetCurrentTimestamp());
+        if (elapsed_ms >= timeout_ms)
             PG_RETURN_BOOL(false);
 
-        /* Sleep with exponential backoff */
-        pgbg_sleep_with_backoff(&poll_interval_us);
+        /* Calculate remaining time to avoid overshooting timeout */
+        remaining_us = (timeout_ms - elapsed_ms) * 1000L;
+
+        /* Sleep with exponential backoff, capped to remaining time */
+        pgbg_sleep_with_backoff(&poll_interval_us, remaining_us);
         CHECK_FOR_INTERRUPTS();
     }
 }
@@ -1664,15 +1679,22 @@ pgbg_send_cancel_signals(pg_background_worker_info *info, int32 grace_ms)
 
     for (;;)
     {
+        long elapsed_ms;
+        long remaining_us;
+
         hs = GetBackgroundWorkerPid(info->handle, &wpid);
         if (hs == BGWH_STOPPED)
             return;
 
-        if (pgbg_timestamp_diff_ms(start, GetCurrentTimestamp()) >= grace_ms)
+        elapsed_ms = pgbg_timestamp_diff_ms(start, GetCurrentTimestamp());
+        if (elapsed_ms >= grace_ms)
             break;
 
-        /* Sleep with exponential backoff */
-        pgbg_sleep_with_backoff(&poll_interval_us);
+        /* Calculate remaining time to avoid overshooting grace period */
+        remaining_us = (grace_ms - elapsed_ms) * 1000L;
+
+        /* Sleep with exponential backoff, capped to remaining time */
+        pgbg_sleep_with_backoff(&poll_interval_us, remaining_us);
         CHECK_FOR_INTERRUPTS();
     }
 
@@ -1743,12 +1765,26 @@ cleanup_worker_info(dsm_segment *seg, Datum pid_datum)
     }
 
     hash_search(worker_hash, (void *) &pid, HASH_REMOVE, &found);
-    /*
-     * Don't ERROR if not found - may be concurrent cleanup or already removed.
-     * This can happen during normal operation with concurrent detach/result.
-     */
     if (!found)
         elog(DEBUG1, "pg_background worker_hash entry for PID %d already removed", (int) pid);
+
+    /*
+     * If hash table is now empty, destroy it and reset the memory context
+     * to release memory back to the system. This prevents long-running
+     * sessions from retaining high-water-mark memory after many workers
+     * have been launched and cleaned up.
+     */
+    if (hash_get_num_entries(worker_hash) == 0)
+    {
+        hash_destroy(worker_hash);
+        worker_hash = NULL;
+
+        if (WorkerInfoMemoryContext != NULL)
+        {
+            MemoryContextReset(WorkerInfoMemoryContext);
+            elog(DEBUG1, "pg_background: reset WorkerInfoMemoryContext after last worker cleanup");
+        }
+    }
 }
 
 /*
