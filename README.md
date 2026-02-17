@@ -1803,7 +1803,7 @@ ALTER EXTENSION pg_background UPDATE TO '1.7';
 - ✅ **FIX: Custom schema installation support** (`CREATE EXTENSION ... WITH SCHEMA`)
 - ⚠️ No breaking changes
 
-**Custom Schema Support**: Prior to v1.7, installing the extension in a custom schema would fail with `function public.grant_pg_background_privileges does not exist`. This has been fixed by using `@extschema@` substitution and dynamic schema lookup.
+**Custom Schema Support**: Prior to v1.7, installing the extension in a custom schema would fail with `function public.grant_pg_background_privileges does not exist`. This has been fixed by removing hardcoded schema prefixes (PostgreSQL automatically places objects in the target schema for relocatable extensions) and using dynamic schema lookup in privilege helper functions.
 
 ### Upgrading from v1.5 to v1.6
 
