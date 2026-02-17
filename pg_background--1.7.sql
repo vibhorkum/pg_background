@@ -42,7 +42,7 @@ LANGUAGE C STRICT;
 -- v2 handle type
 -- ----------------------------------------------------------------------
 
-CREATE TYPE @extschema@.pg_background_handle AS (
+CREATE TYPE pg_background_handle AS (
   pid    pg_catalog.int4,
   cookie pg_catalog.int8
 );
@@ -55,7 +55,7 @@ CREATE FUNCTION pg_background_launch_v2(
     sql pg_catalog.text,
     queue_size pg_catalog.int4 DEFAULT 65536
 )
-RETURNS @extschema@.pg_background_handle
+RETURNS pg_background_handle
 AS 'MODULE_PATHNAME', 'pg_background_launch_v2'
 LANGUAGE C STRICT;
 
@@ -63,7 +63,7 @@ CREATE FUNCTION pg_background_submit_v2(
     sql pg_catalog.text,
     queue_size pg_catalog.int4 DEFAULT 65536
 )
-RETURNS @extschema@.pg_background_handle
+RETURNS pg_background_handle
 AS 'MODULE_PATHNAME', 'pg_background_submit_v2'
 LANGUAGE C STRICT;
 
@@ -291,32 +291,32 @@ END;
 $function$;
 
 -- by default, grant privileges to the executor role
-SELECT @extschema@.grant_pg_background_privileges('pgbackground_role', false);
+SELECT grant_pg_background_privileges('pgbackground_role', false);
 
 -- ----------------------------------------------------------------------
 -- Lock down PUBLIC on extension objects (no ambient capabilities)
 -- ----------------------------------------------------------------------
 
-REVOKE ALL ON FUNCTION @extschema@.grant_pg_background_privileges(pg_catalog.text, boolean)
+REVOKE ALL ON FUNCTION grant_pg_background_privileges(pg_catalog.text, boolean)
   FROM public;
-REVOKE ALL ON FUNCTION @extschema@.revoke_pg_background_privileges(pg_catalog.text, boolean)
+REVOKE ALL ON FUNCTION revoke_pg_background_privileges(pg_catalog.text, boolean)
   FROM public;
 
-REVOKE ALL ON FUNCTION @extschema@.pg_background_launch(pg_catalog.text, pg_catalog.int4) FROM public;
-REVOKE ALL ON FUNCTION @extschema@.pg_background_result(pg_catalog.int4) FROM public;
-REVOKE ALL ON FUNCTION @extschema@.pg_background_detach(pg_catalog.int4) FROM public;
+REVOKE ALL ON FUNCTION pg_background_launch(pg_catalog.text, pg_catalog.int4) FROM public;
+REVOKE ALL ON FUNCTION pg_background_result(pg_catalog.int4) FROM public;
+REVOKE ALL ON FUNCTION pg_background_detach(pg_catalog.int4) FROM public;
 
-REVOKE ALL ON TYPE @extschema@.pg_background_handle FROM public;
+REVOKE ALL ON TYPE pg_background_handle FROM public;
 
-REVOKE ALL ON FUNCTION @extschema@.pg_background_launch_v2(pg_catalog.text, pg_catalog.int4) FROM public;
-REVOKE ALL ON FUNCTION @extschema@.pg_background_submit_v2(pg_catalog.text, pg_catalog.int4) FROM public;
-REVOKE ALL ON FUNCTION @extschema@.pg_background_result_v2(pg_catalog.int4, pg_catalog.int8) FROM public;
-REVOKE ALL ON FUNCTION @extschema@.pg_background_detach_v2(pg_catalog.int4, pg_catalog.int8) FROM public;
-REVOKE ALL ON FUNCTION @extschema@.pg_background_cancel_v2(pg_catalog.int4, pg_catalog.int8) FROM public;
-REVOKE ALL ON FUNCTION @extschema@.pg_background_cancel_v2_grace(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4) FROM public;
-REVOKE ALL ON FUNCTION @extschema@.pg_background_wait_v2(pg_catalog.int4, pg_catalog.int8) FROM public;
-REVOKE ALL ON FUNCTION @extschema@.pg_background_wait_v2_timeout(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4) FROM public;
-REVOKE ALL ON FUNCTION @extschema@.pg_background_list_v2() FROM public;
+REVOKE ALL ON FUNCTION pg_background_launch_v2(pg_catalog.text, pg_catalog.int4) FROM public;
+REVOKE ALL ON FUNCTION pg_background_submit_v2(pg_catalog.text, pg_catalog.int4) FROM public;
+REVOKE ALL ON FUNCTION pg_background_result_v2(pg_catalog.int4, pg_catalog.int8) FROM public;
+REVOKE ALL ON FUNCTION pg_background_detach_v2(pg_catalog.int4, pg_catalog.int8) FROM public;
+REVOKE ALL ON FUNCTION pg_background_cancel_v2(pg_catalog.int4, pg_catalog.int8) FROM public;
+REVOKE ALL ON FUNCTION pg_background_cancel_v2_grace(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4) FROM public;
+REVOKE ALL ON FUNCTION pg_background_wait_v2(pg_catalog.int4, pg_catalog.int8) FROM public;
+REVOKE ALL ON FUNCTION pg_background_wait_v2_timeout(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4) FROM public;
+REVOKE ALL ON FUNCTION pg_background_list_v2() FROM public;
 
 -- ----------------------------------------------------------------------
 -- Optional: helper to drop role explicitly (because DROP EXTENSION won't)
@@ -335,4 +335,4 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION @extschema@.pg_background_drop_executor_role() FROM public;
+REVOKE ALL ON FUNCTION pg_background_drop_executor_role() FROM public;

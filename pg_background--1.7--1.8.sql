@@ -11,7 +11,7 @@
 -- ----------------------------------------------------------------------
 
 -- Return types for new functions
-CREATE TYPE @extschema@.pg_background_stats AS (
+CREATE TYPE pg_background_stats AS (
     workers_launched   pg_catalog.int8,
     workers_completed  pg_catalog.int8,
     workers_failed     pg_catalog.int8,
@@ -21,14 +21,14 @@ CREATE TYPE @extschema@.pg_background_stats AS (
     max_workers        pg_catalog.int4
 );
 
-CREATE TYPE @extschema@.pg_background_progress AS (
+CREATE TYPE pg_background_progress AS (
     progress_pct  pg_catalog.int4,
     progress_msg  pg_catalog.text
 );
 
 -- Statistics function
 CREATE FUNCTION pg_background_stats_v2()
-RETURNS @extschema@.pg_background_stats
+RETURNS pg_background_stats
 AS 'MODULE_PATHNAME', 'pg_background_stats_v2'
 LANGUAGE C;
 
@@ -52,7 +52,7 @@ CREATE FUNCTION pg_background_get_progress_v2(
     pid pg_catalog.int4,
     cookie pg_catalog.int8
 )
-RETURNS @extschema@.pg_background_progress
+RETURNS pg_background_progress
 AS 'MODULE_PATHNAME', 'pg_background_get_progress_v2'
 LANGUAGE C;
 
@@ -237,11 +237,11 @@ END;
 $function$;
 
 -- Grant new functions to the executor role
-SELECT @extschema@.grant_pg_background_privileges('pgbackground_role', false);
+SELECT grant_pg_background_privileges('pgbackground_role', false);
 
 -- Lock down PUBLIC on new extension objects
-REVOKE ALL ON TYPE @extschema@.pg_background_stats FROM public;
-REVOKE ALL ON TYPE @extschema@.pg_background_progress FROM public;
-REVOKE ALL ON FUNCTION @extschema@.pg_background_stats_v2() FROM public;
-REVOKE ALL ON FUNCTION @extschema@.pg_background_progress(pg_catalog.int4, pg_catalog.text) FROM public;
-REVOKE ALL ON FUNCTION @extschema@.pg_background_get_progress_v2(pg_catalog.int4, pg_catalog.int8) FROM public;
+REVOKE ALL ON TYPE pg_background_stats FROM public;
+REVOKE ALL ON TYPE pg_background_progress FROM public;
+REVOKE ALL ON FUNCTION pg_background_stats_v2() FROM public;
+REVOKE ALL ON FUNCTION pg_background_progress(pg_catalog.int4, pg_catalog.text) FROM public;
+REVOKE ALL ON FUNCTION pg_background_get_progress_v2(pg_catalog.int4, pg_catalog.int8) FROM public;
