@@ -1297,22 +1297,27 @@ ERROR: function public.grant_pg_background_privileges(unknown, boolean) does not
 
 **Cause**: Hardcoded `public.` schema references in SQL scripts when extension is relocatable.
 
-**Status**: **Fixed in v1.7+**. The extension now properly supports custom schema installation.
+**Status**: **Fixed in v1.7+** for fresh installations. The extension now properly supports custom schema installation.
 
-**Solution** (if using older version):
+**Solution for fresh install**:
 ```sql
--- Upgrade to v1.7 or later
-ALTER EXTENSION pg_background UPDATE TO '1.8';
-```
-
-**Verification**:
-```sql
--- Should work without errors
+-- Install directly in custom schema (v1.7+)
 CREATE SCHEMA myschema;
 CREATE EXTENSION pg_background WITH SCHEMA myschema;
 
 -- Verify
 SELECT * FROM myschema.pg_background_launch_v2('SELECT 1') AS h;
+```
+
+**⚠️ Limitation for upgrades**: If you have v1.4, v1.5, or v1.6 already installed, upgrading to v1.7/v1.8 will NOT move the extension to a custom schema. The upgrade scripts for older versions contain hardcoded `public.` references because those versions only supported the public schema.
+
+**To relocate an existing installation**:
+```sql
+-- 1. Drop existing extension
+DROP EXTENSION pg_background;
+
+-- 2. Reinstall in desired schema
+CREATE EXTENSION pg_background WITH SCHEMA myschema;
 ```
 
 ### Platform-Specific Issues
@@ -1804,6 +1809,20 @@ ALTER EXTENSION pg_background UPDATE TO '1.7';
 - ⚠️ No breaking changes
 
 **Custom Schema Support**: Prior to v1.7, installing the extension in a custom schema would fail with `function public.grant_pg_background_privileges does not exist`. This has been fixed by removing hardcoded schema prefixes (PostgreSQL automatically places objects in the target schema for relocatable extensions) and using dynamic schema lookup in privilege helper functions.
+
+> **⚠️ Important Upgrade Note**: Custom schema support is only available for **fresh installs** of v1.7+. If you have an existing installation of v1.4, v1.5, or v1.6, the extension was installed in the `public` schema (older versions did not support custom schemas). Upgrading from these versions will keep the extension in the `public` schema because the upgrade scripts contain hardcoded `public.` references.
+>
+> **To move an existing installation to a custom schema:**
+> ```sql
+> -- 1. Drop the existing extension (preserves your data tables)
+> DROP EXTENSION pg_background;
+>
+> -- 2. Create target schema if needed
+> CREATE SCHEMA IF NOT EXISTS myschema;
+>
+> -- 3. Reinstall in custom schema
+> CREATE EXTENSION pg_background WITH SCHEMA myschema;
+> ```
 
 ### Upgrading from v1.5 to v1.6
 
