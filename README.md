@@ -1950,6 +1950,6 @@ See [LICENSE](LICENSE) for full text.
 5. **Audit** privilege grants regularly
 
 **Version**: 1.8
-**Last Updated**: 2026-02-17
+**Last Updated**: 2026-02-18
 **Minimum PostgreSQL**: 14
 **Tested Through**: PostgreSQL 18
