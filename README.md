@@ -198,10 +198,10 @@ CREATE SCHEMA test_schema;
 CREATE EXTENSION pg_background WITH SCHEMA test_schema;
 
 -- Test 2: Launch worker from custom schema
-SELECT * FROM test_schema.pg_background_launch_v2('SELECT 42') AS h \gset
+SELECT (h).pid, (h).cookie FROM test_schema.pg_background_launch_v2('SELECT 42') AS h \gset
 
 -- Test 3: Retrieve results
-SELECT * FROM test_schema.pg_background_result_v2(:'h.pid', :'h.cookie') AS (val int);
+SELECT * FROM test_schema.pg_background_result_v2(:pid, :cookie) AS (val int);
 -- Expected: val = 42
 
 -- Test 4: Privilege helpers work with custom schema
