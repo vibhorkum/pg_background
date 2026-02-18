@@ -526,6 +526,48 @@ SELECT pg_background_cancel_v2(:'h.pid', :'h.cookie');
 | **Submit (fire-forget)** | ⚠️ Use `detach()` after `launch()` | ✅ Dedicated `submit_v2()` |
 | **Production Use** | ⚠️ Not recommended | ✅ Recommended |
 
+#### Common V1 Pain Point: Column Definition Lists
+
+A frequent source of confusion with the v1 API is the requirement to specify column definitions when retrieving results:
+
+```sql
+-- V1 API: MUST specify column definition list
+SELECT * FROM pg_background_result(
+  pg_background_launch('SELECT pg_sleep(3); SELECT ''done''')
+) AS (result text);
+
+-- Without it, you get:
+-- ERROR: a column definition list is required for functions returning "record"
+
+-- And if your query returns multiple columns, you must match them exactly:
+SELECT * FROM pg_background_result(
+  pg_background_launch('SELECT ''done'', ''here''')
+) AS (col1 text, col2 text);
+-- Mismatched columns cause: ERROR: remote query result rowtype does not match
+```
+
+**V2 Solution**: If you just need to wait for completion without retrieving results, use `wait_v2()`:
+
+```sql
+-- V2 API: Wait for completion without dealing with result columns
+SELECT (h).pid, (h).cookie
+FROM pg_background_launch_v2('SELECT pg_sleep(3); SELECT ''done'', ''here''') AS h \gset
+
+-- Simply wait - no column definition needed!
+SELECT pg_background_wait_v2(:pid, :cookie);
+
+-- Or with timeout (returns true if completed, false if timed out)
+SELECT pg_background_wait_v2_timeout(:pid, :cookie, 5000);
+
+-- Cleanup
+SELECT pg_background_detach_v2(:pid, :cookie);
+```
+
+This is especially useful for:
+- Background maintenance tasks (VACUUM, ANALYZE)
+- Fire-and-forget operations where you only care about completion
+- Cases where the result structure may vary
+
 ### PID Reuse Protection
 
 **The Problem**: Operating systems recycle process IDs. On busy systems, a PID can be reused within minutes.
@@ -1319,6 +1361,49 @@ DROP EXTENSION pg_background;
 -- 2. Reinstall in desired schema
 CREATE EXTENSION pg_background WITH SCHEMA myschema;
 ```
+
+#### Issue 7: Column Definition List Required (V1 API)
+
+**Symptom**:
+```
+SELECT pg_background_result(pg_background_launch('SELECT ''done'''));
+ERROR: function returning record called in context that cannot accept type record
+HINT: Try calling the function in the FROM clause using a column definition list.
+
+-- Or when columns don't match:
+SELECT * FROM pg_background_result(...) AS (result text);
+ERROR: remote query result rowtype does not match the specified FROM clause rowtype
+```
+
+**Cause**: The v1 `pg_background_result()` returns `SETOF record`, which requires PostgreSQL to know the column types at parse time.
+
+**Solution 1** - Match column definitions exactly:
+```sql
+-- Single column result
+SELECT * FROM pg_background_result(
+  pg_background_launch('SELECT ''done''')
+) AS (result text);
+
+-- Multiple columns - must match exactly
+SELECT * FROM pg_background_result(
+  pg_background_launch('SELECT ''done'', ''here''')
+) AS (col1 text, col2 text);
+```
+
+**Solution 2** - Use V2 API `wait_v2()` if you don't need results:
+```sql
+-- Launch the worker
+SELECT (h).pid, (h).cookie
+FROM pg_background_launch_v2('SELECT pg_sleep(3); SELECT ''done'', ''here''') AS h \gset
+
+-- Wait for completion - no column definition needed!
+SELECT pg_background_wait_v2(:pid, :cookie);
+
+-- Cleanup
+SELECT pg_background_detach_v2(:pid, :cookie);
+```
+
+**Recommendation**: Migrate to the V2 API which provides `wait_v2()` for cases where you only need to wait for completion without retrieving results.
 
 ### Platform-Specific Issues
 
