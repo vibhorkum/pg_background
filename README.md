@@ -83,7 +83,8 @@ Execute arbitrary SQL commands in **background worker processes** within Postgre
 - **Progress Reporting**: Workers can report progress via `pg_background_progress()`
 - **GUC Configuration**: `pg_background.max_workers`, `worker_timeout`, `default_queue_size`
 - **Resource Limits**: Built-in max workers enforcement per session
-- **Enhanced Robustness**: Overflow protection, UTF-8 aware truncation, race condition fixes  
+- **Enhanced Robustness**: Overflow protection, UTF-8 aware truncation, race condition fixes
+- **Relocatable Extension**: Full support for `CREATE EXTENSION ... WITH SCHEMA`  
 
 ---
 
@@ -139,6 +140,86 @@ SELECT extname, extversion FROM pg_extension WHERE extname = 'pg_background';
 --    extname     | extversion
 -- ---------------+------------
 --  pg_background | 1.8
+```
+
+### Custom Schema Installation
+
+The extension is **relocatable**, allowing installation in any schema. This is useful for organizing extensions or avoiding namespace conflicts.
+
+```sql
+-- Create custom schema
+CREATE SCHEMA contrib;
+
+-- Install extension in custom schema
+CREATE EXTENSION pg_background WITH SCHEMA contrib;
+
+-- Verify installation
+SELECT extname, extversion, nspname AS schema
+FROM pg_extension e
+JOIN pg_namespace n ON n.oid = e.extnamespace
+WHERE e.extname = 'pg_background';
+-- Expected output:
+--    extname     | extversion | schema
+-- ---------------+------------+---------
+--  pg_background | 1.8        | contrib
+```
+
+**Using Extension in Custom Schema**:
+
+When installed in a custom schema, functions can be called with schema qualification or by adding the schema to `search_path`:
+
+```sql
+-- Option 1: Schema-qualified calls
+SELECT * FROM contrib.pg_background_launch_v2('SELECT 1') AS h;
+SELECT * FROM contrib.pg_background_result_v2(h.pid, h.cookie) AS (result int);
+
+-- Option 2: Add schema to search_path
+SET search_path = contrib, public;
+SELECT * FROM pg_background_launch_v2('SELECT 1') AS h;
+```
+
+**Privileges with Custom Schema**:
+
+The privilege helper functions automatically detect the extension's schema:
+
+```sql
+-- Grant privileges (works regardless of installation schema)
+SELECT contrib.grant_pg_background_privileges('app_user', true);
+
+-- Or if schema is in search_path
+SELECT grant_pg_background_privileges('app_user', true);
+```
+
+**Test Cases for Custom Schema Installation**:
+
+```sql
+-- Test 1: Basic installation in custom schema
+CREATE SCHEMA test_schema;
+CREATE EXTENSION pg_background WITH SCHEMA test_schema;
+
+-- Test 2: Launch worker from custom schema
+SELECT (h).pid, (h).cookie FROM test_schema.pg_background_launch_v2('SELECT 42') AS h \gset
+
+-- Test 3: Retrieve results
+SELECT * FROM test_schema.pg_background_result_v2(:pid, :cookie) AS (val int);
+-- Expected: val = 42
+
+-- Test 4: Privilege helpers work with custom schema
+CREATE ROLE test_user NOLOGIN;
+SELECT test_schema.grant_pg_background_privileges('test_user', true);
+-- Should output GRANT statements with test_schema prefix
+
+-- Test 5: Revoke privileges
+SELECT test_schema.revoke_pg_background_privileges('test_user', true);
+
+-- Test 6: V2 types are accessible
+SELECT (ROW(123, 456789)::test_schema.pg_background_handle).*;
+-- Expected: pid=123, cookie=456789
+
+-- Cleanup
+DROP ROLE test_user;
+DROP EXTENSION pg_background;
+DROP SCHEMA test_schema;
 ```
 
 ### Configure PostgreSQL
@@ -1206,6 +1287,39 @@ WHERE name LIKE '%dsm%';
 -- Restart PostgreSQL
 ```
 
+#### Issue 6: Custom Schema Installation Errors (Fixed in v1.7+)
+
+**Symptom** (in versions before fix):
+```
+CREATE EXTENSION pg_background WITH SCHEMA contrib;
+ERROR: function public.grant_pg_background_privileges(unknown, boolean) does not exist
+```
+
+**Cause**: Hardcoded `public.` schema references in SQL scripts when extension is relocatable.
+
+**Status**: **Fixed in v1.7+** for fresh installations. The extension now properly supports custom schema installation.
+
+**Solution for fresh install**:
+```sql
+-- Install directly in custom schema (v1.7+)
+CREATE SCHEMA myschema;
+CREATE EXTENSION pg_background WITH SCHEMA myschema;
+
+-- Verify
+SELECT * FROM myschema.pg_background_launch_v2('SELECT 1') AS h;
+```
+
+**⚠️ Limitation for upgrades**: If you have v1.4, v1.5, or v1.6 already installed, upgrading to v1.7/v1.8 will NOT move the extension to a custom schema. The upgrade scripts for older versions contain hardcoded `public.` references because those versions only supported the public schema.
+
+**To relocate an existing installation**:
+```sql
+-- 1. Drop existing extension
+DROP EXTENSION pg_background;
+
+-- 2. Reinstall in desired schema
+CREATE EXTENSION pg_background WITH SCHEMA myschema;
+```
+
 ### Platform-Specific Issues
 
 #### Windows: Cancel Limitations
@@ -1691,7 +1805,24 @@ ALTER EXTENSION pg_background UPDATE TO '1.7';
 - ✅ Cryptographically secure cookie generation
 - ✅ Dedicated memory context (prevents session bloat)
 - ✅ Exponential backoff polling (reduces CPU usage)
+- ✅ **FIX: Custom schema installation support** (`CREATE EXTENSION ... WITH SCHEMA`)
 - ⚠️ No breaking changes
+
+**Custom Schema Support**: Prior to v1.7, installing the extension in a custom schema would fail with `function public.grant_pg_background_privileges does not exist`. This has been fixed by removing hardcoded schema prefixes (PostgreSQL automatically places objects in the target schema for relocatable extensions) and using dynamic schema lookup in privilege helper functions.
+
+> **⚠️ Important Upgrade Note**: Custom schema support is only available for **fresh installs** of v1.7+. If you have an existing installation of v1.4, v1.5, or v1.6, the extension was installed in the `public` schema (older versions did not support custom schemas). Upgrading from these versions will keep the extension in the `public` schema because the upgrade scripts contain hardcoded `public.` references.
+>
+> **To move an existing installation to a custom schema:**
+> ```sql
+> -- 1. Drop the existing extension (preserves your data tables)
+> DROP EXTENSION pg_background;
+>
+> -- 2. Create target schema if needed
+> CREATE SCHEMA IF NOT EXISTS myschema;
+>
+> -- 3. Reinstall in custom schema
+> CREATE EXTENSION pg_background WITH SCHEMA myschema;
+> ```
 
 ### Upgrading from v1.5 to v1.6
 
@@ -1819,6 +1950,6 @@ See [LICENSE](LICENSE) for full text.
 5. **Audit** privilege grants regularly
 
 **Version**: 1.8
-**Last Updated**: 2025-02-12
+**Last Updated**: 2026-02-18
 **Minimum PostgreSQL**: 14
 **Tested Through**: PostgreSQL 18
