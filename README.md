@@ -809,8 +809,17 @@ SELECT pg_background_detach_v2(:'h.pid', :'h.cookie');
 
 **Solution**: Use background worker for independent commit.
 
+> **⚠️ Critical Warning**: If `max_worker_processes` is exhausted, `pg_background_launch_v2()` will throw `INSUFFICIENT_RESOURCES`. For audit logging, this means:
+> - The audit message will be **lost**
+> - The calling transaction may **fail unexpectedly**
+> - Failures occur **unpredictably** under load
+>
+> See the robust implementation below and [Known Limitation #4](#4-worker-exhaustion-insufficient_resources) for details.
+
+**Basic Example** (not fault-tolerant):
+
 ```sql
-CREATE FUNCTION log_audit(event_type text, details jsonb)
+CREATE FUNCTION log_audit_simple(event_type text, details jsonb)
 RETURNS void AS $$
 DECLARE
   h pg_background_handle;
@@ -823,22 +832,64 @@ BEGIN
       details::text
     )
   );
-  
+
   -- Detach immediately (fire-and-forget)
   PERFORM pg_background_detach_v2(h.pid, h.cookie);
 END;
 $$ LANGUAGE plpgsql;
+```
 
--- Usage in transaction
+**Robust Example** (handles worker exhaustion):
+
+```sql
+CREATE FUNCTION log_audit(event_type text, details jsonb)
+RETURNS void AS $$
+DECLARE
+  h pg_background_handle;
+  retries int := 3;
+  backoff_ms int := 100;
+BEGIN
+  FOR i IN 1..retries LOOP
+    BEGIN
+      SELECT * INTO h FROM pg_background_submit_v2(
+        format(
+          'INSERT INTO audit_log (ts, event_type, details) VALUES (now(), %L, %L)',
+          event_type,
+          details::text
+        )
+      );
+      PERFORM pg_background_detach_v2(h.pid, h.cookie);
+      RETURN;  -- Success
+    EXCEPTION
+      WHEN insufficient_resources THEN
+        IF i = retries THEN
+          -- Final fallback: log synchronously (blocks but doesn't lose data)
+          INSERT INTO audit_log (ts, event_type, details)
+          VALUES (now(), event_type, details);
+          RAISE WARNING 'pg_background exhausted, audit logged synchronously';
+          RETURN;
+        END IF;
+        -- Exponential backoff before retry
+        PERFORM pg_sleep(backoff_ms / 1000.0);
+        backoff_ms := backoff_ms * 2;
+    END;
+  END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+```
+
+**Usage in transaction**:
+
+```sql
 BEGIN;
   UPDATE accounts SET balance = balance - 100 WHERE id = 123;
-  
+
   -- Audit log commits even if UPDATE rolls back
   PERFORM log_audit('withdrawal', '{"account": 123, "amount": 100}');
-  
+
   -- Simulate error
   ROLLBACK;
-  
+
 -- Audit log entry exists!
 SELECT * FROM audit_log ORDER BY ts DESC LIMIT 1;
 ```
@@ -1667,6 +1718,72 @@ SET pg_background.max_workers = 10;
 **Remaining Limitation**: No per-user or per-database quotas across sessions.
 
 **Workaround**: Implement application-level quotas for cross-session limits (see [Security](#security-model)).
+
+### 4. Worker Exhaustion (INSUFFICIENT_RESOURCES)
+
+**Limitation**: When `max_worker_processes` is exhausted, `pg_background_launch()` and `pg_background_launch_v2()` throw `INSUFFICIENT_RESOURCES`.
+
+**Error Message**:
+```
+ERROR: could not register background process
+HINT: You may need to increase max_worker_processes.
+```
+
+**Impact**: This is particularly problematic for **autonomous logging** use cases:
+1. **Data Loss**: The message intended for logging is lost
+2. **Cascading Failures**: The calling transaction may fail unexpectedly
+3. **Unpredictable**: Failures occur sporadically under high load
+
+**Why This Happens**: Background workers share the global `max_worker_processes` pool with:
+- Parallel query workers (`max_parallel_workers`)
+- Autovacuum workers (`autovacuum_max_workers`)
+- Logical replication workers
+- Custom background workers from other extensions
+
+**Mitigation Strategies**:
+
+1. **Increase worker pool** (reduces frequency, doesn't eliminate):
+   ```sql
+   ALTER SYSTEM SET max_worker_processes = 64;
+   -- Requires PostgreSQL restart
+   ```
+
+2. **Implement retry with backoff**:
+   ```sql
+   BEGIN
+     SELECT pg_background_launch_v2(...);
+   EXCEPTION
+     WHEN insufficient_resources THEN
+       PERFORM pg_sleep(0.1);  -- Backoff
+       -- Retry or fallback
+   END;
+   ```
+
+3. **Fallback to synchronous execution** (for critical operations):
+   ```sql
+   EXCEPTION
+     WHEN insufficient_resources THEN
+       -- Execute synchronously as fallback
+       INSERT INTO audit_log VALUES (...);
+   END;
+   ```
+
+4. **Pre-check worker availability** (advisory, not guaranteed):
+   ```sql
+   SELECT count(*) < current_setting('max_worker_processes')::int
+   FROM pg_stat_activity
+   WHERE backend_type LIKE '%worker%';
+   ```
+
+5. **Reserve capacity** by setting conservative `pg_background.max_workers`:
+   ```sql
+   -- Leave headroom for other workers
+   SET pg_background.max_workers = 8;  -- Even if pool is 64
+   ```
+
+**Recommendation**: For mission-critical logging, always implement a synchronous fallback. Autonomous transactions via pg_background are **best-effort**, not guaranteed.
+
+**See Also**: [Autonomous Audit Logging](#2-autonomous-audit-logging) for robust implementation patterns.
 
 ### 4. Result Consumption is One-Time
 
