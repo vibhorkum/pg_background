@@ -133,6 +133,19 @@
 /* Timeout bounds (milliseconds) */
 #define PGBG_TIMEOUT_MS_MAX         86400000 /* 24 hours maximum */
 
+/* Worker label maximum length */
+#define PGBG_LABEL_MAX_LEN          64
+
+/* Command tag maximum length */
+#define PGBG_COMMAND_TAG_LEN        64
+
+/* Structured error field lengths */
+#define PGBG_ERROR_SQLSTATE_LEN     6
+#define PGBG_ERROR_MESSAGE_LEN      256
+#define PGBG_ERROR_DETAIL_LEN       256
+#define PGBG_ERROR_HINT_LEN         256
+#define PGBG_ERROR_CONTEXT_LEN      256
+
 /* ============================================================================
  * DATA STRUCTURES
  * ============================================================================
@@ -158,6 +171,24 @@ typedef struct pg_background_fixed_data
     uint32      cancel_requested;       /* [B] v2 cancel flag: 0=no, 1=requested */
     int32       progress_pct;           /* [W] Progress percentage (0-100, -1 = not reported) */
     char        progress_msg[64];       /* [W] Progress message (brief status) */
+
+    /* v1.9: Execution timing (written by worker) */
+    TimestampTz started_at;             /* [W] Worker SQL execution start time */
+    TimestampTz finished_at;            /* [W] Worker SQL execution end time (0 = running) */
+
+    /* v1.9: Structured error info (written by worker on error) */
+    char        error_sqlstate[PGBG_ERROR_SQLSTATE_LEN]; /* [W] SQLSTATE code (e.g., "42P01") */
+    char        error_message[PGBG_ERROR_MESSAGE_LEN];   /* [W] Primary error message */
+    char        error_detail[PGBG_ERROR_DETAIL_LEN];     /* [W] Error detail */
+    char        error_hint[PGBG_ERROR_HINT_LEN];         /* [W] Error hint */
+    char        error_context[PGBG_ERROR_CONTEXT_LEN];   /* [W] Error context */
+
+    /* v1.9: Result metadata (written by worker on completion) */
+    int64       result_row_count;       /* [W] Number of rows returned/affected */
+    char        command_tag[PGBG_COMMAND_TAG_LEN];       /* [W] Command completion tag */
+
+    /* v1.9: Worker label (written by launcher) */
+    char        label[PGBG_LABEL_MAX_LEN + 1];           /* [L] Optional worker label */
 } pg_background_fixed_data;
 
 /*
@@ -189,6 +220,24 @@ typedef struct pg_background_worker_info
     int32       queue_size;             /* Queue size used for this worker */
     char        sql_preview[PGBG_SQL_PREVIEW_LEN + 1];  /* SQL preview for list_v2 */
     char       *last_error;             /* Last error message (in WorkerInfoMemoryContext) */
+
+    /* v1.9: Worker label for operational clarity */
+    char        label[PGBG_LABEL_MAX_LEN + 1];          /* Optional label (empty = none) */
+
+    /* v1.9: Execution timing (cached from DSM on completion) */
+    TimestampTz started_at;             /* Worker SQL execution start */
+    TimestampTz finished_at;            /* Worker SQL execution end (0 = running) */
+    int64       execution_ms;           /* Computed: finished_at - started_at */
+
+    /* v1.9: Result metadata (cached from DSM on completion) */
+    int64       result_row_count;       /* Number of rows returned/affected */
+    char        command_tag[PGBG_COMMAND_TAG_LEN];      /* Command completion tag */
+
+    /* v1.9: Structured error info (cached from DSM on error) */
+    char        error_sqlstate[PGBG_ERROR_SQLSTATE_LEN]; /* SQLSTATE code */
+    char        error_detail[PGBG_ERROR_DETAIL_LEN];    /* Error detail */
+    char        error_hint[PGBG_ERROR_HINT_LEN];        /* Error hint */
+    char        error_context[PGBG_ERROR_CONTEXT_LEN];  /* Error context */
 } pg_background_worker_info;
 
 /*
@@ -295,7 +344,8 @@ static void save_worker_info(pid_t pid, uint64 cookie, dsm_segment *seg,
                              shm_mq_handle *responseq,
                              bool result_disabled,
                              int32 queue_size,
-                             const char *sql_preview);
+                             const char *sql_preview,
+                             const char *label);
 
 /* Error handling */
 static void pg_background_error_callback(void *arg);
@@ -314,6 +364,7 @@ static bool exists_binary_recv_fn(Oid type);
 /* Internal launcher (shared by v1 and v2 APIs) */
 static void launch_internal(text *sql, int32 queue_size, uint64 cookie,
                             bool result_disabled,
+                            const char *label,
                             pid_t *out_pid);
 
 /* Helper to build handle tuple (eliminates duplication) */
@@ -406,6 +457,12 @@ PG_FUNCTION_INFO_V1(pg_background_progress);
 
 /* Progress retrieval function */
 PG_FUNCTION_INFO_V1(pg_background_get_progress_v2);
+
+/* v1.9: New observability functions */
+PG_FUNCTION_INFO_V1(pg_background_result_info_v2);
+PG_FUNCTION_INFO_V1(pg_background_error_info_v2);
+PG_FUNCTION_INFO_V1(pg_background_detach_all_v2);
+PG_FUNCTION_INFO_V1(pg_background_cancel_all_v2);
 
 /* ============================================================================
  * MODULE INITIALIZATION
@@ -688,6 +745,7 @@ build_handle_tuple(FunctionCallInfo fcinfo, pid_t pid, uint64 cookie)
 static void
 launch_internal(text *sql, int32 queue_size, uint64 cookie,
                 bool result_disabled,
+                const char *label,
                 pid_t *out_pid)
 {
     int32        sql_len = VARSIZE_ANY_EXHDR(sql);
@@ -772,6 +830,28 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
     fdata->cancel_requested = 0;
     fdata->progress_pct = -1;           /* -1 = not reported yet */
     fdata->progress_msg[0] = '\0';
+
+    /* v1.9: Initialize execution timing fields */
+    fdata->started_at = 0;              /* Set by worker when execution starts */
+    fdata->finished_at = 0;             /* Set by worker when execution ends */
+
+    /* v1.9: Initialize structured error fields */
+    fdata->error_sqlstate[0] = '\0';
+    fdata->error_message[0] = '\0';
+    fdata->error_detail[0] = '\0';
+    fdata->error_hint[0] = '\0';
+    fdata->error_context[0] = '\0';
+
+    /* v1.9: Initialize result metadata */
+    fdata->result_row_count = 0;
+    fdata->command_tag[0] = '\0';
+
+    /* v1.9: Set worker label */
+    if (label != NULL && label[0] != '\0')
+        strlcpy(fdata->label, label, sizeof(fdata->label));
+    else
+        fdata->label[0] = '\0';
+
     shm_toc_insert(toc, PG_BACKGROUND_KEY_FIXED_DATA, fdata);
 
     /* SQL text */
@@ -869,7 +949,7 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
 
     /* Save info */
     save_worker_info(pid, cookie, seg, worker_handle, responseq,
-                     result_disabled, queue_size, preview);
+                     result_disabled, queue_size, preview, label);
 
     /* Pin mapping so txn cleanup won't detach underneath us */
     dsm_pin_mapping(seg);
@@ -915,7 +995,7 @@ pg_background_launch(PG_FUNCTION_ARGS)
     int32   queue_size = PG_GETARG_INT32(1);
     pid_t   pid;
 
-    launch_internal(sql, queue_size, 0 /* cookie=0 for v1 */, false, &pid);
+    launch_internal(sql, queue_size, 0 /* cookie=0 for v1 */, false, NULL, &pid);
     PG_RETURN_INT32((int32) pid);
 }
 
@@ -932,6 +1012,7 @@ pg_background_launch(PG_FUNCTION_ARGS)
  *     sql        - SQL command(s) to execute (text)
  *     queue_size - Shared memory queue size in bytes (default: uses
  *                  pg_background.default_queue_size GUC, typically 64KB)
+ *     label      - Optional worker label for operational clarity (v1.9+)
  *
  * Returns: pg_background_handle composite (pid int4, cookie int8)
  *
@@ -945,10 +1026,18 @@ pg_background_launch_v2(PG_FUNCTION_ARGS)
 {
     text   *sql = PG_GETARG_TEXT_PP(0);
     int32   queue_size = PG_GETARG_INT32(1);
+    char   *label = NULL;
     pid_t   pid;
     uint64  cookie = pg_background_make_cookie();
 
-    launch_internal(sql, queue_size, cookie, false, &pid);
+    /* v1.9: Optional label parameter */
+    if (PG_NARGS() >= 3 && !PG_ARGISNULL(2))
+    {
+        text *label_text = PG_GETARG_TEXT_PP(2);
+        label = text_to_cstring(label_text);
+    }
+
+    launch_internal(sql, queue_size, cookie, false, label, &pid);
     PG_RETURN_DATUM(build_handle_tuple(fcinfo, pid, cookie));
 }
 
@@ -963,6 +1052,7 @@ pg_background_launch_v2(PG_FUNCTION_ARGS)
  *     sql        - SQL command(s) to execute (text)
  *     queue_size - Shared memory queue size in bytes (default: uses
  *                  pg_background.default_queue_size GUC, typically 64KB)
+ *     label      - Optional worker label for operational clarity (v1.9+)
  *
  * Returns: pg_background_handle composite (pid int4, cookie int8)
  *
@@ -976,10 +1066,18 @@ pg_background_submit_v2(PG_FUNCTION_ARGS)
 {
     text   *sql = PG_GETARG_TEXT_PP(0);
     int32   queue_size = PG_GETARG_INT32(1);
+    char   *label = NULL;
     pid_t   pid;
     uint64  cookie = pg_background_make_cookie();
 
-    launch_internal(sql, queue_size, cookie, true, &pid);
+    /* v1.9: Optional label parameter */
+    if (PG_NARGS() >= 3 && !PG_ARGISNULL(2))
+    {
+        text *label_text = PG_GETARG_TEXT_PP(2);
+        label = text_to_cstring(label_text);
+    }
+
+    launch_internal(sql, queue_size, cookie, true, label, &pid);
     PG_RETURN_DATUM(build_handle_tuple(fcinfo, pid, cookie));
 }
 
@@ -2126,7 +2224,8 @@ save_worker_info(pid_t pid, uint64 cookie, dsm_segment *seg,
                  shm_mq_handle *responseq,
                  bool result_disabled,
                  int32 queue_size,
-                 const char *sql_preview)
+                 const char *sql_preview,
+                 const char *label)
 {
     pg_background_worker_info *info;
     Oid current_user_id;
@@ -2212,6 +2311,27 @@ save_worker_info(pid_t pid, uint64 cookie, dsm_segment *seg,
     strlcpy(info->sql_preview, sql_preview ? sql_preview : "", sizeof(info->sql_preview));
 
     info->last_error = NULL;
+
+    /* v1.9: Initialize label */
+    if (label != NULL && label[0] != '\0')
+        strlcpy(info->label, label, sizeof(info->label));
+    else
+        info->label[0] = '\0';
+
+    /* v1.9: Initialize execution timing */
+    info->started_at = 0;
+    info->finished_at = 0;
+    info->execution_ms = 0;
+
+    /* v1.9: Initialize result metadata */
+    info->result_row_count = 0;
+    info->command_tag[0] = '\0';
+
+    /* v1.9: Initialize structured error fields */
+    info->error_sqlstate[0] = '\0';
+    info->error_detail[0] = '\0';
+    info->error_hint[0] = '\0';
+    info->error_context[0] = '\0';
 }
 
 /*
@@ -2357,7 +2477,49 @@ pg_background_worker_main(Datum main_arg)
 
     SetUserIdAndSecContext(fdata->current_user_id, fdata->sec_context);
 
-    execute_sql_string(sql);
+    /* v1.9: Record execution start time */
+    fdata->started_at = GetCurrentTimestamp();
+
+    /* Execute with error capture for v1.9 structured errors */
+    PG_TRY();
+    {
+        execute_sql_string(sql);
+    }
+    PG_CATCH();
+    {
+        /* v1.9: Capture structured error info before re-throwing */
+        ErrorData *edata = CopyErrorData();
+
+        /* Store SQLSTATE (5-char code like "42P01") */
+        snprintf(fdata->error_sqlstate, sizeof(fdata->error_sqlstate), "%s",
+                 unpack_sql_state(edata->sqlerrcode));
+
+        /* Store error message (truncate if needed) */
+        if (edata->message != NULL)
+            strlcpy(fdata->error_message, edata->message, sizeof(fdata->error_message));
+
+        /* Store detail if available */
+        if (edata->detail != NULL)
+            strlcpy(fdata->error_detail, edata->detail, sizeof(fdata->error_detail));
+
+        /* Store hint if available */
+        if (edata->hint != NULL)
+            strlcpy(fdata->error_hint, edata->hint, sizeof(fdata->error_hint));
+
+        /* Store context if available */
+        if (edata->context != NULL)
+            strlcpy(fdata->error_context, edata->context, sizeof(fdata->error_context));
+
+        /* Record completion time even on error */
+        fdata->finished_at = GetCurrentTimestamp();
+
+        FreeErrorData(edata);
+        PG_RE_THROW();
+    }
+    PG_END_TRY();
+
+    /* v1.9: Record execution end time */
+    fdata->finished_at = GetCurrentTimestamp();
 
     disable_timeout(STATEMENT_TIMEOUT, false);
     CommitTransactionCommand();
@@ -2795,4 +2957,298 @@ pg_background_get_progress_v2(PG_FUNCTION_ARGS)
 
     tuple = heap_form_tuple(tupdesc, values, nulls);
     PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
+
+/* ============================================================================
+ * V1.9 OBSERVABILITY FUNCTIONS
+ * ============================================================================
+ */
+
+/*
+ * pg_background_result_info_v2
+ *     Get result metadata without consuming results.
+ *
+ * Returns: pg_background_result_info composite type
+ *     (row_count int8, command_tag text, completed bool, has_error bool)
+ *
+ * This allows callers to check worker status without consuming results.
+ */
+Datum
+pg_background_result_info_v2(PG_FUNCTION_ARGS)
+{
+    int32       pid = PG_GETARG_INT32(0);
+    int64       cookie = PG_GETARG_INT64(1);
+    pg_background_worker_info *info;
+    shm_toc    *toc;
+    pg_background_fixed_data *fdata;
+    TupleDesc   tupdesc;
+    Datum       values[4];
+    bool        nulls[4];
+    HeapTuple   tuple;
+    bool        completed = false;
+    bool        has_error = false;
+    int64       row_count = 0;
+    char        command_tag[PGBG_COMMAND_TAG_LEN];
+
+    command_tag[0] = '\0';
+
+    /* Look up worker */
+    info = find_worker_info((pid_t) pid);
+    if (info == NULL)
+        ereport(ERROR,
+                (errcode(ERRCODE_UNDEFINED_OBJECT),
+                 errmsg("background worker with PID %d not found", pid)));
+
+    check_rights(info);
+
+    if (info->cookie != (uint64) cookie)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("cookie mismatch for PID %d", pid)));
+
+    /* Check if worker has completed */
+    if (info->handle != NULL)
+    {
+        pid_t wpid = 0;
+        BgwHandleStatus hs = GetBackgroundWorkerPid(info->handle, &wpid);
+        completed = (hs == BGWH_STOPPED);
+    }
+
+    /* Read metadata from shared memory */
+    if (info->seg != NULL)
+    {
+        toc = shm_toc_attach(PG_BACKGROUND_MAGIC, dsm_segment_address(info->seg));
+        if (toc != NULL)
+        {
+            fdata = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_FIXED_DATA, true);
+            if (fdata != NULL)
+            {
+                row_count = fdata->result_row_count;
+                strlcpy(command_tag, fdata->command_tag, sizeof(command_tag));
+                has_error = (fdata->error_sqlstate[0] != '\0');
+            }
+        }
+    }
+
+    /* Build result tuple */
+    if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("function returning composite called in context that cannot accept it")));
+    tupdesc = BlessTupleDesc(tupdesc);
+
+    MemSet(nulls, false, sizeof(nulls));
+    values[0] = Int64GetDatum(row_count);
+    values[1] = CStringGetTextDatum(command_tag);
+    values[2] = BoolGetDatum(completed);
+    values[3] = BoolGetDatum(has_error);
+
+    tuple = heap_form_tuple(tupdesc, values, nulls);
+    PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
+
+/*
+ * pg_background_error_info_v2
+ *     Get structured error information from a worker.
+ *
+ * Returns: pg_background_error composite type
+ *     (sqlstate text, message text, detail text, hint text, context text)
+ *
+ * Returns NULL if no error occurred.
+ */
+Datum
+pg_background_error_info_v2(PG_FUNCTION_ARGS)
+{
+    int32       pid = PG_GETARG_INT32(0);
+    int64       cookie = PG_GETARG_INT64(1);
+    pg_background_worker_info *info;
+    shm_toc    *toc;
+    pg_background_fixed_data *fdata;
+    TupleDesc   tupdesc;
+    Datum       values[5];
+    bool        nulls[5];
+    HeapTuple   tuple;
+
+    /* Look up worker */
+    info = find_worker_info((pid_t) pid);
+    if (info == NULL)
+        ereport(ERROR,
+                (errcode(ERRCODE_UNDEFINED_OBJECT),
+                 errmsg("background worker with PID %d not found", pid)));
+
+    check_rights(info);
+
+    if (info->cookie != (uint64) cookie)
+        ereport(ERROR,
+                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+                 errmsg("cookie mismatch for PID %d", pid)));
+
+    /* Read error info from shared memory */
+    if (info->seg == NULL)
+        PG_RETURN_NULL();
+
+    toc = shm_toc_attach(PG_BACKGROUND_MAGIC, dsm_segment_address(info->seg));
+    if (toc == NULL)
+        PG_RETURN_NULL();
+
+    fdata = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_FIXED_DATA, true);
+    if (fdata == NULL || fdata->error_sqlstate[0] == '\0')
+        PG_RETURN_NULL();  /* No error */
+
+    /* Build result tuple */
+    if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
+        ereport(ERROR,
+                (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+                 errmsg("function returning composite called in context that cannot accept it")));
+    tupdesc = BlessTupleDesc(tupdesc);
+
+    MemSet(nulls, false, sizeof(nulls));
+    values[0] = CStringGetTextDatum(fdata->error_sqlstate);
+    values[1] = CStringGetTextDatum(fdata->error_message);
+
+    if (fdata->error_detail[0] != '\0')
+        values[2] = CStringGetTextDatum(fdata->error_detail);
+    else
+        nulls[2] = true;
+
+    if (fdata->error_hint[0] != '\0')
+        values[3] = CStringGetTextDatum(fdata->error_hint);
+    else
+        nulls[3] = true;
+
+    if (fdata->error_context[0] != '\0')
+        values[4] = CStringGetTextDatum(fdata->error_context);
+    else
+        nulls[4] = true;
+
+    tuple = heap_form_tuple(tupdesc, values, nulls);
+    PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
+
+/*
+ * pg_background_detach_all_v2
+ *     Detach all tracked workers in the current session.
+ *
+ * Returns: int4 - number of workers detached
+ */
+Datum
+pg_background_detach_all_v2(PG_FUNCTION_ARGS)
+{
+    HASH_SEQ_STATUS hstat;
+    pg_background_worker_info *info;
+    pid_t      *pids_to_detach;
+    int         count = 0;
+    int         capacity;
+    int         i;
+
+    if (worker_hash == NULL)
+        PG_RETURN_INT32(0);
+
+    capacity = hash_get_num_entries(worker_hash);
+    if (capacity == 0)
+        PG_RETURN_INT32(0);
+
+    /* Snapshot PIDs to avoid modifying hash during iteration */
+    pids_to_detach = palloc(sizeof(pid_t) * capacity);
+
+    hash_seq_init(&hstat, worker_hash);
+    while ((info = hash_seq_search(&hstat)) != NULL)
+    {
+        /* Only detach workers we have rights to */
+        Oid cur;
+        int sec;
+        GetUserIdAndSecContext(&cur, &sec);
+        if (has_privs_of_role(cur, info->current_user_id))
+        {
+            if (count < capacity)
+                pids_to_detach[count++] = info->pid;
+        }
+    }
+
+    /* Now detach each one */
+    for (i = 0; i < count; i++)
+    {
+        info = find_worker_info(pids_to_detach[i]);
+        if (info != NULL)
+        {
+            if (info->seg && info->mapping_pinned)
+            {
+                dsm_unpin_mapping(info->seg);
+                info->mapping_pinned = false;
+            }
+            if (info->seg)
+                dsm_detach(info->seg);
+        }
+    }
+
+    pfree(pids_to_detach);
+    PG_RETURN_INT32(count);
+}
+
+/*
+ * pg_background_cancel_all_v2
+ *     Cancel all running workers in the current session.
+ *
+ * Returns: int4 - number of workers for which cancel was requested
+ */
+Datum
+pg_background_cancel_all_v2(PG_FUNCTION_ARGS)
+{
+    HASH_SEQ_STATUS hstat;
+    pg_background_worker_info *info;
+    pid_t      *pids_to_cancel;
+    int         count = 0;
+    int         capacity;
+    int         i;
+    int         canceled = 0;
+
+    if (worker_hash == NULL)
+        PG_RETURN_INT32(0);
+
+    capacity = hash_get_num_entries(worker_hash);
+    if (capacity == 0)
+        PG_RETURN_INT32(0);
+
+    /* Snapshot PIDs to avoid modifying hash during iteration */
+    pids_to_cancel = palloc(sizeof(pid_t) * capacity);
+
+    hash_seq_init(&hstat, worker_hash);
+    while ((info = hash_seq_search(&hstat)) != NULL)
+    {
+        /* Only cancel workers we have rights to */
+        Oid cur;
+        int sec;
+        GetUserIdAndSecContext(&cur, &sec);
+        if (has_privs_of_role(cur, info->current_user_id))
+        {
+            /* Only cancel if running */
+            if (info->handle != NULL)
+            {
+                pid_t wpid = 0;
+                BgwHandleStatus hs = GetBackgroundWorkerPid(info->handle, &wpid);
+                if (hs == BGWH_STARTED && !info->canceled)
+                {
+                    if (count < capacity)
+                        pids_to_cancel[count++] = info->pid;
+                }
+            }
+        }
+    }
+
+    /* Now cancel each one */
+    for (i = 0; i < count; i++)
+    {
+        info = find_worker_info(pids_to_cancel[i]);
+        if (info != NULL && !info->canceled)
+        {
+            pgbg_request_cancel(info);
+            pgbg_send_cancel_signals(info, 0);
+            info->canceled = true;
+            session_stats.workers_canceled++;
+            canceled++;
+        }
+    }
+
+    pfree(pids_to_cancel);
+    PG_RETURN_INT32(canceled);
 }
