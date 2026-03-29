@@ -1,8 +1,9 @@
 # pg_background: Production-Grade Background SQL for PostgreSQL
 
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14--18-blue.svg)](https://www.postgresql.org/)
-[![Version](https://img.shields.io/badge/version-1.8-brightgreen.svg)](https://github.com/vibhorkum/pg_background)
+[![Version](https://img.shields.io/badge/version-1.9-brightgreen.svg)](https://github.com/vibhorkum/pg_background)
 [![License](https://img.shields.io/badge/license-PostgreSQL-green.svg)](LICENSE)
+[![CI](https://github.com/vibhorkum/pg_background/actions/workflows/ci.yml/badge.svg)](https://github.com/vibhorkum/pg_background/actions/workflows/ci.yml)
 
 Execute arbitrary SQL commands in **background worker processes** within PostgreSQL. Built for production workloads requiring asynchronous execution, autonomous transactions, and long-running operations without blocking client sessions.
 
@@ -36,6 +37,7 @@ Execute arbitrary SQL commands in **background worker processes** within Postgre
 - [Known Limitations](#known-limitations)
 - [Best Practices](#best-practices)
 - [Migration Guide](#migration-guide)
+- [Testing](#testing)
 - [Contributing](#contributing)
 - [License](#license)
 - [Author](#author)
@@ -84,7 +86,14 @@ Execute arbitrary SQL commands in **background worker processes** within Postgre
 - **GUC Configuration**: `pg_background.max_workers`, `worker_timeout`, `default_queue_size`
 - **Resource Limits**: Built-in max workers enforcement per session
 - **Enhanced Robustness**: Overflow protection, UTF-8 aware truncation, race condition fixes
-- **Relocatable Extension**: Full support for `CREATE EXTENSION ... WITH SCHEMA`  
+- **Relocatable Extension**: Full support for `CREATE EXTENSION ... WITH SCHEMA`
+
+### V1.9 Enhancements (Current)
+- **Worker Labels**: Optional `label` parameter on `launch_v2()`/`submit_v2()` for operational clarity
+- **Structured Error Returns**: `pg_background_error_info_v2()` returns SQLSTATE, message, detail, hint, context
+- **Result Metadata**: `pg_background_result_info_v2()` returns row_count, command_tag, completed, has_error
+- **Execution Timing**: Workers track `started_at` and `finished_at` timestamps
+- **Batch Operations**: `pg_background_detach_all_v2()` and `pg_background_cancel_all_v2()` for session cleanup
 
 ---
 
@@ -139,7 +148,7 @@ SELECT extname, extversion FROM pg_extension WHERE extname = 'pg_background';
 -- Expected output:
 --    extname     | extversion
 -- ---------------+------------
---  pg_background | 1.8
+--  pg_background | 1.9
 ```
 
 ### Custom Schema Installation
@@ -161,7 +170,7 @@ WHERE e.extname = 'pg_background';
 -- Expected output:
 --    extname     | extversion | schema
 -- ---------------+------------+---------
---  pg_background | 1.8        | contrib
+--  pg_background | 1.9        | contrib
 ```
 
 **Using Extension in Custom Schema**:
@@ -408,15 +417,19 @@ SELECT pg_background_detach(:pid);
 
 | Function | Returns | Description | Use Case |
 |----------|---------|-------------|----------|
-| `pg_background_launch_v2(sql, queue_size)` | `pg_background_handle` | Launch worker, return cookie-protected handle | Standard async execution |
-| `pg_background_submit_v2(sql, queue_size)` | `pg_background_handle` | Fire-and-forget (no result consumption) | Side-effect queries (logging, notifications) |
+| `pg_background_launch_v2(sql, queue_size, label)` | `pg_background_handle` | Launch worker with optional label (v1.9) | Standard async execution |
+| `pg_background_submit_v2(sql, queue_size, label)` | `pg_background_handle` | Fire-and-forget with optional label (v1.9) | Side-effect queries |
 | `pg_background_result_v2(pid, cookie)` | `SETOF record` | Retrieve results (**one-time consumption**) | Collect query output |
-| `pg_background_detach_v2(pid, cookie)` | `void` | Stop tracking worker (worker continues) | Cleanup bookkeeping for long-running tasks |
+| `pg_background_result_info_v2(pid, cookie)` | `pg_background_result_info` | Get result metadata (v1.9) | Check completion without consuming |
+| `pg_background_error_info_v2(pid, cookie)` | `pg_background_error` | Get structured error details (v1.9) | Error diagnostics |
+| `pg_background_detach_v2(pid, cookie)` | `void` | Stop tracking worker (worker continues) | Cleanup bookkeeping |
+| `pg_background_detach_all_v2()` | `int4` | Detach all workers in session (v1.9) | Session cleanup |
 | `pg_background_cancel_v2(pid, cookie)` | `void` | Request cancellation (best-effort) | Terminate unwanted work |
-| `pg_background_cancel_v2_grace(pid, cookie, grace_ms)` | `void` | Cancel with grace period (max 3600000ms) | Allow current statement to finish |
+| `pg_background_cancel_v2_grace(pid, cookie, grace_ms)` | `void` | Cancel with grace period (max 3600000ms) | Allow statement to finish |
+| `pg_background_cancel_all_v2()` | `int4` | Cancel all workers in session (v1.9) | Emergency cleanup |
 | `pg_background_wait_v2(pid, cookie)` | `void` | Block until worker completes | Synchronous barrier |
 | `pg_background_wait_v2_timeout(pid, cookie, timeout_ms)` | `bool` | Wait with timeout (returns `true` if done) | Bounded blocking |
-| `pg_background_list_v2()` | `SETOF record` | List known workers in current session | Monitoring, debugging, cleanup |
+| `pg_background_list_v2()` | `SETOF record` | List known workers in current session | Monitoring, debugging |
 | `pg_background_stats_v2()` | `pg_background_stats` | Session statistics (v1.8+) | Monitoring, debugging |
 | `pg_background_progress(pct, msg)` | `void` | Report progress from worker (v1.8+) | Long-running task feedback |
 | `pg_background_get_progress_v2(pid, cookie)` | `pg_background_progress` | Get worker progress (v1.8+) | Monitor long-running tasks |
@@ -426,6 +439,7 @@ SELECT pg_background_detach(:pid);
 - `queue_size`: Shared memory queue size in bytes (default: 65536, min: 4096)
 - `pid`: Process ID from handle
 - `cookie`: Unique identifier from handle (prevents PID reuse)
+- `label`: Optional worker label for identification (v1.9, default: NULL)
 - `grace_ms`: Milliseconds to wait before forceful termination (capped at 1 hour)
 - `timeout_ms`: Milliseconds to wait for completion
 
@@ -454,6 +468,27 @@ CREATE TYPE public.pg_background_stats AS (
 CREATE TYPE public.pg_background_progress AS (
   progress_pct  int4,   -- Progress percentage (0-100)
   progress_msg  text    -- Brief status message
+);
+```
+
+**Result Info Type** (v1.9+):
+```sql
+CREATE TYPE public.pg_background_result_info AS (
+  row_count    int8,    -- Number of rows returned/affected
+  command_tag  text,    -- Command tag (SELECT, INSERT, etc.)
+  completed    bool,    -- True if worker completed
+  has_error    bool     -- True if worker encountered error
+);
+```
+
+**Error Type** (v1.9+):
+```sql
+CREATE TYPE public.pg_background_error AS (
+  sqlstate  text,   -- SQLSTATE error code (e.g., '23505')
+  message   text,   -- Primary error message
+  detail    text,   -- Detailed error info (if any)
+  hint      text,   -- Hint for resolution (if any)
+  context   text    -- Error context/stack trace
 );
 ```
 
@@ -2087,6 +2122,74 @@ After (v2):
 SELECT * FROM pg_background_submit_v2('VACUUM my_table') AS h \gset;
 SELECT pg_background_detach_v2(:'h.pid', :'h.cookie');
 ```
+
+---
+
+## Testing
+
+### Local Testing (Native)
+
+If you have PostgreSQL development files installed locally:
+
+```bash
+# Build and install
+make clean && make
+sudo make install
+
+# Run regression tests
+make installcheck
+
+# Clean test artifacts
+make installcheckclean
+```
+
+### Docker-Based Testing (Recommended)
+
+Docker-based testing requires no local PostgreSQL installation:
+
+```bash
+# Test with PostgreSQL 17 (default)
+./test-local.sh
+
+# Test with specific PostgreSQL version
+./test-local.sh 14
+./test-local.sh 16
+
+# Test all supported versions (14-18)
+./test-local.sh all
+```
+
+### Relocatable Extension Testing
+
+Verify the extension works correctly when installed in a custom schema:
+
+```bash
+# Run comprehensive relocatable tests
+./test-relocatable.sh 17
+```
+
+### Upgrade Path Testing
+
+Validate extension upgrades work correctly:
+
+```bash
+# Test 1.8 → 1.9 upgrade path
+./test-upgrade.sh 17
+```
+
+### CI Pipeline
+
+The project uses GitHub Actions for continuous integration:
+
+| Job | Description |
+|-----|-------------|
+| **test** | Matrix: PG 14-18 × ubuntu-22.04/24.04 regression tests |
+| **relocatable-test** | Validates custom schema installation (PG 17) |
+| **upgrade-test** | Validates 1.8 → 1.9 upgrade path |
+| **lint** | cppcheck and clang-format checks |
+| **security** | CodeQL security analysis |
+
+All tests must pass before merging to main branches.
 
 ---
 
