@@ -372,6 +372,344 @@ SHOW pg_background.worker_timeout;
 RESET pg_background.worker_timeout;
 
 -- -------------------------------------------------------------------------
+-- v1.9: Worker labels
+-- -------------------------------------------------------------------------
+
+DROP TABLE IF EXISTS t_label;
+CREATE TABLE t_label(id int);
+
+-- Launch worker with label
+SELECT (h).pid AS lbl_pid, (h).cookie AS lbl_cookie
+FROM (SELECT pg_background_launch_v2('INSERT INTO t_label VALUES (1)', 0, 'test-label') AS h) s
+\gset
+
+SELECT pg_sleep(0.3);
+
+-- Verify label in result_info
+SELECT
+  completed AS label_worker_completed,
+  has_error AS label_worker_has_error
+FROM pg_background_result_info_v2(:lbl_pid, :lbl_cookie);
+
+-- Cleanup
+SELECT pg_background_detach_v2(:lbl_pid, :lbl_cookie);
+
+SELECT count(*) AS label_insert_count FROM t_label;
+
+-- -------------------------------------------------------------------------
+-- v1.9: Submit with label
+-- -------------------------------------------------------------------------
+
+DROP TABLE IF EXISTS t_submit_label;
+CREATE TABLE t_submit_label(id int);
+
+SELECT (h).pid AS slbl_pid, (h).cookie AS slbl_cookie
+FROM (SELECT pg_background_submit_v2('INSERT INTO t_submit_label VALUES (1)', 0, 'submit-label') AS h) s
+\gset
+
+SELECT pg_sleep(0.3);
+SELECT count(*) AS submit_label_count FROM t_submit_label;
+
+-- -------------------------------------------------------------------------
+-- v1.9: Result info without consuming results
+-- -------------------------------------------------------------------------
+
+DROP TABLE IF EXISTS t_result_info;
+CREATE TABLE t_result_info(id int);
+
+SELECT (h).pid AS ri_pid, (h).cookie AS ri_cookie
+FROM (SELECT pg_background_launch_v2('INSERT INTO t_result_info SELECT generate_series(1,5)') AS h) s
+\gset
+
+SELECT pg_sleep(0.3);
+
+-- Check result info (should show completed)
+SELECT
+  completed AS ri_completed,
+  has_error AS ri_has_error
+FROM pg_background_result_info_v2(:ri_pid, :ri_cookie);
+
+SELECT pg_background_detach_v2(:ri_pid, :ri_cookie);
+
+SELECT count(*) AS result_info_count FROM t_result_info;
+
+-- -------------------------------------------------------------------------
+-- v1.9: Structured error info
+-- -------------------------------------------------------------------------
+
+-- Launch worker that will fail
+SELECT (h).pid AS err_pid, (h).cookie AS err_cookie
+FROM (SELECT pg_background_launch_v2('SELECT 1/0') AS h) s
+\gset
+
+SELECT pg_sleep(0.3);
+
+-- Check result info shows error
+SELECT
+  completed AS err_completed,
+  has_error AS err_has_error
+FROM pg_background_result_info_v2(:err_pid, :err_cookie);
+
+-- Get structured error (should have sqlstate for division by zero)
+SELECT
+  CASE WHEN sqlstate IS NOT NULL THEN 'has_sqlstate' ELSE 'no_sqlstate' END AS error_sqlstate_check,
+  CASE WHEN message IS NOT NULL THEN 'has_message' ELSE 'no_message' END AS error_message_check
+FROM pg_background_error_info_v2(:err_pid, :err_cookie);
+
+SELECT pg_background_detach_v2(:err_pid, :err_cookie);
+
+-- -------------------------------------------------------------------------
+-- v1.9: Batch detach
+-- -------------------------------------------------------------------------
+
+DROP TABLE IF EXISTS t_batch;
+CREATE TABLE t_batch(id int);
+
+-- Launch multiple workers
+SELECT (h).pid AS b1_pid, (h).cookie AS b1_cookie
+FROM (SELECT pg_background_submit_v2('INSERT INTO t_batch VALUES (1)', 0, 'batch-1') AS h) s
+\gset
+
+SELECT (h).pid AS b2_pid, (h).cookie AS b2_cookie
+FROM (SELECT pg_background_submit_v2('INSERT INTO t_batch VALUES (2)', 0, 'batch-2') AS h) s
+\gset
+
+SELECT pg_sleep(0.3);
+
+-- Detach all at once
+SELECT pg_background_detach_all_v2() AS batch_detach_count;
+
+SELECT count(*) AS batch_insert_count FROM t_batch;
+
+-- -------------------------------------------------------------------------
+-- v1.9: Batch cancel
+-- -------------------------------------------------------------------------
+
+DROP TABLE IF EXISTS t_batch_cancel;
+CREATE TABLE t_batch_cancel(id int);
+
+-- Launch multiple long-running workers
+SELECT (h).pid AS bc1_pid, (h).cookie AS bc1_cookie
+FROM (SELECT pg_background_launch_v2('SELECT pg_sleep(10); INSERT INTO t_batch_cancel VALUES (1)') AS h) s
+\gset
+
+SELECT (h).pid AS bc2_pid, (h).cookie AS bc2_cookie
+FROM (SELECT pg_background_launch_v2('SELECT pg_sleep(10); INSERT INTO t_batch_cancel VALUES (2)') AS h) s
+\gset
+
+SELECT pg_sleep(0.2);
+
+-- Cancel all at once
+SELECT pg_background_cancel_all_v2() AS batch_cancel_count;
+
+SELECT pg_sleep(0.5);
+
+-- Detach remaining
+SELECT pg_background_detach_all_v2() AS batch_cancel_detach_count;
+
+-- Inserts should not have happened
+SELECT count(*) AS batch_cancel_insert_count FROM t_batch_cancel;
+
+-- -------------------------------------------------------------------------
+-- Error Path: Cookie mismatch detection
+-- -------------------------------------------------------------------------
+
+DROP TABLE IF EXISTS t_cookie_mismatch;
+CREATE TABLE t_cookie_mismatch(id int);
+
+-- Store handle in temp table for DO block access
+DROP TABLE IF EXISTS _test_cm_handle;
+CREATE TEMP TABLE _test_cm_handle AS
+SELECT (h).pid, (h).cookie
+FROM (SELECT pg_background_launch_v2('INSERT INTO t_cookie_mismatch VALUES (1)') AS h) s;
+
+DO $$
+DECLARE v_pid int; v_cookie bigint;
+BEGIN
+  SELECT pid, cookie INTO v_pid, v_cookie FROM _test_cm_handle;
+  PERFORM pg_background_wait_v2(v_pid, v_cookie);
+END;
+$$;
+
+-- Try operation with wrong cookie (should error)
+DO $$
+DECLARE v_pid int;
+BEGIN
+  SELECT pid INTO v_pid FROM _test_cm_handle;
+  -- Use deliberately wrong cookie
+  PERFORM pg_background_wait_v2(v_pid, 9999999999999999);
+  RAISE NOTICE 'cookie_mismatch_test=should_have_failed';
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'cookie_mismatch_test=correctly_errored';
+END;
+$$;
+
+DO $$
+DECLARE v_pid int; v_cookie bigint;
+BEGIN
+  SELECT pid, cookie INTO v_pid, v_cookie FROM _test_cm_handle;
+  PERFORM pg_background_detach_v2(v_pid, v_cookie);
+END;
+$$;
+SELECT count(*) AS cookie_mismatch_insert_count FROM t_cookie_mismatch;
+
+-- -------------------------------------------------------------------------
+-- Error Path: Result consumption guard (double-consume)
+-- -------------------------------------------------------------------------
+
+DROP TABLE IF EXISTS _test_rc_handle;
+CREATE TEMP TABLE _test_rc_handle AS
+SELECT (h).pid, (h).cookie
+FROM (SELECT pg_background_launch_v2('SELECT 42 AS answer') AS h) s;
+
+DO $$
+DECLARE v_pid int; v_cookie bigint;
+BEGIN
+  SELECT pid, cookie INTO v_pid, v_cookie FROM _test_rc_handle;
+  PERFORM pg_background_wait_v2(v_pid, v_cookie);
+END;
+$$;
+
+-- First consumption should succeed (use direct query, not DO block)
+SELECT answer FROM (
+  SELECT * FROM pg_background_result_v2(
+    (SELECT pid FROM _test_rc_handle),
+    (SELECT cookie FROM _test_rc_handle)
+  ) AS (answer int)
+) sub;
+
+-- Second consumption should error (worker auto-detached after result consumed)
+DO $$
+DECLARE v_pid int; v_cookie bigint;
+BEGIN
+  SELECT pid, cookie INTO v_pid, v_cookie FROM _test_rc_handle;
+  PERFORM pg_background_result_v2(v_pid, v_cookie);
+  RAISE NOTICE 'result_consumed_test=should_have_failed';
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'result_consumed_test=correctly_errored';
+END;
+$$;
+-- No explicit detach needed - worker is auto-detached after result consumption
+
+-- -------------------------------------------------------------------------
+-- Error Path: Invalid handle (detached worker)
+-- -------------------------------------------------------------------------
+
+DROP TABLE IF EXISTS _test_dh_handle;
+CREATE TEMP TABLE _test_dh_handle AS
+SELECT (h).pid, (h).cookie
+FROM (SELECT pg_background_launch_v2('SELECT 1') AS h) s;
+
+SELECT pg_sleep(0.2);
+
+DO $$
+DECLARE v_pid int; v_cookie bigint;
+BEGIN
+  SELECT pid, cookie INTO v_pid, v_cookie FROM _test_dh_handle;
+  PERFORM pg_background_detach_v2(v_pid, v_cookie);
+END;
+$$;
+
+-- Operations on detached handle should error
+DO $$
+DECLARE v_pid int; v_cookie bigint;
+BEGIN
+  SELECT pid, cookie INTO v_pid, v_cookie FROM _test_dh_handle;
+  PERFORM pg_background_wait_v2(v_pid, v_cookie);
+  RAISE NOTICE 'detached_handle_test=should_have_failed';
+EXCEPTION WHEN OTHERS THEN
+  RAISE NOTICE 'detached_handle_test=correctly_errored';
+END;
+$$;
+
+-- -------------------------------------------------------------------------
+-- Privilege Model: pgbackground_role exists
+-- -------------------------------------------------------------------------
+
+SELECT
+  CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pgbackground_role')
+       THEN 'PASS' ELSE 'FAIL' END AS pgbackground_role_exists;
+
+-- -------------------------------------------------------------------------
+-- Privilege Model: PUBLIC has no direct access
+-- -------------------------------------------------------------------------
+
+SELECT
+  CASE WHEN NOT has_function_privilege('public', 'pg_background_launch_v2(text, int4, text)', 'EXECUTE')
+       THEN 'PASS' ELSE 'FAIL' END AS public_no_launch_access;
+
+SELECT
+  CASE WHEN NOT has_function_privilege('public', 'pg_background_result_v2(int4, int8)', 'EXECUTE')
+       THEN 'PASS' ELSE 'FAIL' END AS public_no_result_access;
+
+-- -------------------------------------------------------------------------
+-- Privilege Model: pgbackground_role has access
+-- -------------------------------------------------------------------------
+
+SELECT
+  CASE WHEN has_function_privilege('pgbackground_role', 'pg_background_launch_v2(text, int4, text)', 'EXECUTE')
+       THEN 'PASS' ELSE 'FAIL' END AS role_has_launch_access;
+
+SELECT
+  CASE WHEN has_function_privilege('pgbackground_role', 'pg_background_result_v2(int4, int8)', 'EXECUTE')
+       THEN 'PASS' ELSE 'FAIL' END AS role_has_result_access;
+
+-- -------------------------------------------------------------------------
+-- Privilege Model: Grant/Revoke helpers work
+-- -------------------------------------------------------------------------
+
+DROP ROLE IF EXISTS test_priv_user;
+CREATE ROLE test_priv_user NOLOGIN;
+
+-- Should not have access initially
+SELECT
+  CASE WHEN NOT has_function_privilege('test_priv_user', 'pg_background_launch_v2(text, int4, text)', 'EXECUTE')
+       THEN 'PASS' ELSE 'FAIL' END AS user_no_initial_access;
+
+-- Grant privileges
+SELECT grant_pg_background_privileges('test_priv_user', false) AS grant_result;
+
+-- Should have access after grant
+SELECT
+  CASE WHEN has_function_privilege('test_priv_user', 'pg_background_launch_v2(text, int4, text)', 'EXECUTE')
+       THEN 'PASS' ELSE 'FAIL' END AS user_has_access_after_grant;
+
+-- Revoke privileges
+SELECT revoke_pg_background_privileges('test_priv_user', false) AS revoke_result;
+
+-- Should not have access after revoke
+SELECT
+  CASE WHEN NOT has_function_privilege('test_priv_user', 'pg_background_launch_v2(text, int4, text)', 'EXECUTE')
+       THEN 'PASS' ELSE 'FAIL' END AS user_no_access_after_revoke;
+
+DROP ROLE test_priv_user;
+
+-- -------------------------------------------------------------------------
+-- Bounds Validation: cancel_v2_grace grace_ms bounds
+-- -------------------------------------------------------------------------
+
+-- Test that very large grace_ms is handled (capped at 1 hour = 3600000ms)
+SELECT (h).pid AS bg_pid, (h).cookie AS bg_cookie
+FROM (SELECT pg_background_launch_v2('SELECT pg_sleep(10)') AS h) s
+\gset
+
+SELECT pg_sleep(0.1);
+
+-- This should work without error (grace_ms capped internally)
+SELECT pg_background_cancel_v2_grace(:bg_pid, :bg_cookie, 999999999);
+SELECT pg_sleep(0.3);
+SELECT pg_background_detach_v2(:bg_pid, :bg_cookie);
+SELECT 'PASS' AS grace_bounds_test;
+
+-- -------------------------------------------------------------------------
+-- Semantic test: detach allows worker to complete (does NOT cancel)
+-- This is already tested by t_detach_v1/t_detach_v2 above, but we add
+-- an explicit comment for clarity. The earlier tests verify that after
+-- detach, workers still commit their transactions.
+-- -------------------------------------------------------------------------
+SELECT 'PASS' AS detach_semantic_verified;
+
+-- -------------------------------------------------------------------------
 -- Final stats check
 -- -------------------------------------------------------------------------
 

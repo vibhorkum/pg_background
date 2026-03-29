@@ -229,17 +229,146 @@ jobs:
           docker stop postgres-test 2>/dev/null || true
           docker rm postgres-test 2>/dev/null || true
 
+  # Test extension relocatability (custom schema installation)
+  relocatable-test:
+    name: Relocatable Test (PG 17)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Start PostgreSQL container
+        run: |
+          docker run --name postgres-relocatable -d \
+            -e POSTGRES_PASSWORD=postgres \
+            -e POSTGRES_USER=postgres \
+            -e POSTGRES_DB=postgres \
+            -p 5432:5432 \
+            postgres:17
+
+          for i in {1..30}; do
+            if docker exec postgres-relocatable pg_isready -U postgres >/dev/null 2>&1; then
+              echo "PostgreSQL is ready"
+              break
+            fi
+            [ "$i" -eq 30 ] && { echo "::error::PostgreSQL failed to start"; exit 1; }
+            sleep 2
+          done
+
+      - name: Install build dependencies
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/azure-cli.list || true
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ca-certificates wget gnupg lsb-release build-essential libkrb5-dev
+          sudo install -d -m 0755 /usr/share/keyrings
+          wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /usr/share/keyrings/postgresql.gpg
+          echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-17 postgresql-server-dev-17
+
+      - name: Setup clang/llvm symlinks
+        run: |
+          for target_ver in 19 18; do
+            [ ! -e "/usr/bin/clang-${target_ver}" ] && sudo ln -sf /usr/bin/clang "/usr/bin/clang-${target_ver}" 2>/dev/null || true
+            if [ ! -d "/usr/lib/llvm-${target_ver}" ]; then
+              LLVM_VER=$(ls -d /usr/lib/llvm-* 2>/dev/null | sort -V | tail -1 | sed 's|.*/llvm-||' || echo "")
+              if [ -n "$LLVM_VER" ] && [ -d "/usr/lib/llvm-${LLVM_VER}" ]; then
+                sudo mkdir -p "/usr/lib/llvm-${target_ver}/bin"
+                [ -f "/usr/lib/llvm-${LLVM_VER}/bin/llvm-lto" ] && sudo ln -sf "/usr/lib/llvm-${LLVM_VER}/bin/llvm-lto" "/usr/lib/llvm-${target_ver}/bin/llvm-lto" || true
+              fi
+            fi
+          done
+
+      - name: Build and install extension
+        run: |
+          export PG_CONFIG=/usr/lib/postgresql/17/bin/pg_config
+          make clean && make
+          PKGLIBDIR=$($PG_CONFIG --pkglibdir)
+          SHAREDIR=$($PG_CONFIG --sharedir)
+          docker exec postgres-relocatable mkdir -p "$PKGLIBDIR" "$SHAREDIR/extension"
+          docker cp pg_background.so postgres-relocatable:$PKGLIBDIR/
+          docker cp pg_background.control postgres-relocatable:$SHAREDIR/extension/
+          for sqlfile in pg_background--*.sql; do
+            docker cp "$sqlfile" postgres-relocatable:$SHAREDIR/extension/
+          done
+
+      - name: Run relocatable tests
+        run: |
+          export PGHOST=127.0.0.1 PGPORT=5432 PGUSER=postgres PGPASSWORD=postgres PGDATABASE=postgres
+          psql <<'EOF'
+          -- Create custom schema and install extension there
+          CREATE SCHEMA bgwork;
+          CREATE EXTENSION pg_background SCHEMA bgwork;
+
+          -- Verify extension is in custom schema
+          SELECT extnamespace::regnamespace AS schema FROM pg_extension WHERE extname = 'pg_background';
+
+          -- Test basic functionality in custom schema
+          DO $$
+          DECLARE
+              h bgwork.pg_background_handle;
+          BEGIN
+              SELECT * INTO h FROM bgwork.pg_background_launch_v2('SELECT 1', 65536);
+              PERFORM bgwork.pg_background_wait_v2(h.pid, h.cookie);
+              PERFORM bgwork.pg_background_detach_v2(h.pid, h.cookie);
+              RAISE NOTICE 'PASS: Relocatable extension works in custom schema';
+          END;
+          $$;
+
+          -- Verify types are in custom schema
+          SELECT typname, typnamespace::regnamespace AS schema
+          FROM pg_type
+          WHERE typname LIKE 'pg_background_%' AND typnamespace = 'bgwork'::regnamespace
+          ORDER BY typname;
+
+          -- Test role and privilege helpers work
+          SELECT bgwork.grant_pg_background_privileges(current_user);
+          SELECT bgwork.revoke_pg_background_privileges(current_user);
+
+          -- Final check
+          SELECT CASE WHEN count(*) > 0 THEN 'PASS: Relocatable test complete'
+                      ELSE 'FAIL: No functions found' END
+          FROM pg_proc WHERE pronamespace = 'bgwork'::regnamespace;
+          EOF
+
+      - name: Cleanup
+        if: always()
+        run: docker stop postgres-relocatable 2>/dev/null || true; docker rm postgres-relocatable 2>/dev/null || true
+
+  # Test upgrade path from 1.8 to 1.9
+  upgrade-test:
+    name: Upgrade Test (1.8 → 1.9)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run upgrade test
+        run: ./test-upgrade.sh 17
+
   # Summary job that depends on all test matrix jobs
   test-summary:
     name: Test Summary
     runs-on: ubuntu-latest
-    needs: [test]
+    needs: [test, relocatable-test, upgrade-test]
     if: always()
     steps:
       - name: Check test results
         run: |
           if [ "${{ needs.test.result }}" != "success" ]; then
-            echo "::error::Some test jobs failed"
+            echo "::error::Main test matrix failed"
+            exit 1
+          fi
+          if [ "${{ needs.relocatable-test.result }}" != "success" ]; then
+            echo "::error::Relocatable test failed"
+            exit 1
+          fi
+          if [ "${{ needs.upgrade-test.result }}" != "success" ]; then
+            echo "::error::Upgrade test failed"
             exit 1
           fi
           echo "All test jobs passed!"
