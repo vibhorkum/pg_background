@@ -1871,7 +1871,7 @@ typedef struct pg_background_list_state
  * was cleaned up between snapshot and access.
  *
  * Columns: pid, cookie, launched_at, user_id, queue_size, state,
- *          sql_preview, last_error, consumed
+ *          sql_preview, last_error, consumed, label
  */
 Datum
 pg_background_list_v2(PG_FUNCTION_ARGS)
@@ -3170,7 +3170,7 @@ pg_background_error_info_v2(PG_FUNCTION_ARGS)
  * pg_background_detach_all_v2
  *     Detach all tracked workers in the current session.
  *
- * Returns: int4 - number of workers detached
+ * Returns: int4 - number of workers actually detached
  */
 Datum
 pg_background_detach_all_v2(PG_FUNCTION_ARGS)
@@ -3179,6 +3179,7 @@ pg_background_detach_all_v2(PG_FUNCTION_ARGS)
     pg_background_worker_info *info;
     pid_t      *pids_to_detach;
     int         count = 0;
+    int         detached = 0;
     int         capacity;
     int         i;
 
@@ -3219,16 +3220,21 @@ pg_background_detach_all_v2(PG_FUNCTION_ARGS)
             }
             if (info->seg)
                 dsm_detach(info->seg);
+            detached++;
         }
     }
 
     pfree(pids_to_detach);
-    PG_RETURN_INT32(count);
+    PG_RETURN_INT32(detached);
 }
 
 /*
  * pg_background_cancel_all_v2
- *     Cancel all running workers in the current session.
+ *     Cancel all tracked workers in the current session.
+ *
+ * Consistent with cancel_v2(): sets the cancel flag in shared memory for all
+ * workers (including not-yet-started), so they will see it when they start.
+ * Signals are only sent to workers that have actually started.
  *
  * Returns: int4 - number of workers for which cancel was requested
  */
@@ -3262,16 +3268,16 @@ pg_background_cancel_all_v2(PG_FUNCTION_ARGS)
         GetUserIdAndSecContext(&cur, &sec);
         if (has_privs_of_role(cur, info->current_user_id))
         {
-            /* Only cancel if running */
-            if (info->handle != NULL)
+            /*
+             * Include all non-canceled workers, regardless of started state.
+             * This matches cancel_v2() semantics: set the cancel flag for
+             * not-yet-started workers (they'll see it on startup), and send
+             * signals only to started workers (handled by pgbg_send_cancel_signals).
+             */
+            if (!info->canceled)
             {
-                pid_t wpid = 0;
-                BgwHandleStatus hs = GetBackgroundWorkerPid(info->handle, &wpid);
-                if (hs == BGWH_STARTED && !info->canceled)
-                {
-                    if (count < capacity)
-                        pids_to_cancel[count++] = info->pid;
-                }
+                if (count < capacity)
+                    pids_to_cancel[count++] = info->pid;
             }
         }
     }

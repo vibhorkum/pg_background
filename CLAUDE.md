@@ -328,6 +328,12 @@ Do not blur the distinction between v1 and v2 semantics.
 - Avoid double-counting: if cleanup increments a stat, don't also increment in the triggering function
 - Keep cancel/complete/fail paths consistent in their stats accounting
 
+### Batch helper function semantics
+- Batch functions (e.g., `cancel_all_v2`, `detach_all_v2`) should stay semantically aligned with their single-operation equivalents
+- Return values should reflect actual completed operations, not snapshot counts (workers may be cleaned up between snapshot and processing)
+- For cancel operations: set cancel flag for all workers (including not-yet-started), but only send signals to started workers
+- Keep internal comments aligned with actual column lists when output shape changes
+
 ### Shell script patterns (test-upgrade.sh, test-local.sh)
 - With `set -e`, do not rely on `$?` checks after commands that would already abort
 - Use `if ! command; then` instead of `command; if [ $? -ne 0 ]`

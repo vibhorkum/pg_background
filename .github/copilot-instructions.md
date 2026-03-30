@@ -306,6 +306,12 @@ When generating code review comments, verify these before suggesting changes:
 - [ ] Check for double-counting if both triggering function and cleanup increment stats
 - [ ] Compare similar functions (cancel_v2 vs cancel_all_v2) for accounting consistency
 
+### Batch Helper Function Semantics
+- [ ] Batch helpers (e.g., `cancel_all_v2`, `detach_all_v2`) should match semantics of single-operation equivalents
+- [ ] Return values should reflect actual completed operations, not snapshot counts
+- [ ] For cancel: set cancel flag for all workers (including not-yet-started), send signals only to started workers
+- [ ] Keep function header comments aligned with actual output columns after API changes
+
 ### Shell Script Semantics
 - [ ] With `set -e`, `$?` checks after commands are dead code for failure cases
 - [ ] psql returns 0 even for SQL errors unless `-v ON_ERROR_STOP=1` is used
