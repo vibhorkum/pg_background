@@ -3222,15 +3222,15 @@ pg_background_detach_all_v2(PG_FUNCTION_ARGS)
     for (i = 0; i < count; i++)
     {
         info = find_worker_info(pids_to_detach[i]);
-        if (info != NULL)
+        if (info != NULL && info->seg != NULL)
         {
-            if (info->seg && info->mapping_pinned)
+            if (info->mapping_pinned)
             {
                 dsm_unpin_mapping(info->seg);
                 info->mapping_pinned = false;
             }
-            if (info->seg)
-                dsm_detach(info->seg);
+            dsm_detach(info->seg);
+            info->seg = NULL;  /* Prevent double-detach, match detach_v2() */
             detached++;
         }
     }
