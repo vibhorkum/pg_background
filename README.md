@@ -445,7 +445,7 @@ SELECT pg_background_detach(:pid);
 
 **Handle Type**:
 ```sql
-CREATE TYPE public.pg_background_handle AS (
+CREATE TYPE pg_background_handle AS (
   pid    int4,   -- Process ID
   cookie int8    -- Unique identifier (prevents PID reuse)
 );
@@ -453,7 +453,7 @@ CREATE TYPE public.pg_background_handle AS (
 
 **Statistics Type** (v1.8+):
 ```sql
-CREATE TYPE public.pg_background_stats AS (
+CREATE TYPE pg_background_stats AS (
   workers_launched   int8,    -- Total workers launched this session
   workers_completed  int8,    -- Workers completed successfully
   workers_failed     int8,    -- Workers that failed with error
@@ -465,7 +465,7 @@ CREATE TYPE public.pg_background_stats AS (
 
 **Progress Type** (v1.8+):
 ```sql
-CREATE TYPE public.pg_background_progress AS (
+CREATE TYPE pg_background_progress AS (
   progress_pct  int4,   -- Progress percentage (0-100)
   progress_msg  text    -- Brief status message
 );
@@ -473,7 +473,7 @@ CREATE TYPE public.pg_background_progress AS (
 
 **Result Info Type** (v1.9+):
 ```sql
-CREATE TYPE public.pg_background_result_info AS (
+CREATE TYPE pg_background_result_info AS (
   row_count    int8,    -- Number of rows returned/affected
   command_tag  text,    -- Command tag (SELECT, INSERT, etc.)
   completed    bool,    -- True if worker completed
@@ -483,7 +483,7 @@ CREATE TYPE public.pg_background_result_info AS (
 
 **Error Type** (v1.9+):
 ```sql
-CREATE TYPE public.pg_background_error AS (
+CREATE TYPE pg_background_error AS (
   sqlstate  text,   -- SQLSTATE error code (e.g., '23505')
   message   text,   -- Primary error message
   detail    text,   -- Detailed error info (if any)
@@ -784,7 +784,7 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 -- list_v2() exposes SQL previews (first 120 chars) and error messages
 -- For sensitive deployments, create restricted view:
 
-CREATE VIEW public.safe_worker_list AS
+CREATE VIEW safe_worker_list AS
 SELECT pid, cookie, state, consumed, launched_at
 FROM pg_background_list_v2() AS (
   pid int4, cookie int8, launched_at timestamptz, user_id oid,
@@ -793,7 +793,7 @@ FROM pg_background_list_v2() AS (
 WHERE user_id = current_user::regrole::oid;
 -- Omit sql_preview and last_error
 
-GRANT SELECT ON public.safe_worker_list TO app_users;
+GRANT SELECT ON safe_worker_list TO app_users;
 ```
 
 ### Security Best Practices

@@ -88,7 +88,7 @@ main() {
     done
 
     # Show PostgreSQL version
-    docker exec "$CONTAINER_NAME" psql -U postgres -c "SELECT version();" 2>/dev/null | head -3
+    docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres -t -c "SELECT version();" 2>/dev/null
 
     # Install build dependencies
     log_step "Installing build dependencies..."
