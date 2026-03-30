@@ -331,7 +331,9 @@ Do not blur the distinction between v1 and v2 semantics.
 ### Shell script patterns (test-upgrade.sh, test-local.sh)
 - With `set -e`, do not rely on `$?` checks after commands that would already abort
 - Use `if ! command; then` instead of `command; if [ $? -ne 0 ]`
-- Test scripts should rely on output string matching for SQL success, not exit codes (psql returns 0 even for SQL errors)
+- Use `psql -X -v ON_ERROR_STOP=1` in automated test scripts to ensure SQL errors propagate as non-zero exit codes
+- Ensure cleanup runs on all exit paths via `trap 'cleanup' EXIT` rather than manual cleanup calls before each exit
+- Test scripts should rely on output string matching for SQL success when ON_ERROR_STOP is not used (psql returns 0 even for SQL errors)
 
 ---
 

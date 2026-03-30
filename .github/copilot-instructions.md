@@ -308,5 +308,7 @@ When generating code review comments, verify these before suggesting changes:
 
 ### Shell Script Semantics
 - [ ] With `set -e`, `$?` checks after commands are dead code for failure cases
-- [ ] psql returns 0 even for SQL errors; test scripts rely on output matching
+- [ ] psql returns 0 even for SQL errors unless `-v ON_ERROR_STOP=1` is used
 - [ ] Suggest `if ! command; then` instead of `command; if [ $? -ne 0 ]`
+- [ ] Automated test scripts should use `psql -X -v ON_ERROR_STOP=1` to make SQL errors detectable
+- [ ] Cleanup should be guaranteed via `trap 'cleanup' EXIT` rather than manual calls before each exit

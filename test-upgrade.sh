@@ -46,6 +46,9 @@ cleanup() {
 }
 
 main() {
+    # Ensure cleanup runs on all exit paths
+    trap 'cleanup' EXIT
+
     echo ""
     echo "========================================================================"
     echo "pg_background UPGRADE PATH TEST (1.8 -> 1.9)"
@@ -59,7 +62,7 @@ main() {
         exit 1
     fi
 
-    # Cleanup any existing container
+    # Cleanup any existing container (trap handles final cleanup)
     cleanup 2>/dev/null || true
 
     # Start PostgreSQL container
@@ -79,7 +82,6 @@ main() {
         fi
         if [ "$i" -eq 30 ]; then
             log_error "PostgreSQL failed to start"
-            cleanup
             exit 1
         fi
         sleep 2
@@ -128,29 +130,28 @@ main() {
 
     # Test 1: Install version 1.8
     log_test "Step 1: Installing pg_background version 1.8..."
-    if docker exec "$CONTAINER_NAME" psql -U postgres -c "CREATE EXTENSION pg_background VERSION '1.8';" 2>&1; then
+    if docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres -c "CREATE EXTENSION pg_background VERSION '1.8';" 2>&1; then
         log_info "Version 1.8 installed successfully"
     else
         log_error "Failed to install version 1.8"
-        cleanup
         exit 1
     fi
 
     # Verify 1.8 is installed
-    local INSTALLED_VERSION=$(docker exec "$CONTAINER_NAME" psql -U postgres -tAc \
+    local INSTALLED_VERSION
+    INSTALLED_VERSION=$(docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres -tAc \
         "SELECT extversion FROM pg_extension WHERE extname = 'pg_background';")
 
     if [ "$INSTALLED_VERSION" = "1.8" ]; then
         log_info "Confirmed version: $INSTALLED_VERSION"
     else
         log_error "Expected version 1.8, got: $INSTALLED_VERSION"
-        cleanup
         exit 1
     fi
 
     # Test 2: Verify 1.8 functionality
     log_test "Step 2: Verifying 1.8 functionality..."
-    docker exec "$CONTAINER_NAME" psql -U postgres <<'EOF'
+    if ! docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres <<'EOF'
 -- Create test table
 DROP TABLE IF EXISTS t_upgrade_test;
 CREATE TABLE t_upgrade_test(id int, version text);
@@ -171,8 +172,7 @@ SELECT CASE WHEN count(*) = 1 THEN 'PASS: v1.8 functionality works'
             ELSE 'FAIL: v1.8 functionality broken' END AS test_1_8
 FROM t_upgrade_test WHERE version = 'v1.8';
 EOF
-
-    if [ $? -ne 0 ]; then
+    then
         log_error "Version 1.8 functionality test failed"
         TEST_RESULT=1
     else
@@ -181,29 +181,27 @@ EOF
 
     # Test 3: Upgrade to 1.9
     log_test "Step 3: Upgrading from 1.8 to 1.9..."
-    if docker exec "$CONTAINER_NAME" psql -U postgres -c "ALTER EXTENSION pg_background UPDATE TO '1.9';" 2>&1; then
+    if docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres -c "ALTER EXTENSION pg_background UPDATE TO '1.9';" 2>&1; then
         log_info "Upgrade to 1.9 completed"
     else
         log_error "Upgrade to 1.9 failed"
-        cleanup
         exit 1
     fi
 
     # Verify 1.9 is installed
-    INSTALLED_VERSION=$(docker exec "$CONTAINER_NAME" psql -U postgres -tAc \
+    INSTALLED_VERSION=$(docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres -tAc \
         "SELECT extversion FROM pg_extension WHERE extname = 'pg_background';")
 
     if [ "$INSTALLED_VERSION" = "1.9" ]; then
         log_info "Confirmed version after upgrade: $INSTALLED_VERSION"
     else
         log_error "Expected version 1.9 after upgrade, got: $INSTALLED_VERSION"
-        cleanup
         exit 1
     fi
 
     # Test 4: Verify 1.9 new features work
     log_test "Step 4: Verifying 1.9 new features..."
-    docker exec "$CONTAINER_NAME" psql -U postgres <<'EOF'
+    if ! docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres <<'EOF'
 -- Test launch_v2 with label parameter (1.9 feature)
 DO $$
 DECLARE
@@ -290,8 +288,7 @@ SELECT CASE WHEN count(*) = 2 THEN 'PASS: All data preserved through upgrade'
             ELSE 'FAIL: Data lost during upgrade' END AS upgrade_data_check
 FROM t_upgrade_test;
 EOF
-
-    if [ $? -ne 0 ]; then
+    then
         log_error "Version 1.9 feature tests failed"
         TEST_RESULT=1
     else
@@ -300,7 +297,7 @@ EOF
 
     # Test 5: Verify old functionality still works after upgrade
     log_test "Step 5: Verifying old functionality after upgrade..."
-    docker exec "$CONTAINER_NAME" psql -U postgres <<'EOF'
+    if ! docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres <<'EOF'
 -- stats_v2 should still work (1.8 feature)
 SELECT
     CASE WHEN workers_launched > 0 THEN 'PASS: stats_v2 works after upgrade'
@@ -322,8 +319,7 @@ BEGIN
 END;
 $$;
 EOF
-
-    if [ $? -ne 0 ]; then
+    then
         log_error "Old functionality verification failed"
         TEST_RESULT=1
     else
@@ -352,8 +348,7 @@ EOF
         echo "========================================================================"
     fi
 
-    # Cleanup
-    cleanup
+    # Exit with test result (cleanup runs via trap)
     exit $TEST_RESULT
 }
 
