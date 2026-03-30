@@ -62,19 +62,39 @@ CREATE TYPE pg_background_handle AS (
 -- v2 API
 -- ----------------------------------------------------------------------
 
+-- 2-arg overload (backward compatible with 1.8, STRICT for NULL safety)
 CREATE FUNCTION pg_background_launch_v2(
     sql pg_catalog.text,
-    queue_size pg_catalog.int4 DEFAULT 0,
-    label pg_catalog.text DEFAULT NULL
+    queue_size pg_catalog.int4 DEFAULT 0
+)
+RETURNS pg_background_handle
+AS 'MODULE_PATHNAME', 'pg_background_launch_v2'
+LANGUAGE C STRICT;
+
+-- 3-arg overload with label parameter (v1.9+, not STRICT to allow NULL label)
+CREATE FUNCTION pg_background_launch_v2(
+    sql pg_catalog.text,
+    queue_size pg_catalog.int4,
+    label pg_catalog.text
 )
 RETURNS pg_background_handle
 AS 'MODULE_PATHNAME', 'pg_background_launch_v2'
 LANGUAGE C;
 
+-- 2-arg overload (backward compatible with 1.8, STRICT for NULL safety)
 CREATE FUNCTION pg_background_submit_v2(
     sql pg_catalog.text,
-    queue_size pg_catalog.int4 DEFAULT 0,
-    label pg_catalog.text DEFAULT NULL
+    queue_size pg_catalog.int4 DEFAULT 0
+)
+RETURNS pg_background_handle
+AS 'MODULE_PATHNAME', 'pg_background_submit_v2'
+LANGUAGE C STRICT;
+
+-- 3-arg overload with label parameter (v1.9+, not STRICT to allow NULL label)
+CREATE FUNCTION pg_background_submit_v2(
+    sql pg_catalog.text,
+    queue_size pg_catalog.int4,
+    label pg_catalog.text
 )
 RETURNS pg_background_handle
 AS 'MODULE_PATHNAME', 'pg_background_submit_v2'
@@ -331,7 +351,14 @@ BEGIN
     _sql := format('GRANT USAGE ON TYPE %I.pg_background_error TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    -- v2 (updated with label parameter in 1.9)
+    -- v2 (2-arg overloads for backward compatibility)
+    _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_launch_v2(pg_catalog.text, pg_catalog.int4) TO %I', _schema, role_name);
+    EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
+
+    _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_submit_v2(pg_catalog.text, pg_catalog.int4) TO %I', _schema, role_name);
+    EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
+
+    -- v2 (3-arg overloads with label parameter, v1.9+)
     _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_launch_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.text) TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
@@ -457,10 +484,18 @@ BEGIN
     _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_result_v2(pg_catalog.int4, pg_catalog.int8) FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
+    -- v2 (3-arg overloads with label parameter, v1.9+)
     _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_submit_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.text) FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
     _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_launch_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.text) FROM %I', _schema, role_name);
+    EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
+
+    -- v2 (2-arg overloads for backward compatibility)
+    _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_submit_v2(pg_catalog.text, pg_catalog.int4) FROM %I', _schema, role_name);
+    EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
+
+    _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_launch_v2(pg_catalog.text, pg_catalog.int4) FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
     -- v1.9 types
@@ -514,7 +549,9 @@ REVOKE ALL ON FUNCTION pg_background_detach(pg_catalog.int4) FROM public;
 
 REVOKE ALL ON TYPE pg_background_handle FROM public;
 
+REVOKE ALL ON FUNCTION pg_background_launch_v2(pg_catalog.text, pg_catalog.int4) FROM public;
 REVOKE ALL ON FUNCTION pg_background_launch_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.text) FROM public;
+REVOKE ALL ON FUNCTION pg_background_submit_v2(pg_catalog.text, pg_catalog.int4) FROM public;
 REVOKE ALL ON FUNCTION pg_background_submit_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.text) FROM public;
 REVOKE ALL ON FUNCTION pg_background_result_v2(pg_catalog.int4, pg_catalog.int8) FROM public;
 REVOKE ALL ON FUNCTION pg_background_detach_v2(pg_catalog.int4, pg_catalog.int8) FROM public;
