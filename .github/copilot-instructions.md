@@ -294,3 +294,19 @@ When generating code review comments, verify these before suggesting changes:
 - Before flagging "incomplete implementation": trace the full data path (DSM → C → SQL API)
 - Before flagging "test is brittle": verify the actual test dependency chain
 - Before flagging "function missing": check all SQL files (base install + upgrade scripts)
+
+### Upgrade Script Safety
+- [ ] Do not suggest DROP/CREATE for public functions (breaks grants)
+- [ ] For optional parameters: suggest adding overloads, not replacing signatures
+- [ ] Verify suggested changes preserve upgrade safety
+- [ ] Fresh install and upgrade must result in equivalent functionality
+
+### Statistics Accounting
+- [ ] Stats increments should happen in ONE place (typically cleanup functions)
+- [ ] Check for double-counting if both triggering function and cleanup increment stats
+- [ ] Compare similar functions (cancel_v2 vs cancel_all_v2) for accounting consistency
+
+### Shell Script Semantics
+- [ ] With `set -e`, `$?` checks after commands are dead code for failure cases
+- [ ] psql returns 0 even for SQL errors; test scripts rely on output matching
+- [ ] Suggest `if ! command; then` instead of `command; if [ $? -ne 0 ]`

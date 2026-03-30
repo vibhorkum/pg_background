@@ -32,31 +32,29 @@ CREATE TYPE pg_background_error AS (
 );
 
 -- ----------------------------------------------------------------------
--- Update launch_v2 to accept optional label parameter
--- Drop and recreate to add optional parameter
+-- Add 3-arg overload for launch_v2 with label parameter
+-- NOTE: We preserve the existing 2-arg function to maintain grants/OIDs.
+-- The C function handles both signatures via PG_NARGS().
 -- ----------------------------------------------------------------------
-
-DROP FUNCTION IF EXISTS pg_background_launch_v2(pg_catalog.text, pg_catalog.int4);
 
 CREATE FUNCTION pg_background_launch_v2(
     sql pg_catalog.text,
-    queue_size pg_catalog.int4 DEFAULT 0,
-    label pg_catalog.text DEFAULT NULL
+    queue_size pg_catalog.int4,
+    label pg_catalog.text
 )
 RETURNS pg_background_handle
 AS 'MODULE_PATHNAME', 'pg_background_launch_v2'
 LANGUAGE C;
 
 -- ----------------------------------------------------------------------
--- Update submit_v2 to accept optional label parameter
+-- Add 3-arg overload for submit_v2 with label parameter
+-- NOTE: We preserve the existing 2-arg function to maintain grants/OIDs.
 -- ----------------------------------------------------------------------
-
-DROP FUNCTION IF EXISTS pg_background_submit_v2(pg_catalog.text, pg_catalog.int4);
 
 CREATE FUNCTION pg_background_submit_v2(
     sql pg_catalog.text,
-    queue_size pg_catalog.int4 DEFAULT 0,
-    label pg_catalog.text DEFAULT NULL
+    queue_size pg_catalog.int4,
+    label pg_catalog.text
 )
 RETURNS pg_background_handle
 AS 'MODULE_PATHNAME', 'pg_background_submit_v2'
@@ -175,8 +173,14 @@ BEGIN
     _sql := format('GRANT USAGE ON TYPE %I.pg_background_error TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    -- v2 (updated with label parameter)
+    -- v2 launch/submit (both 2-arg from 1.8 and 3-arg with label from 1.9)
+    _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_launch_v2(pg_catalog.text, pg_catalog.int4) TO %I', _schema, role_name);
+    EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
+
     _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_launch_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.text) TO %I', _schema, role_name);
+    EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
+
+    _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_submit_v2(pg_catalog.text, pg_catalog.int4) TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
     _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_submit_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.text) TO %I', _schema, role_name);
@@ -301,10 +305,17 @@ BEGIN
     _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_result_v2(pg_catalog.int4, pg_catalog.int8) FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
+    -- v2 launch/submit (both 2-arg from 1.8 and 3-arg with label from 1.9)
     _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_submit_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.text) FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
+    _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_submit_v2(pg_catalog.text, pg_catalog.int4) FROM %I', _schema, role_name);
+    EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
+
     _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_launch_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.text) FROM %I', _schema, role_name);
+    EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
+
+    _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_launch_v2(pg_catalog.text, pg_catalog.int4) FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
     -- v1.9 types

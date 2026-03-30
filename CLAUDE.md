@@ -317,6 +317,22 @@ Do not blur the distinction between v1 and v2 semantics.
 - New features must be testable via SQL (not just internal state changes)
 - Windows exports (`windows/pg_background_win.h`) must include all SQL-callable functions
 
+### Upgrade script safety
+- Do not DROP and recreate public functions in upgrade scripts (breaks grants/OIDs)
+- When adding optional parameters, add function overloads rather than dropping/recreating
+- Keep fresh install and upgrade paths aligned in functionality
+- Preserve grants by adding new signatures alongside existing ones
+
+### Statistics accounting consistency
+- Stats increments should happen in one place, typically cleanup functions
+- Avoid double-counting: if cleanup increments a stat, don't also increment in the triggering function
+- Keep cancel/complete/fail paths consistent in their stats accounting
+
+### Shell script patterns (test-upgrade.sh, test-local.sh)
+- With `set -e`, do not rely on `$?` checks after commands that would already abort
+- Use `if ! command; then` instead of `command; if [ $? -ne 0 ]`
+- Test scripts should rely on output string matching for SQL success, not exit codes (psql returns 0 even for SQL errors)
+
 ---
 
 ## 10. Feature Scope Guidance

@@ -569,7 +569,7 @@ SELECT pg_sleep(0.3);
  
 (1 row)
 
--- Verify label in result_info
+-- Verify worker with label completed successfully
 SELECT
   completed AS label_worker_completed,
   has_error AS label_worker_has_error
@@ -608,9 +608,16 @@ SELECT pg_sleep(0.3);
 (1 row)
 
 SELECT count(*) AS submit_label_count FROM t_submit_label;
- submit_label_count 
+ submit_label_count
 --------------------
                   1
+(1 row)
+
+-- Cleanup: explicitly detach to avoid affecting later batch tests
+SELECT pg_background_detach_v2(:slbl_pid, :slbl_cookie);
+ pg_background_detach_v2
+-------------------------
+
 (1 row)
 
 -- -------------------------------------------------------------------------
@@ -710,9 +717,9 @@ SELECT pg_sleep(0.3);
 
 -- Detach all at once
 SELECT pg_background_detach_all_v2() AS batch_detach_count;
- batch_detach_count 
+ batch_detach_count
 --------------------
-                  3
+                  2
 (1 row)
 
 SELECT count(*) AS batch_insert_count FROM t_batch;
@@ -1044,6 +1051,6 @@ SELECT
 FROM pg_background_stats_v2();
  total_launched | total_completed | total_failed | total_canceled | currently_active 
 ----------------+-----------------+--------------+----------------+------------------
-             26 |              18 |            0 |             10 |                0
+             26 |              18 |            0 |              8 |                0
 (1 row)
 

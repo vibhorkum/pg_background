@@ -136,7 +136,7 @@
 /* Worker label maximum length */
 #define PGBG_LABEL_MAX_LEN          64
 
-/* Command tag maximum length */
+/* Command tag buffer size (includes NUL terminator, so max 63 chars + NUL) */
 #define PGBG_COMMAND_TAG_LEN        64
 
 /* Structured error field lengths */
@@ -3285,7 +3285,8 @@ pg_background_cancel_all_v2(PG_FUNCTION_ARGS)
             pgbg_request_cancel(info);
             pgbg_send_cancel_signals(info, 0);
             info->canceled = true;
-            session_stats.workers_canceled++;
+            /* Note: stats increment happens in cleanup_worker_info(), not here,
+             * to maintain consistency with pg_background_cancel_v2() */
             canceled++;
         }
     }
