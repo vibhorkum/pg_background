@@ -859,17 +859,22 @@ SELECT answer FROM (
 (1 row)
 
 -- Second consumption should error (worker auto-detached after result consumed)
+-- Expect SQLSTATE 42704 (UNDEFINED_OBJECT) for "PID not attached to this session"
 DO $$
 DECLARE v_pid int; v_cookie bigint;
 BEGIN
   SELECT pid, cookie INTO v_pid, v_cookie FROM _test_rc_handle;
-  PERFORM pg_background_result_v2(v_pid, v_cookie);
+  PERFORM * FROM pg_background_result_v2(v_pid, v_cookie) AS (answer int);
   RAISE NOTICE 'result_consumed_test=should_have_failed';
-EXCEPTION WHEN OTHERS THEN
-  RAISE NOTICE 'result_consumed_test=correctly_errored';
+EXCEPTION WHEN undefined_object THEN
+  -- Expected: "PID %d is not attached to this session"
+  RAISE NOTICE 'result_consumed_test=correctly_errored (SQLSTATE=42704)';
+WHEN OTHERS THEN
+  -- Unexpected error - report it for debugging
+  RAISE NOTICE 'result_consumed_test=unexpected_error (SQLSTATE=%, %)', SQLSTATE, SQLERRM;
 END;
 $$;
-NOTICE:  result_consumed_test=correctly_errored
+NOTICE:  result_consumed_test=correctly_errored (SQLSTATE=42704)
 -- No explicit detach needed - worker is auto-detached after result consumption
 -- -------------------------------------------------------------------------
 -- Error Path: Invalid handle (detached worker)

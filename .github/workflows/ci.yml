@@ -232,7 +232,7 @@ jobs:
   # Test extension relocatability (custom schema installation)
   relocatable-test:
     name: Relocatable Test (PG 17)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
 
     steps:
@@ -245,7 +245,7 @@ jobs:
   # Test upgrade path from 1.8 to 1.9
   upgrade-test:
     name: Upgrade Test (1.8 → 1.9)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
 
     steps:
@@ -258,7 +258,7 @@ jobs:
   # Summary job that depends on all test matrix jobs
   test-summary:
     name: Test Summary
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [test, relocatable-test, upgrade-test]
     if: always()
     steps:
@@ -280,7 +280,7 @@ jobs:
 
   lint:
     name: Lint & Style Check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     steps:
@@ -330,7 +330,7 @@ jobs:
 
   security:
     name: Security Scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     permissions:
