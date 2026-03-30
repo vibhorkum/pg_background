@@ -470,3 +470,151 @@ Launcher Session                    Background Worker
 | `test-local.sh` | Docker-based multi-version testing |
 | `test-upgrade.sh` | Docker-based upgrade path testing |
 | `.github/workflows/ci.yml` | CI pipeline (test matrix, relocatable, upgrade) |
+
+## 11. Incremental Prompt Mode (AI Workflow Contract)
+
+This repository supports **incremental prompt mode** to reduce repetitive instructions.
+
+When a prompt contains only:
+
+- GitHub Copilot feedback
+- CI failures
+- Regression diffs
+- Small feature requests
+- Documentation fixes
+
+Claude should automatically:
+
+- Apply all rules from this `CLAUDE.md`
+- Treat the prompt as **delta-only instructions**
+- Avoid requiring repeated instructions
+
+### Default Workflow for Incremental Prompts
+
+When receiving incremental prompts, Claude should automatically:
+
+#### 1. Validate Suggestions First
+- Validate GitHub Copilot feedback against actual repository context
+- Validate CI failure root cause before changing code
+- Validate regression diffs before changing expected output
+- Confirm SQL/C/test/doc consistency before applying fixes
+
+Do **not** blindly apply suggestions.
+
+#### 2. Prefer Minimal Practical Fixes
+- Avoid large refactors unless explicitly requested
+- Avoid unrelated cleanup
+- Prefer small, targeted, maintainable fixes
+- Preserve existing behavior unless a behavior change is intentional and documented
+
+#### 3. Check Nearby Similar Areas
+When fixing one issue:
+- Inspect nearby code for the same issue pattern
+- Fix similar occurrences when low risk and clearly useful
+- Avoid broad invasive changes
+
+#### 4. Maintain Cross-Component Consistency
+When modifying code, keep these aligned:
+- C code
+- SQL install scripts
+- SQL upgrade scripts
+- Regression tests
+- Expected output files
+- Docker tests
+- CI workflows
+- README and other docs
+
+#### 5. Run Required Validation
+After changes, run what is relevant:
+- `make`
+- `make installcheck`
+- Docker/local test scripts if affected
+- Upgrade tests if affected
+- Relocatable tests if affected
+- CI-equivalent checks if practical
+
+Be explicit about what was actually run versus only inspected.
+
+#### 6. Keep Documentation Current
+Update when necessary:
+- `README.md`
+- `CLAUDE.md`
+- `.github/copilot-instructions.md`
+
+Documentation must match actual behavior.
+
+#### 7. Branch Discipline
+- Stay on the current branch
+- Do **not** create a new branch unless explicitly requested
+- Keep changes logically grouped and reviewable
+
+### Prompt Contract
+
+When a user provides a short prompt with only incremental items, assume:
+
+- `CLAUDE.md` is the standing base instruction set
+- The prompt contains only the new delta
+- All repository rules apply automatically
+
+### Example Incremental Prompt
+
+Example minimal prompt:
+
+```text
+Review the following Copilot feedback:
+
+1. ...
+2. ...
+3. ...
+```
+
+Fix where appropriate.
+
+Claude should automatically:
+- Validate feedback
+- Apply minimal fixes
+- Update tests if needed
+- Update docs if needed
+- Run validation
+
+#### Example CI Failure Prompt
+```text
+Fix the following CI failure:
+
+<logs>
+```
+Claude should automatically:
+- Identify root cause
+- Apply minimal correct fix
+- Update tests/docs if required
+- Validate the result
+
+#### Example Regression Diff Prompt
+```text
+Fix regression diff:
+
+<diff>
+```
+
+Claude should automatically:
+- Determine whether code or expected output is wrong
+- Apply the minimal correct fix
+- Validate with tests
+
+#### Default Response Structure (When Useful)
+
+When providing a structured response, use:
+1. Current State
+2. Review of Issues
+3. Fix Strategy
+4. Changes Made
+5. Files Updated
+6. Validation Results
+7. Remaining Follow-Up
+
+### Final Rule
+
+For incremental prompts, Claude should assume:
+- Base rules come from `CLAUDE.md`
+- Only the new issue needs to be provided in the prompt
+- Repeated instructions should not be required
