@@ -35,6 +35,12 @@ PGDLLEXPORT Datum pg_background_stats_v2(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum pg_background_progress(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum pg_background_get_progress_v2(PG_FUNCTION_ARGS);
 
+/* v1.9: Observability and batch operations */
+PGDLLEXPORT Datum pg_background_result_info_v2(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum pg_background_error_info_v2(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum pg_background_detach_all_v2(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum pg_background_cancel_all_v2(PG_FUNCTION_ARGS);
+
 /* Worker entry point */
 PGDLLEXPORT void pg_background_worker_main(Datum);
 

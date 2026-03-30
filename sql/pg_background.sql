@@ -385,7 +385,7 @@ FROM (SELECT pg_background_launch_v2('INSERT INTO t_label VALUES (1)', 0, 'test-
 
 SELECT pg_sleep(0.3);
 
--- Verify label in result_info
+-- Verify worker with label completed successfully
 SELECT
   completed AS label_worker_completed,
   has_error AS label_worker_has_error
@@ -409,6 +409,9 @@ FROM (SELECT pg_background_submit_v2('INSERT INTO t_submit_label VALUES (1)', 0,
 
 SELECT pg_sleep(0.3);
 SELECT count(*) AS submit_label_count FROM t_submit_label;
+
+-- Cleanup: explicitly detach to avoid affecting later batch tests
+SELECT pg_background_detach_v2(:slbl_pid, :slbl_cookie);
 
 -- -------------------------------------------------------------------------
 -- v1.9: Result info without consuming results

@@ -264,3 +264,33 @@ When suggesting code changes:
 - Cross-database: Workers connect to launcher's database only (PostgreSQL limitation)
 - Result streaming: No pagination; results flow through shm_mq (design choice)
 - Session-local tracking: `list_v2()` only shows current session's workers (design choice)
+
+---
+
+## 10. Review Quality Checklist
+
+When generating code review comments, verify these before suggesting changes:
+
+### SQL/C Alignment Checks
+- [ ] If suggesting SQL function is "not STRICT", verify C code has NULL checks
+- [ ] If suggesting data is "stored but not exposed", verify it's not in `list_v2()` or other APIs
+- [ ] If suggesting "function doesn't exist", verify against the actual SQL definition files
+
+### Test Comment Accuracy
+- [ ] Test comments must match what the test actually verifies
+- [ ] Do not assume comments are accurate—read the test code
+
+### Cross-File Consistency
+- [ ] Windows exports (`windows/pg_background_win.h`) must include all SQL-callable functions
+- [ ] Upgrade scripts must define all functions in the base install script
+- [ ] README API reference must match actual function signatures
+
+### Test Isolation
+- [ ] Each test section should clean up its own resources
+- [ ] Batch operation tests should not rely on leftover workers from earlier tests
+- [ ] Counts in expected output must match self-contained test expectations
+
+### Context Before Flagging
+- Before flagging "incomplete implementation": trace the full data path (DSM → C → SQL API)
+- Before flagging "test is brittle": verify the actual test dependency chain
+- Before flagging "function missing": check all SQL files (base install + upgrade scripts)

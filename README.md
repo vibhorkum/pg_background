@@ -1820,7 +1820,7 @@ HINT: You may need to increase max_worker_processes.
 
 **See Also**: [Autonomous Audit Logging](#2-autonomous-audit-logging) for robust implementation patterns.
 
-### 4. Result Consumption is One-Time
+### 5. Result Consumption is One-Time
 
 **Limitation**: `result_v2()` can only be called **once** per handle.
 
@@ -1837,7 +1837,7 @@ SELECT * FROM worker_output WHERE col LIKE '%foo%';
 SELECT count(*) FROM worker_output;
 ```
 
-### 5. No Result Pagination
+### 6. No Result Pagination
 
 **Limitation**: Cannot retrieve results in chunks (all-or-nothing).
 
@@ -1850,7 +1850,7 @@ SELECT count(*) FROM worker_output;
 - Use `LIMIT` in worker SQL
 - Process results incrementally in launcher
 
-### 6. Limited Observability
+### 7. Limited Observability
 
 **Limitation**: `list_v2()` only shows workers in **current session**.
 
@@ -1870,7 +1870,7 @@ FROM pg_stat_activity
 WHERE backend_type LIKE '%background%';
 ```
 
-### 7. No Transaction Pinning
+### 8. No Transaction Pinning
 
 **Limitation**: Worker transactions are **fully autonomous** (cannot join launcher's transaction).
 

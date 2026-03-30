@@ -233,6 +233,12 @@ Do not blur the distinction between v1 and v2 semantics.
 ### Test maintenance
 - Do not remove test coverage without equivalent replacement
 - Flaky tests (timing-dependent) should use adequate sleep margins
+
+### Test isolation and independence
+- Each test section should be self-contained and not rely on state from other sections
+- Explicitly clean up resources (detach workers) after each test
+- Do not rely on batch operations (like `detach_all_v2`) to clean up from earlier tests
+- Test comments must accurately describe what the test verifies
 - Tests must be deterministic; avoid race conditions in assertions
 
 ---
@@ -297,6 +303,19 @@ Do not blur the distinction between v1 and v2 semantics.
 - [ ] No memory leaks (check with valgrind if uncertain)
 - [ ] No resource leaks (DSM, worker slots)
 - [ ] Security implications considered
+
+### Validating AI-generated code reviews (GitHub Copilot, etc.)
+- Always validate review comments against actual code and repository context
+- Do not assume AI suggestions are correct just because they sound plausible
+- Skip reviews that are incorrect or do not fit the PostgreSQL extension context
+- Prefer simple, practical fixes over clever or invasive changes
+- When a pattern issue is identified, check nearby code for similar problems
+
+### SQL/C alignment requirements
+- If SQL function is not STRICT, C code must check `PG_ARGISNULL()` for required parameters
+- If C code stores data in DSM, ensure it's exposed through observable SQL APIs
+- New features must be testable via SQL (not just internal state changes)
+- Windows exports (`windows/pg_background_win.h`) must include all SQL-callable functions
 
 ---
 

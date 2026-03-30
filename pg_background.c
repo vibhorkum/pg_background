@@ -358,7 +358,7 @@ static HeapTuple form_result_tuple(pg_background_result_state *state,
 
 /* Worker execution */
 static void handle_sigterm(SIGNAL_ARGS);
-static void execute_sql_string(const char *sql);
+static void execute_sql_string(const char *sql, pg_background_fixed_data *fdata);
 static bool exists_binary_recv_fn(Oid type);
 
 /* Internal launcher (shared by v1 and v2 APIs) */
@@ -1024,11 +1024,21 @@ pg_background_launch(PG_FUNCTION_ARGS)
 Datum
 pg_background_launch_v2(PG_FUNCTION_ARGS)
 {
-    text   *sql = PG_GETARG_TEXT_PP(0);
-    int32   queue_size = PG_GETARG_INT32(1);
+    text   *sql;
+    int32   queue_size;
     char   *label = NULL;
     pid_t   pid;
     uint64  cookie = pg_background_make_cookie();
+
+    /* Required: sql parameter cannot be NULL */
+    if (PG_ARGISNULL(0))
+        ereport(ERROR,
+                (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                 errmsg("sql parameter cannot be NULL")));
+    sql = PG_GETARG_TEXT_PP(0);
+
+    /* Optional: queue_size defaults to 0 if NULL */
+    queue_size = PG_ARGISNULL(1) ? 0 : PG_GETARG_INT32(1);
 
     /* v1.9: Optional label parameter */
     if (PG_NARGS() >= 3 && !PG_ARGISNULL(2))
@@ -1064,11 +1074,21 @@ pg_background_launch_v2(PG_FUNCTION_ARGS)
 Datum
 pg_background_submit_v2(PG_FUNCTION_ARGS)
 {
-    text   *sql = PG_GETARG_TEXT_PP(0);
-    int32   queue_size = PG_GETARG_INT32(1);
+    text   *sql;
+    int32   queue_size;
     char   *label = NULL;
     pid_t   pid;
     uint64  cookie = pg_background_make_cookie();
+
+    /* Required: sql parameter cannot be NULL */
+    if (PG_ARGISNULL(0))
+        ereport(ERROR,
+                (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                 errmsg("sql parameter cannot be NULL")));
+    sql = PG_GETARG_TEXT_PP(0);
+
+    /* Optional: queue_size defaults to 0 if NULL */
+    queue_size = PG_ARGISNULL(1) ? 0 : PG_GETARG_INT32(1);
 
     /* v1.9: Optional label parameter */
     if (PG_NARGS() >= 3 && !PG_ARGISNULL(2))
@@ -1914,8 +1934,8 @@ pg_background_list_v2(PG_FUNCTION_ARGS)
     {
         pid_t pid = state->pids[state->current++];
         pg_background_worker_info *info;
-        Datum values[9];
-        bool nulls[9];
+        Datum values[10];
+        bool nulls[10];
         HeapTuple tuple;
 
         /* Re-lookup: worker may have been cleaned up since snapshot */
@@ -1935,7 +1955,7 @@ pg_background_list_v2(PG_FUNCTION_ARGS)
 
         MemSet(nulls, true, sizeof(nulls));
 
-        /* (pid, cookie, launched_at, user_id, queue_size, state, sql_preview, last_error, consumed) */
+        /* (pid, cookie, launched_at, user_id, queue_size, state, sql_preview, last_error, consumed, label) */
         values[0] = Int32GetDatum((int32) info->pid);              nulls[0] = false;
         values[1] = Int64GetDatum((int64) info->cookie);           nulls[1] = false;
         values[2] = TimestampTzGetDatum(info->launched_at);        nulls[2] = false;
@@ -1953,6 +1973,13 @@ pg_background_list_v2(PG_FUNCTION_ARGS)
         }
 
         values[8] = BoolGetDatum(info->consumed);                  nulls[8] = false;
+
+        /* v1.9: Add label column */
+        if (info->label[0] != '\0')
+        {
+            values[9] = CStringGetTextDatum(info->label);
+            nulls[9] = false;
+        }
 
         tuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
         SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(tuple));
@@ -2483,7 +2510,7 @@ pg_background_worker_main(Datum main_arg)
     /* Execute with error capture for v1.9 structured errors */
     PG_TRY();
     {
-        execute_sql_string(sql);
+        execute_sql_string(sql, fdata);
     }
     PG_CATCH();
     {
@@ -2578,9 +2605,12 @@ exists_binary_recv_fn(Oid type)
  *
  * Supports multiple commands separated by semicolons.
  * Transaction control statements are not allowed.
+ *
+ * v1.9: Populates fdata->result_row_count and fdata->command_tag
+ * with metadata from the final command executed.
  */
 static void
-execute_sql_string(const char *sql)
+execute_sql_string(const char *sql, pg_background_fixed_data *fdata)
 {
     List       *raw_parsetree_list;
     ListCell   *lc1;
@@ -2681,6 +2711,17 @@ execute_sql_string(const char *sql)
             (*receiver->rDestroy)(receiver);
 
             EndCommand_compat(&qc, DestRemote);
+
+            /*
+             * v1.9: Store result metadata from each command.
+             * The final values reflect the last command executed.
+             */
+            if (fdata != NULL)
+            {
+                fdata->result_row_count = qc.nprocessed;
+                strlcpy(fdata->command_tag, GetCommandTagName(commandTag),
+                        sizeof(fdata->command_tag));
+            }
 
             PortalDrop(portal, false);
         }
