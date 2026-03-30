@@ -334,6 +334,17 @@ Do not blur the distinction between v1 and v2 semantics.
 - For cancel operations: set cancel flag for all workers (including not-yet-started), but only send signals to started workers
 - Keep internal comments aligned with actual column lists when output shape changes
 
+### v2 API error handling consistency
+- All v2 functions should use the same handle-validation pattern:
+  - Missing PID: `ERRCODE_UNDEFINED_OBJECT`, `"PID %d is not attached to this session"`
+  - Cookie mismatch: `ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE`, `"cookie mismatch for PID %d"`, with hint `"The worker may have been restarted or the handle is stale."`
+- New v2 functions must follow this established convention unless there is a documented reason to differ
+
+### Test coverage for new features
+- Feature tests must verify the actual visible value of the feature, not just exercise it
+- For metadata features (labels, result info, error info), add direct assertions that query and verify the value
+- Example: if adding a label parameter, add a test that queries `list_v2()` and verifies the label is visible
+
 ### Shell script patterns (test-upgrade.sh, test-local.sh)
 - With `set -e`, do not rely on `$?` checks after commands that would already abort
 - Use `if ! command; then` instead of `command; if [ $? -ne 0 ]`

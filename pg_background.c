@@ -3038,14 +3038,15 @@ pg_background_result_info_v2(PG_FUNCTION_ARGS)
     if (info == NULL)
         ereport(ERROR,
                 (errcode(ERRCODE_UNDEFINED_OBJECT),
-                 errmsg("background worker with PID %d not found", pid)));
+                 errmsg("PID %d is not attached to this session", pid)));
 
     check_rights(info);
 
     if (info->cookie != (uint64) cookie)
         ereport(ERROR,
-                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                 errmsg("cookie mismatch for PID %d", pid)));
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("cookie mismatch for PID %d", pid),
+                 errhint("The worker may have been restarted or the handle is stale.")));
 
     /* Check if worker has completed */
     if (info->handle != NULL)
@@ -3115,14 +3116,15 @@ pg_background_error_info_v2(PG_FUNCTION_ARGS)
     if (info == NULL)
         ereport(ERROR,
                 (errcode(ERRCODE_UNDEFINED_OBJECT),
-                 errmsg("background worker with PID %d not found", pid)));
+                 errmsg("PID %d is not attached to this session", pid)));
 
     check_rights(info);
 
     if (info->cookie != (uint64) cookie)
         ereport(ERROR,
-                (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-                 errmsg("cookie mismatch for PID %d", pid)));
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("cookie mismatch for PID %d", pid),
+                 errhint("The worker may have been restarted or the handle is stale.")));
 
     /* Read error info from shared memory */
     if (info->seg == NULL)

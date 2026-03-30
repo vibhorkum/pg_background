@@ -391,6 +391,14 @@ SELECT
   has_error AS label_worker_has_error
 FROM pg_background_result_info_v2(:lbl_pid, :lbl_cookie);
 
+-- Verify label is exposed through list_v2
+SELECT label AS visible_label
+FROM pg_background_list_v2()
+  AS (pid int4, cookie int8, launched_at timestamptz, user_id oid,
+      queue_size int4, state text, sql_preview text, last_error text,
+      consumed bool, label text)
+WHERE pid = :lbl_pid AND cookie = :lbl_cookie;
+
 -- Cleanup
 SELECT pg_background_detach_v2(:lbl_pid, :lbl_cookie);
 

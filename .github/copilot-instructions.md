@@ -312,6 +312,17 @@ When generating code review comments, verify these before suggesting changes:
 - [ ] For cancel: set cancel flag for all workers (including not-yet-started), send signals only to started workers
 - [ ] Keep function header comments aligned with actual output columns after API changes
 
+### v2 API Error Handling Consistency
+- [ ] All v2 functions should use the same handle-validation error pattern
+- [ ] Missing PID: `ERRCODE_UNDEFINED_OBJECT`, `"PID %d is not attached to this session"`
+- [ ] Cookie mismatch: `ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE`, message + hint about stale handle
+- [ ] Compare new v2 functions against established patterns (wait_v2, cancel_v2, detach_v2) before suggesting changes
+
+### Feature Test Coverage
+- [ ] Feature tests must verify the actual visible value, not just exercise the code path
+- [ ] For metadata features (labels, result info, error info): verify the value is correctly exposed
+- [ ] Distinguish between "feature is exercised" and "feature value is asserted"
+
 ### Shell Script Semantics
 - [ ] With `set -e`, `$?` checks after commands are dead code for failure cases
 - [ ] psql returns 0 even for SQL errors unless `-v ON_ERROR_STOP=1` is used
