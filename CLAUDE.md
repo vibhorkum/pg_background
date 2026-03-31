@@ -117,6 +117,14 @@ Do not blur the distinction between v1 and v2 semantics.
 - Polling loops use exponential backoff to reduce CPU usage
 - Always call `CHECK_FOR_INTERRUPTS()` in loops
 
+### DSM synchronization patterns
+- Worker writes to DSM fields may be observed concurrently by launcher
+- For multi-field data, use a "publish flag" pattern: write data fields first, then the flag
+- Use `pg_write_barrier()` before setting publish flag to ensure field ordering
+- Readers check the flag first, then `pg_read_barrier()`, then read other fields
+- Example: `error_sqlstate` is the publish flag for error fields; written LAST by worker
+- `cleanup_worker_info` callback can read DSM before unmap; use `seg` argument
+
 ### Comments
 - Document non-obvious backend behavior
 - Explain why certain PostgreSQL APIs are used

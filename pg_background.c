@@ -2141,11 +2141,27 @@ cleanup_worker_info(dsm_segment *seg, Datum pid_datum)
 {
     pid_t pid = (pid_t) DatumGetInt32(pid_datum);
     bool found;
-
-    (void) seg;
+    bool has_dsm_error = false;
 
     if (worker_hash == NULL)
         return;
+
+    /*
+     * Check DSM for structured error before segment is unmapped.
+     * This catches errors even when results were never consumed.
+     * The seg argument is still accessible in this callback.
+     */
+    if (seg != NULL)
+    {
+        shm_toc *toc = shm_toc_attach(PG_BACKGROUND_MAGIC, dsm_segment_address(seg));
+        if (toc != NULL)
+        {
+            pg_background_fixed_data *fdata =
+                shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_FIXED_DATA, true);
+            if (fdata != NULL && fdata->error_sqlstate[0] != '\0')
+                has_dsm_error = true;
+        }
+    }
 
     /* Find entry, update stats, free last_error if any, then remove */
     {
@@ -2163,14 +2179,18 @@ cleanup_worker_info(dsm_segment *seg, Datum pid_datum)
             /*
              * Categorize worker outcome:
              * 1. Canceled takes priority (explicit user action)
-             * 2. Failed if there was an error
+             * 2. Failed if there was an error (from result consumption OR DSM)
              * 3. Completed otherwise
+             *
+             * Check both info->last_error (set when results consumed) and
+             * has_dsm_error (from structured error in DSM) to correctly
+             * classify workers that were waited/detached without consuming.
              */
             if (info->canceled)
             {
                 session_stats.workers_canceled++;
             }
-            else if (info->last_error != NULL)
+            else if (info->last_error != NULL || has_dsm_error)
             {
                 session_stats.workers_failed++;
             }
@@ -2513,9 +2533,12 @@ pg_background_worker_main(Datum main_arg)
         /* v1.9: Capture structured error info before re-throwing */
         ErrorData *edata = CopyErrorData();
 
-        /* Store SQLSTATE (5-char code like "42P01") */
-        snprintf(fdata->error_sqlstate, sizeof(fdata->error_sqlstate), "%s",
-                 unpack_sql_state(edata->sqlerrcode));
+        /*
+         * Write error fields in safe order for concurrent readers.
+         * error_sqlstate is the presence flag checked by error_info_v2 and
+         * result_info_v2, so write it LAST after all other fields are populated.
+         * This ensures readers never see partial error data.
+         */
 
         /* Store error message (truncate if needed) */
         if (edata->message != NULL)
@@ -2535,6 +2558,17 @@ pg_background_worker_main(Datum main_arg)
 
         /* Record completion time even on error */
         fdata->finished_at = GetCurrentTimestamp();
+
+        /*
+         * Write barrier: ensure all fields above are visible before the
+         * presence flag. pg_write_barrier() is a compiler barrier that
+         * prevents reordering; on x86 stores are already ordered.
+         */
+        pg_write_barrier();
+
+        /* Store SQLSTATE LAST - this is the publish flag for readers */
+        snprintf(fdata->error_sqlstate, sizeof(fdata->error_sqlstate), "%s",
+                 unpack_sql_state(edata->sqlerrcode));
 
         FreeErrorData(edata);
         PG_RE_THROW();
@@ -3009,6 +3043,11 @@ pg_background_get_progress_v2(PG_FUNCTION_ARGS)
  *     (row_count int8, command_tag text, completed bool, has_error bool)
  *
  * This allows callers to check worker status without consuming results.
+ *
+ * IMPORTANT: The row_count, command_tag, and has_error fields are only
+ * reliable when completed=true. If called while the worker is still running,
+ * these fields may show partial or stale values. Always check completed
+ * before relying on the other fields.
  */
 Datum
 pg_background_result_info_v2(PG_FUNCTION_ARGS)
@@ -3133,6 +3172,12 @@ pg_background_error_info_v2(PG_FUNCTION_ARGS)
     fdata = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_FIXED_DATA, true);
     if (fdata == NULL || fdata->error_sqlstate[0] == '\0')
         PG_RETURN_NULL();  /* No error */
+
+    /*
+     * Read barrier: error_sqlstate is set LAST by the worker (after a write
+     * barrier), so if we see it non-empty, all other error fields are valid.
+     */
+    pg_read_barrier();
 
     /* Build result tuple */
     if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
