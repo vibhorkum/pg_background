@@ -2804,6 +2804,16 @@ execute_sql_string(const char *sql, pg_background_fixed_data *fdata)
  *
  * Sets interrupt flags to trigger clean exit at next CHECK_FOR_INTERRUPTS().
  * Must be async-signal-safe.
+ *
+ * IMPORTANT: We use QueryCancelPending, NOT ProcDiePending.
+ *
+ * ProcDiePending causes a FATAL error which bypasses PG_CATCH handlers entirely,
+ * going directly to proc_exit(). This can cause PostgreSQL's postmaster to
+ * interpret the worker exit as a crash, potentially terminating all connections.
+ *
+ * QueryCancelPending causes an ERROR-level exception (query cancellation) which
+ * IS caught by our PG_CATCH handler. The handler then captures error info and
+ * calls proc_exit(1) cleanly, which PostgreSQL recognizes as a normal worker exit.
  */
 static void
 handle_sigterm(SIGNAL_ARGS)
@@ -2816,7 +2826,7 @@ handle_sigterm(SIGNAL_ARGS)
     if (!proc_exit_inprogress)
     {
         InterruptPending = true;
-        ProcDiePending = true;
+        QueryCancelPending = true;
     }
 
     errno = save_errno;
