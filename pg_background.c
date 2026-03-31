@@ -2583,7 +2583,23 @@ pg_background_worker_main(Datum main_arg)
                  unpack_sql_state(edata->sqlerrcode));
 
         FreeErrorData(edata);
-        PG_RE_THROW();
+
+        /*
+         * Do NOT use PG_RE_THROW() here - that causes the worker to exit
+         * abnormally, which PostgreSQL interprets as a crash and terminates
+         * all connections. Instead, clean up and exit gracefully.
+         */
+        FlushErrorState();
+
+        /* Abort the transaction cleanly */
+        if (IsTransactionState())
+            AbortCurrentTransaction();
+
+        /*
+         * Exit with code 1 to indicate failure (not 0 for success).
+         * This is a clean exit, not a crash, so PostgreSQL won't panic.
+         */
+        proc_exit(1);
     }
     PG_END_TRY();
 
