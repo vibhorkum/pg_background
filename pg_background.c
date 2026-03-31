@@ -172,10 +172,6 @@ typedef struct pg_background_fixed_data
     int32       progress_pct;           /* [W] Progress percentage (0-100, -1 = not reported) */
     char        progress_msg[64];       /* [W] Progress message (brief status) */
 
-    /* v1.9: Execution timing (written by worker) */
-    TimestampTz started_at;             /* [W] Worker SQL execution start time */
-    TimestampTz finished_at;            /* [W] Worker SQL execution end time (0 = running) */
-
     /* v1.9: Structured error info (written by worker on error) */
     char        error_sqlstate[PGBG_ERROR_SQLSTATE_LEN]; /* [W] SQLSTATE code (e.g., "42P01") */
     char        error_message[PGBG_ERROR_MESSAGE_LEN];   /* [W] Primary error message */
@@ -831,10 +827,6 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
     fdata->progress_pct = -1;           /* -1 = not reported yet */
     fdata->progress_msg[0] = '\0';
 
-    /* v1.9: Initialize execution timing fields */
-    fdata->started_at = 0;              /* Set by worker when execution starts */
-    fdata->finished_at = 0;             /* Set by worker when execution ends */
-
     /* v1.9: Initialize structured error fields */
     fdata->error_sqlstate[0] = '\0';
     fdata->error_message[0] = '\0';
@@ -1473,8 +1465,14 @@ pg_background_result(PG_FUNCTION_ARGS)
     /* Done: detach DSM (triggers cleanup callback) */
     if (state->info && state->info->seg)
     {
-        dsm_detach(state->info->seg);
-        state->info->seg = NULL;  /* Prevent double-detach */
+        /*
+         * Clear seg before detach to avoid use-after-free.
+         * dsm_detach triggers cleanup_worker_info which removes the hash
+         * entry and may reset WorkerInfoMemoryContext, invalidating info.
+         */
+        dsm_segment *seg = state->info->seg;
+        state->info->seg = NULL;
+        dsm_detach(seg);
     }
 
     SRF_RETURN_DONE(funcctx);
@@ -1594,16 +1592,22 @@ pg_background_detach(PG_FUNCTION_ARGS)
                  errmsg("PID %d is not attached to this session", pid)));
     check_rights(info);
 
-    if (info->seg && info->mapping_pinned)
-    {
-        dsm_unpin_mapping(info->seg);
-        info->mapping_pinned = false;
-    }
-
     if (info->seg)
     {
-        dsm_detach(info->seg);
-        info->seg = NULL;  /* Prevent double-detach */
+        /*
+         * Clear seg and unpin before detach to avoid use-after-free.
+         * dsm_detach triggers cleanup_worker_info which removes the hash
+         * entry and may reset WorkerInfoMemoryContext, invalidating info.
+         */
+        dsm_segment *seg = info->seg;
+        bool was_pinned = info->mapping_pinned;
+
+        info->seg = NULL;
+        info->mapping_pinned = false;
+
+        if (was_pinned)
+            dsm_unpin_mapping(seg);
+        dsm_detach(seg);
     }
 
     PG_RETURN_VOID();
@@ -1635,16 +1639,22 @@ pg_background_detach_v2(PG_FUNCTION_ARGS)
                  errmsg("cookie mismatch for PID %d", pid),
                  errhint("The worker may have been restarted or the handle is stale.")));
 
-    if (info->seg && info->mapping_pinned)
-    {
-        dsm_unpin_mapping(info->seg);
-        info->mapping_pinned = false;
-    }
-
     if (info->seg)
     {
-        dsm_detach(info->seg);
-        info->seg = NULL;  /* Prevent double-detach */
+        /*
+         * Clear seg and unpin before detach to avoid use-after-free.
+         * dsm_detach triggers cleanup_worker_info which removes the hash
+         * entry and may reset WorkerInfoMemoryContext, invalidating info.
+         */
+        dsm_segment *seg = info->seg;
+        bool was_pinned = info->mapping_pinned;
+
+        info->seg = NULL;
+        info->mapping_pinned = false;
+
+        if (was_pinned)
+            dsm_unpin_mapping(seg);
+        dsm_detach(seg);
     }
 
     PG_RETURN_VOID();
@@ -2511,9 +2521,6 @@ pg_background_worker_main(Datum main_arg)
 
     SetUserIdAndSecContext(fdata->current_user_id, fdata->sec_context);
 
-    /* v1.9: Record execution start time */
-    fdata->started_at = GetCurrentTimestamp();
-
     /*
      * Execute with error capture for v1.9 structured errors.
      *
@@ -2556,9 +2563,6 @@ pg_background_worker_main(Datum main_arg)
         if (edata->context != NULL)
             strlcpy(fdata->error_context, edata->context, sizeof(fdata->error_context));
 
-        /* Record completion time even on error */
-        fdata->finished_at = GetCurrentTimestamp();
-
         /*
          * Write barrier: ensure all fields above are visible before the
          * presence flag. pg_write_barrier() is a compiler barrier that
@@ -2574,9 +2578,6 @@ pg_background_worker_main(Datum main_arg)
         PG_RE_THROW();
     }
     PG_END_TRY();
-
-    /* v1.9: Record execution end time */
-    fdata->finished_at = GetCurrentTimestamp();
 
     disable_timeout(STATEMENT_TIMEOUT, false);
     CommitTransactionCommand();
@@ -3256,13 +3257,20 @@ pg_background_detach_all_v2(PG_FUNCTION_ARGS)
         info = find_worker_info(pids_to_detach[i]);
         if (info != NULL && info->seg != NULL)
         {
-            if (info->mapping_pinned)
-            {
-                dsm_unpin_mapping(info->seg);
-                info->mapping_pinned = false;
-            }
-            dsm_detach(info->seg);
-            info->seg = NULL;  /* Prevent double-detach, match detach_v2() */
+            /*
+             * Clear seg and unpin before detach to avoid use-after-free.
+             * dsm_detach triggers cleanup_worker_info which removes the hash
+             * entry and may reset WorkerInfoMemoryContext, invalidating info.
+             */
+            dsm_segment *seg = info->seg;
+            bool was_pinned = info->mapping_pinned;
+
+            info->seg = NULL;
+            info->mapping_pinned = false;
+
+            if (was_pinned)
+                dsm_unpin_mapping(seg);
+            dsm_detach(seg);
             detached++;
         }
     }

@@ -476,9 +476,11 @@ CREATE TYPE pg_background_result_info AS (
   row_count    int8,    -- Number of rows returned/affected
   command_tag  text,    -- Command tag (SELECT, INSERT, etc.)
   completed    bool,    -- True if worker completed
-  has_error    bool     -- True if worker encountered error
+  has_error    bool     -- True if SQL execution error was captured
 );
 ```
+
+> **Note**: `has_error` indicates SQL execution errors captured through structured error reporting. Early worker failures (e.g., resource exhaustion, connection issues) before SQL execution begins do not set this flag. Use `completed=true` with `has_error=false` plus `error_info_v2() IS NULL` to confirm successful completion.
 
 **Error Type** (v1.9+):
 ```sql

@@ -322,8 +322,15 @@ Do not blur the distinction between v1 and v2 semantics.
 ### SQL/C alignment requirements
 - If SQL function is not STRICT, C code must check `PG_ARGISNULL()` for required parameters
 - If C code stores data in DSM, ensure it's exposed through observable SQL APIs
+- DSM fields that are written but never read are unused bloat - remove them
 - New features must be testable via SQL (not just internal state changes)
 - Windows exports (`windows/pg_background_win.h`) must include all SQL-callable functions
+
+### Documentation accuracy
+- README descriptions must reflect actual behavior, not aspirational design
+- Error/failure semantics should be precise: specify what types of errors are captured
+- When describing `has_error`, note it reflects SQL execution errors only, not early worker failures
+- Features described as "available" must actually be exposed through SQL APIs
 
 ### Upgrade script safety
 - Do not DROP and recreate public functions in upgrade scripts (breaks grants/OIDs)

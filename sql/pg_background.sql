@@ -480,16 +480,18 @@ SELECT pg_background_detach_v2(:err_pid, :err_cookie);
 DROP TABLE IF EXISTS t_batch;
 CREATE TABLE t_batch(id int);
 
--- Launch multiple workers
+-- Launch multiple workers (use launch_v2 so we can wait deterministically)
 SELECT (h).pid AS b1_pid, (h).cookie AS b1_cookie
-FROM (SELECT pg_background_submit_v2('INSERT INTO t_batch VALUES (1)', 0, 'batch-1') AS h) s
+FROM (SELECT pg_background_launch_v2('INSERT INTO t_batch VALUES (1)', NULL, 'batch-1') AS h) s
 \gset
 
 SELECT (h).pid AS b2_pid, (h).cookie AS b2_cookie
-FROM (SELECT pg_background_submit_v2('INSERT INTO t_batch VALUES (2)', 0, 'batch-2') AS h) s
+FROM (SELECT pg_background_launch_v2('INSERT INTO t_batch VALUES (2)', NULL, 'batch-2') AS h) s
 \gset
 
-SELECT pg_sleep(0.3);
+-- Wait for both workers to complete (deterministic, avoids timing-based flakiness)
+SELECT pg_background_wait_v2(:b1_pid, :b1_cookie);
+SELECT pg_background_wait_v2(:b2_pid, :b2_cookie);
 
 -- Detach all at once
 SELECT pg_background_detach_all_v2() AS batch_detach_count;

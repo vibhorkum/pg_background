@@ -274,6 +274,13 @@ When generating code review comments, verify these before suggesting changes:
 - [ ] If suggesting SQL function is "not STRICT", verify C code has NULL checks
 - [ ] If suggesting data is "stored but not exposed", verify it's not in `list_v2()` or other APIs
 - [ ] If suggesting "function doesn't exist", verify against the actual SQL definition files
+- [ ] DSM fields that are written but never read are unused bloat - flag for removal
+
+### Documentation Accuracy Checks
+- [ ] README descriptions must reflect actual behavior, not aspirational design
+- [ ] Error/failure semantics should be precise: specify what types of errors are captured
+- [ ] When reviewing `has_error` descriptions, note it reflects SQL execution errors only, not early worker failures
+- [ ] Features described as "available" must actually be exposed through SQL APIs
 
 ### Test Comment Accuracy
 - [ ] Test comments must match what the test actually verifies
