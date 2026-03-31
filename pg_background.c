@@ -788,6 +788,14 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
                  errdetail("Current limit is %d concurrent workers per session.", pgbg_max_workers),
                  errhint("Wait for existing workers to complete, or increase pg_background.max_workers.")));
 
+    /* Validate label length (v1.9) */
+    if (label != NULL && strlen(label) > PGBG_LABEL_MAX_LEN)
+        ereport(ERROR,
+                (errcode(ERRCODE_STRING_DATA_RIGHT_TRUNCATION),
+                 errmsg("label too long"),
+                 errdetail("Label length %zu exceeds maximum of %d characters.",
+                           strlen(label), PGBG_LABEL_MAX_LEN)));
+
     /* Ensure worker info memory context exists */
     ensure_worker_info_memory_context();
 

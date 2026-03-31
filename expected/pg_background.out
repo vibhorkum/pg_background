@@ -563,9 +563,10 @@ CREATE TABLE t_label(id int);
 SELECT (h).pid AS lbl_pid, (h).cookie AS lbl_cookie
 FROM (SELECT pg_background_launch_v2('INSERT INTO t_label VALUES (1)', 0, 'test-label') AS h) s
 \gset
-SELECT pg_sleep(0.3);
- pg_sleep 
-----------
+-- Wait for worker to complete (deterministic, not timing-dependent)
+SELECT pg_background_wait_v2(:lbl_pid, :lbl_cookie);
+ pg_background_wait_v2 
+-----------------------
  
 (1 row)
 
@@ -613,9 +614,10 @@ CREATE TABLE t_submit_label(id int);
 SELECT (h).pid AS slbl_pid, (h).cookie AS slbl_cookie
 FROM (SELECT pg_background_submit_v2('INSERT INTO t_submit_label VALUES (1)', 0, 'submit-label') AS h) s
 \gset
-SELECT pg_sleep(0.3);
- pg_sleep 
-----------
+-- Wait for worker to complete (deterministic)
+SELECT pg_background_wait_v2(:slbl_pid, :slbl_cookie);
+ pg_background_wait_v2 
+-----------------------
  
 (1 row)
 
@@ -641,9 +643,10 @@ CREATE TABLE t_result_info(id int);
 SELECT (h).pid AS ri_pid, (h).cookie AS ri_cookie
 FROM (SELECT pg_background_launch_v2('INSERT INTO t_result_info SELECT generate_series(1,5)') AS h) s
 \gset
-SELECT pg_sleep(0.3);
- pg_sleep 
-----------
+-- Wait for worker to complete (deterministic)
+SELECT pg_background_wait_v2(:ri_pid, :ri_cookie);
+ pg_background_wait_v2 
+-----------------------
  
 (1 row)
 
@@ -676,9 +679,10 @@ SELECT count(*) AS result_info_count FROM t_result_info;
 SELECT (h).pid AS err_pid, (h).cookie AS err_cookie
 FROM (SELECT pg_background_launch_v2('SELECT 1/0') AS h) s
 \gset
-SELECT pg_sleep(0.3);
- pg_sleep 
-----------
+-- Wait for worker to complete (will error, but still completes)
+SELECT pg_background_wait_v2(:err_pid, :err_cookie);
+ pg_background_wait_v2 
+-----------------------
  
 (1 row)
 
@@ -753,6 +757,7 @@ FROM (SELECT pg_background_launch_v2('SELECT pg_sleep(10); INSERT INTO t_batch_c
 SELECT (h).pid AS bc2_pid, (h).cookie AS bc2_cookie
 FROM (SELECT pg_background_launch_v2('SELECT pg_sleep(10); INSERT INTO t_batch_cancel VALUES (2)') AS h) s
 \gset
+-- Brief pause to ensure workers have started their pg_sleep
 SELECT pg_sleep(0.2);
  pg_sleep 
 ----------
@@ -766,10 +771,17 @@ SELECT pg_background_cancel_all_v2() AS batch_cancel_count;
                   2
 (1 row)
 
-SELECT pg_sleep(0.5);
- pg_sleep 
-----------
- 
+-- Wait for each worker to stop (deterministic, with timeout)
+SELECT pg_background_wait_v2_timeout(:bc1_pid, :bc1_cookie, 5000) AS bc1_stopped;
+ bc1_stopped 
+-------------
+ t
+(1 row)
+
+SELECT pg_background_wait_v2_timeout(:bc2_pid, :bc2_cookie, 5000) AS bc2_stopped;
+ bc2_stopped 
+-------------
+ t
 (1 row)
 
 -- Detach remaining

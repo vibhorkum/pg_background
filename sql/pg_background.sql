@@ -383,7 +383,8 @@ SELECT (h).pid AS lbl_pid, (h).cookie AS lbl_cookie
 FROM (SELECT pg_background_launch_v2('INSERT INTO t_label VALUES (1)', 0, 'test-label') AS h) s
 \gset
 
-SELECT pg_sleep(0.3);
+-- Wait for worker to complete (deterministic, not timing-dependent)
+SELECT pg_background_wait_v2(:lbl_pid, :lbl_cookie);
 
 -- Verify worker with label completed successfully
 SELECT
@@ -415,7 +416,8 @@ SELECT (h).pid AS slbl_pid, (h).cookie AS slbl_cookie
 FROM (SELECT pg_background_submit_v2('INSERT INTO t_submit_label VALUES (1)', 0, 'submit-label') AS h) s
 \gset
 
-SELECT pg_sleep(0.3);
+-- Wait for worker to complete (deterministic)
+SELECT pg_background_wait_v2(:slbl_pid, :slbl_cookie);
 SELECT count(*) AS submit_label_count FROM t_submit_label;
 
 -- Cleanup: explicitly detach to avoid affecting later batch tests
@@ -432,7 +434,8 @@ SELECT (h).pid AS ri_pid, (h).cookie AS ri_cookie
 FROM (SELECT pg_background_launch_v2('INSERT INTO t_result_info SELECT generate_series(1,5)') AS h) s
 \gset
 
-SELECT pg_sleep(0.3);
+-- Wait for worker to complete (deterministic)
+SELECT pg_background_wait_v2(:ri_pid, :ri_cookie);
 
 -- Check result info (should show completed)
 SELECT
@@ -453,7 +456,8 @@ SELECT (h).pid AS err_pid, (h).cookie AS err_cookie
 FROM (SELECT pg_background_launch_v2('SELECT 1/0') AS h) s
 \gset
 
-SELECT pg_sleep(0.3);
+-- Wait for worker to complete (will error, but still completes)
+SELECT pg_background_wait_v2(:err_pid, :err_cookie);
 
 -- Check result info shows error
 SELECT
@@ -508,12 +512,15 @@ SELECT (h).pid AS bc2_pid, (h).cookie AS bc2_cookie
 FROM (SELECT pg_background_launch_v2('SELECT pg_sleep(10); INSERT INTO t_batch_cancel VALUES (2)') AS h) s
 \gset
 
+-- Brief pause to ensure workers have started their pg_sleep
 SELECT pg_sleep(0.2);
 
 -- Cancel all at once
 SELECT pg_background_cancel_all_v2() AS batch_cancel_count;
 
-SELECT pg_sleep(0.5);
+-- Wait for each worker to stop (deterministic, with timeout)
+SELECT pg_background_wait_v2_timeout(:bc1_pid, :bc1_cookie, 5000) AS bc1_stopped;
+SELECT pg_background_wait_v2_timeout(:bc2_pid, :bc2_cookie, 5000) AS bc2_stopped;
 
 -- Detach remaining
 SELECT pg_background_detach_all_v2() AS batch_cancel_detach_count;
