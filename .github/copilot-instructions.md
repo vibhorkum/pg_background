@@ -257,7 +257,6 @@ When suggesting code changes:
 - Structured errors: `pg_background_error_info_v2()` returns SQLSTATE, message, detail, hint, context
 - Result metadata: `pg_background_result_info_v2()` returns row_count, command_tag, completed, has_error
 - Batch operations: `pg_background_detach_all_v2()`, `pg_background_cancel_all_v2()`
-- Execution timing: `started_at`, `finished_at` tracked in DSM
 
 ### Known Limitations (Do Not "Fix")
 - Windows: `cancel_v2()` cannot interrupt running statements (OS limitation)

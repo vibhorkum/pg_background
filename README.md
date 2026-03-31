@@ -92,7 +92,6 @@ Execute arbitrary SQL commands in **background worker processes** within Postgre
 - **Worker Labels**: Optional `label` parameter on `launch_v2()`/`submit_v2()` for operational clarity
 - **Structured Error Returns**: `pg_background_error_info_v2()` returns SQLSTATE, message, detail, hint, context
 - **Result Metadata**: `pg_background_result_info_v2()` returns row_count, command_tag, completed, has_error
-- **Execution Timing**: Workers track `started_at` and `finished_at` timestamps
 - **Batch Operations**: `pg_background_detach_all_v2()` and `pg_background_cancel_all_v2()` for session cleanup
 
 ---

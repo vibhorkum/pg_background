@@ -375,7 +375,6 @@ Do not blur the distinction between v1 and v2 semantics.
 | Structured errors | `pg_background_error_info_v2()`, `pg_background_error` type |
 | Result metadata | `pg_background_result_info_v2()`, `pg_background_result_info` type |
 | Batch operations | `pg_background_detach_all_v2()`, `pg_background_cancel_all_v2()` |
-| Execution timing | `started_at`, `finished_at` in DSM |
 
 ### Bad fit for pg_background
 

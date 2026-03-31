@@ -7,7 +7,6 @@
 --   - NEW: Worker labels for operational clarity
 --   - NEW: Structured error returns (pg_background_error type)
 --   - NEW: Result metadata (pg_background_result_info type)
---   - NEW: Execution time tracking (started_at, finished_at)
 --   - NEW: Batch operations (detach_all_v2, cancel_all_v2)
 --   - ENHANCED: launch_v2/submit_v2 accept optional label parameter
 -- ----------------------------------------------------------------------

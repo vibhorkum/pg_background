@@ -13,7 +13,6 @@
 --   - NEW (1.9): Worker labels for operational clarity
 --   - NEW (1.9): Structured error returns (pg_background_error type)
 --   - NEW (1.9): Result metadata (pg_background_result_info_v2)
---   - NEW (1.9): Execution time tracking (started_at, finished_at)
 --   - NEW (1.9): Batch operations (detach_all_v2, cancel_all_v2)
 --   - Internal: cryptographically secure cookies (pg_strong_random)
 --   - Internal: dedicated memory context (prevents session bloat)

@@ -224,20 +224,12 @@ typedef struct pg_background_worker_info
     /* v1.9: Worker label for operational clarity */
     char        label[PGBG_LABEL_MAX_LEN + 1];          /* Optional label (empty = none) */
 
-    /* v1.9: Execution timing (cached from DSM on completion) */
-    TimestampTz started_at;             /* Worker SQL execution start */
-    TimestampTz finished_at;            /* Worker SQL execution end (0 = running) */
-    int64       execution_ms;           /* Computed: finished_at - started_at */
-
-    /* v1.9: Result metadata (cached from DSM on completion) */
-    int64       result_row_count;       /* Number of rows returned/affected */
-    char        command_tag[PGBG_COMMAND_TAG_LEN];      /* Command completion tag */
-
-    /* v1.9: Structured error info (cached from DSM on error) */
-    char        error_sqlstate[PGBG_ERROR_SQLSTATE_LEN]; /* SQLSTATE code */
-    char        error_detail[PGBG_ERROR_DETAIL_LEN];    /* Error detail */
-    char        error_hint[PGBG_ERROR_HINT_LEN];        /* Error hint */
-    char        error_context[PGBG_ERROR_CONTEXT_LEN];  /* Error context */
+    /*
+     * Note: v1.9 metadata (result_row_count, command_tag, error fields, timing)
+     * is stored in DSM (fdata) and read directly by SQL APIs (result_info_v2,
+     * error_info_v2). No caching in worker_info is needed since DSM remains
+     * accessible until detach.
+     */
 } pg_background_worker_info;
 
 /*
@@ -2345,20 +2337,7 @@ save_worker_info(pid_t pid, uint64 cookie, dsm_segment *seg,
     else
         info->label[0] = '\0';
 
-    /* v1.9: Initialize execution timing */
-    info->started_at = 0;
-    info->finished_at = 0;
-    info->execution_ms = 0;
-
-    /* v1.9: Initialize result metadata */
-    info->result_row_count = 0;
-    info->command_tag[0] = '\0';
-
-    /* v1.9: Initialize structured error fields */
-    info->error_sqlstate[0] = '\0';
-    info->error_detail[0] = '\0';
-    info->error_hint[0] = '\0';
-    info->error_context[0] = '\0';
+    /* v1.9 metadata (timing, result info, errors) stored in DSM, not cached here */
 }
 
 /*
