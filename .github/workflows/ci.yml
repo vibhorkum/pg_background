@@ -229,24 +229,58 @@ jobs:
           docker stop postgres-test 2>/dev/null || true
           docker rm postgres-test 2>/dev/null || true
 
+  # Test extension relocatability (custom schema installation)
+  relocatable-test:
+    name: Relocatable Test (PG 17)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run relocatable tests
+        run: ./test-relocatable.sh 17
+
+  # Test upgrade path from 1.8 to 1.9
+  upgrade-test:
+    name: Upgrade Test (1.8 → 1.9)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run upgrade test
+        run: ./test-upgrade.sh 17
+
   # Summary job that depends on all test matrix jobs
   test-summary:
     name: Test Summary
-    runs-on: ubuntu-latest
-    needs: [test]
+    runs-on: ubuntu-24.04
+    needs: [test, relocatable-test, upgrade-test]
     if: always()
     steps:
       - name: Check test results
         run: |
           if [ "${{ needs.test.result }}" != "success" ]; then
-            echo "::error::Some test jobs failed"
+            echo "::error::Main test matrix failed"
+            exit 1
+          fi
+          if [ "${{ needs.relocatable-test.result }}" != "success" ]; then
+            echo "::error::Relocatable test failed"
+            exit 1
+          fi
+          if [ "${{ needs.upgrade-test.result }}" != "success" ]; then
+            echo "::error::Upgrade test failed"
             exit 1
           fi
           echo "All test jobs passed!"
 
   lint:
     name: Lint & Style Check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     steps:
@@ -296,7 +330,7 @@ jobs:
 
   security:
     name: Security Scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     permissions:

@@ -1,8 +1,9 @@
 # pg_background: Production-Grade Background SQL for PostgreSQL
 
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14--18-blue.svg)](https://www.postgresql.org/)
-[![Version](https://img.shields.io/badge/version-1.8-brightgreen.svg)](https://github.com/vibhorkum/pg_background)
+[![Version](https://img.shields.io/badge/version-1.9-brightgreen.svg)](https://github.com/vibhorkum/pg_background)
 [![License](https://img.shields.io/badge/license-PostgreSQL-green.svg)](LICENSE)
+[![CI](https://github.com/vibhorkum/pg_background/actions/workflows/ci.yml/badge.svg)](https://github.com/vibhorkum/pg_background/actions/workflows/ci.yml)
 
 Execute arbitrary SQL commands in **background worker processes** within PostgreSQL. Built for production workloads requiring asynchronous execution, autonomous transactions, and long-running operations without blocking client sessions.
 
@@ -36,6 +37,7 @@ Execute arbitrary SQL commands in **background worker processes** within Postgre
 - [Known Limitations](#known-limitations)
 - [Best Practices](#best-practices)
 - [Migration Guide](#migration-guide)
+- [Testing](#testing)
 - [Contributing](#contributing)
 - [License](#license)
 - [Author](#author)
@@ -84,7 +86,13 @@ Execute arbitrary SQL commands in **background worker processes** within Postgre
 - **GUC Configuration**: `pg_background.max_workers`, `worker_timeout`, `default_queue_size`
 - **Resource Limits**: Built-in max workers enforcement per session
 - **Enhanced Robustness**: Overflow protection, UTF-8 aware truncation, race condition fixes
-- **Relocatable Extension**: Full support for `CREATE EXTENSION ... WITH SCHEMA`  
+- **Relocatable Extension**: Full support for `CREATE EXTENSION ... WITH SCHEMA`
+
+### V1.9 Enhancements (Current)
+- **Worker Labels**: Optional `label` parameter on `launch_v2()`/`submit_v2()` for operational clarity
+- **Structured Error Returns**: `pg_background_error_info_v2()` returns SQLSTATE, message, detail, hint, context
+- **Result Metadata**: `pg_background_result_info_v2()` returns row_count, command_tag, completed, has_error
+- **Batch Operations**: `pg_background_detach_all_v2()` and `pg_background_cancel_all_v2()` for session cleanup
 
 ---
 
@@ -139,7 +147,7 @@ SELECT extname, extversion FROM pg_extension WHERE extname = 'pg_background';
 -- Expected output:
 --    extname     | extversion
 -- ---------------+------------
---  pg_background | 1.8
+--  pg_background | 1.9
 ```
 
 ### Custom Schema Installation
@@ -161,7 +169,7 @@ WHERE e.extname = 'pg_background';
 -- Expected output:
 --    extname     | extversion | schema
 -- ---------------+------------+---------
---  pg_background | 1.8        | contrib
+--  pg_background | 1.9        | contrib
 ```
 
 **Using Extension in Custom Schema**:
@@ -408,15 +416,19 @@ SELECT pg_background_detach(:pid);
 
 | Function | Returns | Description | Use Case |
 |----------|---------|-------------|----------|
-| `pg_background_launch_v2(sql, queue_size)` | `pg_background_handle` | Launch worker, return cookie-protected handle | Standard async execution |
-| `pg_background_submit_v2(sql, queue_size)` | `pg_background_handle` | Fire-and-forget (no result consumption) | Side-effect queries (logging, notifications) |
+| `pg_background_launch_v2(sql, queue_size, label)` | `pg_background_handle` | Launch worker with optional label (v1.9) | Standard async execution |
+| `pg_background_submit_v2(sql, queue_size, label)` | `pg_background_handle` | Fire-and-forget with optional label (v1.9) | Side-effect queries |
 | `pg_background_result_v2(pid, cookie)` | `SETOF record` | Retrieve results (**one-time consumption**) | Collect query output |
-| `pg_background_detach_v2(pid, cookie)` | `void` | Stop tracking worker (worker continues) | Cleanup bookkeeping for long-running tasks |
+| `pg_background_result_info_v2(pid, cookie)` | `pg_background_result_info` | Get result metadata (v1.9) | Check completion without consuming |
+| `pg_background_error_info_v2(pid, cookie)` | `pg_background_error` | Get structured error details (v1.9) | Error diagnostics |
+| `pg_background_detach_v2(pid, cookie)` | `void` | Stop tracking worker (worker continues) | Cleanup bookkeeping |
+| `pg_background_detach_all_v2()` | `int4` | Detach all workers in session (v1.9) | Session cleanup |
 | `pg_background_cancel_v2(pid, cookie)` | `void` | Request cancellation (best-effort) | Terminate unwanted work |
-| `pg_background_cancel_v2_grace(pid, cookie, grace_ms)` | `void` | Cancel with grace period (max 3600000ms) | Allow current statement to finish |
+| `pg_background_cancel_v2_grace(pid, cookie, grace_ms)` | `void` | Cancel with grace period (max 3600000ms) | Allow statement to finish |
+| `pg_background_cancel_all_v2()` | `int4` | Cancel all workers in session (v1.9) | Emergency cleanup |
 | `pg_background_wait_v2(pid, cookie)` | `void` | Block until worker completes | Synchronous barrier |
 | `pg_background_wait_v2_timeout(pid, cookie, timeout_ms)` | `bool` | Wait with timeout (returns `true` if done) | Bounded blocking |
-| `pg_background_list_v2()` | `SETOF record` | List known workers in current session | Monitoring, debugging, cleanup |
+| `pg_background_list_v2()` | `SETOF record` | List known workers in current session | Monitoring, debugging |
 | `pg_background_stats_v2()` | `pg_background_stats` | Session statistics (v1.8+) | Monitoring, debugging |
 | `pg_background_progress(pct, msg)` | `void` | Report progress from worker (v1.8+) | Long-running task feedback |
 | `pg_background_get_progress_v2(pid, cookie)` | `pg_background_progress` | Get worker progress (v1.8+) | Monitor long-running tasks |
@@ -426,12 +438,13 @@ SELECT pg_background_detach(:pid);
 - `queue_size`: Shared memory queue size in bytes (default: 65536, min: 4096)
 - `pid`: Process ID from handle
 - `cookie`: Unique identifier from handle (prevents PID reuse)
+- `label`: Optional worker label for identification (v1.9, default: NULL)
 - `grace_ms`: Milliseconds to wait before forceful termination (capped at 1 hour)
 - `timeout_ms`: Milliseconds to wait for completion
 
 **Handle Type**:
 ```sql
-CREATE TYPE public.pg_background_handle AS (
+CREATE TYPE pg_background_handle AS (
   pid    int4,   -- Process ID
   cookie int8    -- Unique identifier (prevents PID reuse)
 );
@@ -439,7 +452,7 @@ CREATE TYPE public.pg_background_handle AS (
 
 **Statistics Type** (v1.8+):
 ```sql
-CREATE TYPE public.pg_background_stats AS (
+CREATE TYPE pg_background_stats AS (
   workers_launched   int8,    -- Total workers launched this session
   workers_completed  int8,    -- Workers completed successfully
   workers_failed     int8,    -- Workers that failed with error
@@ -451,9 +464,32 @@ CREATE TYPE public.pg_background_stats AS (
 
 **Progress Type** (v1.8+):
 ```sql
-CREATE TYPE public.pg_background_progress AS (
+CREATE TYPE pg_background_progress AS (
   progress_pct  int4,   -- Progress percentage (0-100)
   progress_msg  text    -- Brief status message
+);
+```
+
+**Result Info Type** (v1.9+):
+```sql
+CREATE TYPE pg_background_result_info AS (
+  row_count    int8,    -- Number of rows returned/affected
+  command_tag  text,    -- Command tag (SELECT, INSERT, etc.)
+  completed    bool,    -- True if worker completed
+  has_error    bool     -- True if SQL execution error was captured
+);
+```
+
+> **Note**: `has_error` indicates SQL execution errors captured through structured error reporting. Early worker failures (e.g., resource exhaustion, connection issues) before SQL execution begins do not set this flag. The combination of `completed=true`, `has_error=false`, and `error_info_v2() IS NULL` indicates likely success, but does not guarantee the worker completed without infrastructure-level failures.
+
+**Error Type** (v1.9+):
+```sql
+CREATE TYPE pg_background_error AS (
+  sqlstate  text,   -- SQLSTATE error code (e.g., '23505')
+  message   text,   -- Primary error message
+  detail    text,   -- Detailed error info (if any)
+  hint      text,   -- Hint for resolution (if any)
+  context   text    -- Error context/stack trace
 );
 ```
 
@@ -749,7 +785,7 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 -- list_v2() exposes SQL previews (first 120 chars) and error messages
 -- For sensitive deployments, create restricted view:
 
-CREATE VIEW public.safe_worker_list AS
+CREATE VIEW safe_worker_list AS
 SELECT pid, cookie, state, consumed, launched_at
 FROM pg_background_list_v2() AS (
   pid int4, cookie int8, launched_at timestamptz, user_id oid,
@@ -758,7 +794,7 @@ FROM pg_background_list_v2() AS (
 WHERE user_id = current_user::regrole::oid;
 -- Omit sql_preview and last_error
 
-GRANT SELECT ON public.safe_worker_list TO app_users;
+GRANT SELECT ON safe_worker_list TO app_users;
 ```
 
 ### Security Best Practices
@@ -809,8 +845,17 @@ SELECT pg_background_detach_v2(:'h.pid', :'h.cookie');
 
 **Solution**: Use background worker for independent commit.
 
+> **⚠️ Critical Warning**: If `max_worker_processes` is exhausted, `pg_background_launch_v2()` will throw `INSUFFICIENT_RESOURCES`. For audit logging, this means:
+> - The audit message will be **lost**
+> - The calling transaction may **fail unexpectedly**
+> - Failures occur **unpredictably** under load
+>
+> See the robust implementation below and [Known Limitation #4](#4-worker-exhaustion-insufficient_resources) for details.
+
+**Basic Example** (not fault-tolerant):
+
 ```sql
-CREATE FUNCTION log_audit(event_type text, details jsonb)
+CREATE FUNCTION log_audit_simple(event_type text, details jsonb)
 RETURNS void AS $$
 DECLARE
   h pg_background_handle;
@@ -823,22 +868,64 @@ BEGIN
       details::text
     )
   );
-  
+
   -- Detach immediately (fire-and-forget)
   PERFORM pg_background_detach_v2(h.pid, h.cookie);
 END;
 $$ LANGUAGE plpgsql;
+```
 
--- Usage in transaction
+**Robust Example** (handles worker exhaustion):
+
+```sql
+CREATE FUNCTION log_audit(event_type text, details jsonb)
+RETURNS void AS $$
+DECLARE
+  h pg_background_handle;
+  retries int := 3;
+  backoff_ms int := 100;
+BEGIN
+  FOR i IN 1..retries LOOP
+    BEGIN
+      SELECT * INTO h FROM pg_background_submit_v2(
+        format(
+          'INSERT INTO audit_log (ts, event_type, details) VALUES (now(), %L, %L)',
+          event_type,
+          details::text
+        )
+      );
+      PERFORM pg_background_detach_v2(h.pid, h.cookie);
+      RETURN;  -- Success
+    EXCEPTION
+      WHEN insufficient_resources THEN
+        IF i = retries THEN
+          -- Final fallback: log synchronously (blocks but doesn't lose data)
+          INSERT INTO audit_log (ts, event_type, details)
+          VALUES (now(), event_type, details);
+          RAISE WARNING 'pg_background exhausted, audit logged synchronously';
+          RETURN;
+        END IF;
+        -- Exponential backoff before retry
+        PERFORM pg_sleep(backoff_ms / 1000.0);
+        backoff_ms := backoff_ms * 2;
+    END;
+  END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+```
+
+**Usage in transaction**:
+
+```sql
 BEGIN;
   UPDATE accounts SET balance = balance - 100 WHERE id = 123;
-  
+
   -- Audit log commits even if UPDATE rolls back
   PERFORM log_audit('withdrawal', '{"account": 123, "amount": 100}');
-  
+
   -- Simulate error
   ROLLBACK;
-  
+
 -- Audit log entry exists!
 SELECT * FROM audit_log ORDER BY ts DESC LIMIT 1;
 ```
@@ -1668,7 +1755,73 @@ SET pg_background.max_workers = 10;
 
 **Workaround**: Implement application-level quotas for cross-session limits (see [Security](#security-model)).
 
-### 4. Result Consumption is One-Time
+### 4. Worker Exhaustion (INSUFFICIENT_RESOURCES)
+
+**Limitation**: When `max_worker_processes` is exhausted, `pg_background_launch()` and `pg_background_launch_v2()` throw `INSUFFICIENT_RESOURCES`.
+
+**Error Message**:
+```
+ERROR: could not register background process
+HINT: You may need to increase max_worker_processes.
+```
+
+**Impact**: This is particularly problematic for **autonomous logging** use cases:
+1. **Data Loss**: The message intended for logging is lost
+2. **Cascading Failures**: The calling transaction may fail unexpectedly
+3. **Unpredictable**: Failures occur sporadically under high load
+
+**Why This Happens**: Background workers share the global `max_worker_processes` pool with:
+- Parallel query workers (`max_parallel_workers`)
+- Autovacuum workers (`autovacuum_max_workers`)
+- Logical replication workers
+- Custom background workers from other extensions
+
+**Mitigation Strategies**:
+
+1. **Increase worker pool** (reduces frequency, doesn't eliminate):
+   ```sql
+   ALTER SYSTEM SET max_worker_processes = 64;
+   -- Requires PostgreSQL restart
+   ```
+
+2. **Implement retry with backoff**:
+   ```sql
+   BEGIN
+     SELECT pg_background_launch_v2(...);
+   EXCEPTION
+     WHEN insufficient_resources THEN
+       PERFORM pg_sleep(0.1);  -- Backoff
+       -- Retry or fallback
+   END;
+   ```
+
+3. **Fallback to synchronous execution** (for critical operations):
+   ```sql
+   EXCEPTION
+     WHEN insufficient_resources THEN
+       -- Execute synchronously as fallback
+       INSERT INTO audit_log VALUES (...);
+   END;
+   ```
+
+4. **Pre-check worker availability** (advisory, not guaranteed):
+   ```sql
+   SELECT count(*) < current_setting('max_worker_processes')::int
+   FROM pg_stat_activity
+   WHERE backend_type LIKE '%worker%';
+   ```
+
+5. **Reserve capacity** by setting conservative `pg_background.max_workers`:
+   ```sql
+   -- Leave headroom for other workers
+   SET pg_background.max_workers = 8;  -- Even if pool is 64
+   ```
+
+**Recommendation**: For mission-critical logging, always implement a synchronous fallback. Autonomous transactions via pg_background are **best-effort**, not guaranteed.
+
+**See Also**: [Autonomous Audit Logging](#2-autonomous-audit-logging) for robust implementation patterns.
+
+### 5. Result Consumption is One-Time
 
 **Limitation**: `result_v2()` can only be called **once** per handle.
 
@@ -1685,7 +1838,7 @@ SELECT * FROM worker_output WHERE col LIKE '%foo%';
 SELECT count(*) FROM worker_output;
 ```
 
-### 5. No Result Pagination
+### 6. No Result Pagination
 
 **Limitation**: Cannot retrieve results in chunks (all-or-nothing).
 
@@ -1698,7 +1851,7 @@ SELECT count(*) FROM worker_output;
 - Use `LIMIT` in worker SQL
 - Process results incrementally in launcher
 
-### 6. Limited Observability
+### 7. Limited Observability
 
 **Limitation**: `list_v2()` only shows workers in **current session**.
 
@@ -1718,7 +1871,7 @@ FROM pg_stat_activity
 WHERE backend_type LIKE '%background%';
 ```
 
-### 7. No Transaction Pinning
+### 8. No Transaction Pinning
 
 **Limitation**: Worker transactions are **fully autonomous** (cannot join launcher's transaction).
 
@@ -1970,6 +2123,74 @@ After (v2):
 SELECT * FROM pg_background_submit_v2('VACUUM my_table') AS h \gset;
 SELECT pg_background_detach_v2(:'h.pid', :'h.cookie');
 ```
+
+---
+
+## Testing
+
+### Local Testing (Native)
+
+If you have PostgreSQL development files installed locally:
+
+```bash
+# Build and install
+make clean && make
+sudo make install
+
+# Run regression tests
+make installcheck
+
+# Clean test artifacts
+make installcheckclean
+```
+
+### Docker-Based Testing (Recommended)
+
+Docker-based testing requires no local PostgreSQL installation:
+
+```bash
+# Test with PostgreSQL 17 (default)
+./test-local.sh
+
+# Test with specific PostgreSQL version
+./test-local.sh 14
+./test-local.sh 16
+
+# Test all supported versions (14-18)
+./test-local.sh all
+```
+
+### Relocatable Extension Testing
+
+Verify the extension works correctly when installed in a custom schema:
+
+```bash
+# Run comprehensive relocatable tests
+./test-relocatable.sh 17
+```
+
+### Upgrade Path Testing
+
+Validate extension upgrades work correctly:
+
+```bash
+# Test 1.8 → 1.9 upgrade path
+./test-upgrade.sh 17
+```
+
+### CI Pipeline
+
+The project uses GitHub Actions for continuous integration:
+
+| Job | Description |
+|-----|-------------|
+| **test** | Matrix: PG 14-18 × ubuntu-22.04/24.04 regression tests |
+| **relocatable-test** | Validates custom schema installation (PG 17) |
+| **upgrade-test** | Validates 1.8 → 1.9 upgrade path |
+| **lint** | cppcheck and clang-format checks |
+| **security** | CodeQL security analysis |
+
+All tests must pass before merging to main branches.
 
 ---
 
