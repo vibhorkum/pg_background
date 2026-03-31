@@ -96,6 +96,7 @@ Do not blur the distinction between v1 and v2 semantics.
 - Long-lived allocations use dedicated memory contexts (e.g., `PgBackgroundWorkerContext`)
 - Worker info hash entries are context-managed to prevent session memory bloat
 - Clean up in error paths using `PG_TRY`/`PG_CATCH`/`PG_FINALLY`
+- In PG_CATCH, clear partial state (e.g., result metadata) before publishing error flags
 
 ### SPI and transaction handling
 - Workers use `SPI_connect()`/`SPI_finish()` for SQL execution
@@ -357,6 +358,8 @@ Do not blur the distinction between v1 and v2 semantics.
 
 ### Test coverage for new features
 - Feature tests must verify the actual visible value of the feature, not just exercise it
+- For metadata features (row_count, command_tag, etc.), assert the actual values returned
+- Avoid hardcoded schema references (e.g., `public.pg_background_handle`) in tests; rely on search_path
 - For metadata features (labels, result info, error info), add direct assertions that query and verify the value
 - Example: if adding a label parameter, add a test that queries `list_v2()` and verifies the label is visible
 

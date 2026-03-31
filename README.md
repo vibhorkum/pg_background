@@ -480,7 +480,7 @@ CREATE TYPE pg_background_result_info AS (
 );
 ```
 
-> **Note**: `has_error` indicates SQL execution errors captured through structured error reporting. Early worker failures (e.g., resource exhaustion, connection issues) before SQL execution begins do not set this flag. Use `completed=true` with `has_error=false` plus `error_info_v2() IS NULL` to confirm successful completion.
+> **Note**: `has_error` indicates SQL execution errors captured through structured error reporting. Early worker failures (e.g., resource exhaustion, connection issues) before SQL execution begins do not set this flag. The combination of `completed=true`, `has_error=false`, and `error_info_v2() IS NULL` indicates likely success, but does not guarantee the worker completed without infrastructure-level failures.
 
 **Error Type** (v1.9+):
 ```sql

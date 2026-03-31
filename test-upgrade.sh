@@ -90,7 +90,7 @@ main() {
     # Show PostgreSQL version
     docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres -t -c "SELECT version();" 2>/dev/null
 
-    # Install build dependencies
+    # Install build dependencies (keep stderr visible for debugging failures)
     log_step "Installing build dependencies..."
     docker exec "$CONTAINER_NAME" bash -c "
         apt-get update -qq && \
@@ -98,7 +98,7 @@ main() {
             build-essential \
             postgresql-server-dev-${PG_VERSION} \
             libkrb5-dev \
-            make gcc 2>/dev/null
+            make gcc
     " >/dev/null
 
     # Copy source files
@@ -159,7 +159,7 @@ CREATE TABLE t_upgrade_test(id int, version text);
 -- Test launch_v2 (1.8 signature without label parameter)
 DO $$
 DECLARE
-    h public.pg_background_handle;
+    h pg_background_handle;
 BEGIN
     SELECT * INTO h FROM pg_background_launch_v2('INSERT INTO t_upgrade_test VALUES (1, ''v1.8'')', 65536);
     PERFORM pg_background_wait_v2(h.pid, h.cookie);
@@ -205,7 +205,7 @@ EOF
 -- Test launch_v2 with label parameter (1.9 feature)
 DO $$
 DECLARE
-    h public.pg_background_handle;
+    h pg_background_handle;
 BEGIN
     SELECT * INTO h FROM pg_background_launch_v2(
         'INSERT INTO t_upgrade_test VALUES (2, ''v1.9'')',
@@ -225,8 +225,8 @@ FROM t_upgrade_test WHERE version = 'v1.9';
 -- Test result_info_v2 (new 1.9 function)
 DO $$
 DECLARE
-    h public.pg_background_handle;
-    ri public.pg_background_result_info;
+    h pg_background_handle;
+    ri pg_background_result_info;
 BEGIN
     SELECT * INTO h FROM pg_background_launch_v2('SELECT 1', 65536);
     PERFORM pg_background_wait_v2(h.pid, h.cookie);
@@ -246,8 +246,8 @@ $$;
 -- Test error_info_v2 (new 1.9 function)
 DO $$
 DECLARE
-    h public.pg_background_handle;
-    ei public.pg_background_error;
+    h pg_background_handle;
+    ei pg_background_error;
 BEGIN
     SELECT * INTO h FROM pg_background_launch_v2('SELECT 1/0', 65536);
     PERFORM pg_sleep(0.3);
@@ -267,7 +267,7 @@ $$;
 -- Test batch operations (new 1.9 functions)
 DO $$
 DECLARE
-    h public.pg_background_handle;
+    h pg_background_handle;
     detach_count int;
 BEGIN
     SELECT * INTO h FROM pg_background_submit_v2('SELECT 1', 0, 'batch-test');
@@ -307,7 +307,7 @@ FROM pg_background_stats_v2();
 -- progress functions should still work (1.8 feature)
 DO $$
 DECLARE
-    h public.pg_background_handle;
+    h pg_background_handle;
 BEGIN
     SELECT * INTO h FROM pg_background_launch_v2($$
         SELECT pg_background_progress(50, 'test progress');

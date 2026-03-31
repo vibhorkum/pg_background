@@ -437,8 +437,10 @@ FROM (SELECT pg_background_launch_v2('INSERT INTO t_result_info SELECT generate_
 -- Wait for worker to complete (deterministic)
 SELECT pg_background_wait_v2(:ri_pid, :ri_cookie);
 
--- Check result info (should show completed)
+-- Check result info (should show completed with row_count=5, command_tag='INSERT')
 SELECT
+  row_count AS ri_row_count,
+  command_tag AS ri_command_tag,
   completed AS ri_completed,
   has_error AS ri_has_error
 FROM pg_background_result_info_v2(:ri_pid, :ri_cookie);

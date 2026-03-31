@@ -328,6 +328,12 @@ When generating code review comments, verify these before suggesting changes:
 - [ ] Feature tests must verify the actual visible value, not just exercise the code path
 - [ ] For metadata features (labels, result info, error info): verify the value is correctly exposed
 - [ ] Distinguish between "feature is exercised" and "feature value is asserted"
+- [ ] Avoid hardcoded schema references (e.g., `public.pg_background_handle`); rely on search_path
+
+### Error Path Cleanup
+- [ ] In PG_CATCH blocks, clear partial state before publishing error flags
+- [ ] Result metadata (row_count, command_tag) should be reset on error to avoid stale values
+- [ ] DSM cleanup callbacks should use non-throwing APIs (e.g., `shm_toc_lookup(..., true)`)
 
 ### Shell Script Semantics
 - [ ] With `set -e`, `$?` checks after commands are dead code for failure cases

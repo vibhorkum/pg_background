@@ -789,7 +789,7 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
         ereport(ERROR,
                 (errcode(ERRCODE_STRING_DATA_RIGHT_TRUNCATION),
                  errmsg("label too long"),
-                 errdetail("Label length %zu exceeds maximum of %d characters.",
+                 errdetail("Label length %zu exceeds maximum of %d bytes.",
                            strlen(label), PGBG_LABEL_MAX_LEN)));
 
     /* Ensure worker info memory context exists */
@@ -2539,6 +2539,14 @@ pg_background_worker_main(Datum main_arg)
     {
         /* v1.9: Capture structured error info before re-throwing */
         ErrorData *edata = CopyErrorData();
+
+        /*
+         * Clear result metadata to avoid stale values from earlier successful
+         * statements in a multi-statement SQL string. On error, row_count and
+         * command_tag should not reflect partial success.
+         */
+        fdata->result_row_count = 0;
+        fdata->command_tag[0] = '\0';
 
         /*
          * Write error fields in safe order for concurrent readers.
