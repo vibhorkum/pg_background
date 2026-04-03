@@ -6,6 +6,10 @@
  * This file provides PGDLLEXPORT declarations required for Windows DLL
  * symbol export. On Unix systems, symbol visibility is handled differently.
  *
+ * Copyright (c) 2014-2026, Vibhor Kumar and contributors
+ *
+ * Licensed under the PostgreSQL License. See LICENSE file for details.
+ *
  * -------------------------------------------------------------------------
  */
 #ifndef PG_BACKGROUND_WIN_H

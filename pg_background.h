@@ -6,7 +6,10 @@
  * This file contains compatibility macros for supporting multiple
  * PostgreSQL versions (14-18).
  *
- * Copyright (C) 2014, PostgreSQL Global Development Group
+ * Copyright (c) 2014-2026, Vibhor Kumar and contributors
+ * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
+ *
+ * Licensed under the PostgreSQL License. See LICENSE file for details.
  *
  * -------------------------------------------------------------------------
  */

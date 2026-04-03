@@ -2222,9 +2222,10 @@ make installcheck
 
 ## License
 
-PostgreSQL License
+This project is licensed under the [PostgreSQL License](LICENSE).
 
-See [LICENSE](LICENSE) for full text.
+Copyright (c) 2014-2026, Vibhor Kumar and contributors.
+Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group.
 
 ---
 

@@ -3,7 +3,9 @@
  * pg_background.c
  *     Run SQL commands using a background worker.
  *
- * Copyright (C) 2014, PostgreSQL Global Development Group
+ * Copyright (c) 2014-2026, Vibhor Kumar and contributors
+ *
+ * Licensed under the PostgreSQL License. See LICENSE file for details.
  *
  * IDENTIFICATION
  *     contrib/pg_background/pg_background.c
