@@ -2225,6 +2225,7 @@ make installcheck
 This project is licensed under the [PostgreSQL License](LICENSE).
 
 Copyright (c) 2014-2026, Vibhor Kumar and contributors.
+Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group.
 
 ---
 

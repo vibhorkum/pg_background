@@ -283,10 +283,12 @@ Do not blur the distinction between v1 and v2 semantics.
 ### Licensing and attribution
 - This project is licensed under the PostgreSQL License (see LICENSE file)
 - Copyright belongs to "Vibhor Kumar and contributors"
-- File headers should use concise form: copyright line + "Licensed under the PostgreSQL License. See LICENSE file for details."
+- PostgreSQL-derived code (compatibility macros, API patterns) includes "Portions Copyright (c) PostgreSQL Global Development Group"
+- File headers should use concise form: copyright line(s) + "Licensed under the PostgreSQL License. See LICENSE file for details."
 - Do not duplicate full license text in file headers (keep headers short)
 - README license section should reference LICENSE file, not duplicate its text
 - When adding new source files, use the same header format as existing files
+- Preserve upstream copyright notices (PGDG, third-party) when code is derived from external sources
 - Do not remove or replace contributor attribution without valid reason
 
 ---

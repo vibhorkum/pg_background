@@ -7,6 +7,7 @@
  * PostgreSQL versions (14-18).
  *
  * Copyright (c) 2014-2026, Vibhor Kumar and contributors
+ * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group
  *
  * Licensed under the PostgreSQL License. See LICENSE file for details.
  *
