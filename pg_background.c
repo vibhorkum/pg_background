@@ -2539,8 +2539,18 @@ pg_background_worker_main(Datum main_arg)
     }
     PG_CATCH();
     {
-        /* v1.9: Capture structured error info before re-throwing */
-        ErrorData *edata = CopyErrorData();
+        ErrorData *edata;
+
+        /*
+         * v1.9: Capture structured error info before re-throwing.
+         *
+         * IMPORTANT: Must switch out of ErrorContext before calling
+         * CopyErrorData(). PostgreSQL's CopyErrorData() allocates the copy
+         * in CurrentMemoryContext, and asserts that it's not ErrorContext
+         * (to prevent use-after-free when ErrorContext is reset on next error).
+         */
+        MemoryContextSwitchTo(TopMemoryContext);
+        edata = CopyErrorData();
 
         /*
          * Clear result metadata to avoid stale values from earlier successful

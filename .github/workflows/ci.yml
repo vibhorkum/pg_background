@@ -255,11 +255,35 @@ jobs:
       - name: Run upgrade test
         run: ./test-upgrade.sh 17
 
+  # Test with assert-enabled PostgreSQL (catches memory context bugs)
+  assert-test:
+    name: Assert-Enabled Test (PG ${{ matrix.pg }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [14, 17]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run assert-enabled test
+        run: ./test-assert.sh ${{ matrix.pg }}
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          echo "=== Test failed - check logs above for assertion failures ==="
+          echo "Common assertion: FailedAssertion(\"CurrentMemoryContext != ErrorContext\")"
+
   # Summary job that depends on all test matrix jobs
   test-summary:
     name: Test Summary
     runs-on: ubuntu-24.04
-    needs: [test, relocatable-test, upgrade-test]
+    needs: [test, relocatable-test, upgrade-test, assert-test]
     if: always()
     steps:
       - name: Check test results
@@ -274,6 +298,10 @@ jobs:
           fi
           if [ "${{ needs.upgrade-test.result }}" != "success" ]; then
             echo "::error::Upgrade test failed"
+            exit 1
+          fi
+          if [ "${{ needs.assert-test.result }}" != "success" ]; then
+            echo "::error::Assert-enabled test failed (memory context bug detected)"
             exit 1
           fi
           echo "All test jobs passed!"
