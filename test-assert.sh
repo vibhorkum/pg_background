@@ -66,14 +66,25 @@ docker exec "${CONTAINER_NAME}" bash -c "
     locale-gen
 "
 
-step "Downloading PostgreSQL ${PG_VERSION} source..."
+# Latest known patch per major version (update periodically when new patches ship).
+# The actual patch used here does not matter for assert-enabled regression
+# testing — we only care that the source tarball exists and builds. If the
+# pinned patch is ever missing from the FTP, we fall back to ${PG_VERSION}.0,
+# which is the initial release and is kept on the PG FTP permanently.
+case "${PG_VERSION}" in
+    14) PG_PATCH=18 ;;
+    15) PG_PATCH=14 ;;
+    16) PG_PATCH=10 ;;
+    17) PG_PATCH=6  ;;
+    18) PG_PATCH=2  ;;
+    *)  PG_PATCH=0  ;;
+esac
+
+step "Downloading PostgreSQL ${PG_VERSION}.${PG_PATCH} source (fallback: ${PG_VERSION}.0)..."
 docker exec "${CONTAINER_NAME}" bash -c "
     cd /tmp
-    wget -q https://ftp.postgresql.org/pub/source/v${PG_VERSION}.0/postgresql-${PG_VERSION}.0.tar.gz || \
-    wget -q https://ftp.postgresql.org/pub/source/v${PG_VERSION}.1/postgresql-${PG_VERSION}.1.tar.gz || \
-    wget -q https://ftp.postgresql.org/pub/source/v${PG_VERSION}.2/postgresql-${PG_VERSION}.2.tar.gz || \
-    wget -q https://ftp.postgresql.org/pub/source/v${PG_VERSION}.21/postgresql-${PG_VERSION}.21.tar.gz || \
-    wget -q https://ftp.postgresql.org/pub/source/v${PG_VERSION}.22/postgresql-${PG_VERSION}.22.tar.gz
+    wget -q https://ftp.postgresql.org/pub/source/v${PG_VERSION}.${PG_PATCH}/postgresql-${PG_VERSION}.${PG_PATCH}.tar.gz || \
+    wget -q https://ftp.postgresql.org/pub/source/v${PG_VERSION}.0/postgresql-${PG_VERSION}.0.tar.gz
     tar xzf postgresql-*.tar.gz
 "
 

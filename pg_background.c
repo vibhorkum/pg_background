@@ -2454,6 +2454,22 @@ pg_background_worker_main(Datum main_arg)
 
     pq_redirect_to_shm_mq(seg, responseq);
 
+    /*
+     * v1.9 Phase 2: Init-phase PG_TRY.
+     *
+     * Outer PG_TRY covers init-phase calls (BackgroundWorkerInitializeConnection,
+     * StartTransactionCommand, RestoreGUCState, SetUserIdAndSecContext) and the
+     * execute phase below. Commit is wrapped in a separate sequential PG_TRY
+     * after PG_END_TRY so that a single EmitErrorReport is produced per error
+     * (no overlap between init/execute and commit catches).
+     *
+     * PG_TRY starts AFTER pq_redirect_to_shm_mq() so EmitErrorReport can write
+     * the 'E' frame into the hijacked pqmq destination. Failures before redirect
+     * (dsm_attach, shm_toc_lookup) remain under the standard bgworker handler
+     * and degrade the launcher to 08006 — documented acceptable limitation.
+     */
+    PG_TRY();
+    {
     BackgroundWorkerInitializeConnection(NameStr(fdata->database),
                                          NameStr(fdata->authenticated_user),
                                          BGWORKER_BYPASS_ALLOWCONN);
@@ -2597,6 +2613,32 @@ pg_background_worker_main(Datum main_arg)
         FreeErrorData(edata);
 
         /*
+         * v1.9: Propagate real SQLSTATE to the launcher via shm_mq.
+         *
+         * EmitErrorReport() writes the 'E' error frame to the hijacked
+         * destination set up by pq_redirect_to_shm_mq(), so the launcher
+         * sees the actual sqlerrcode (e.g. 22012 / P0001 / 23502) instead
+         * of degrading to ERRCODE_CONNECTION_FAILURE ("lost connection to
+         * worker process").
+         *
+         * Wrap in a nested PG_TRY: if pq_sendstring hits OOM inside
+         * EmitErrorReport it would ereport(ERROR) and recurse into this
+         * very PG_CATCH frame (→ backend crash). Mirror PostgreSQL core's
+         * ParallelWorkerMain() swallow pattern — on inner failure just
+         * FlushErrorState() and continue; the DSM error fields already
+         * carry the SQLSTATE so the launcher still gets useful info.
+         */
+        PG_TRY();
+        {
+            EmitErrorReport();
+        }
+        PG_CATCH();
+        {
+            FlushErrorState();
+        }
+        PG_END_TRY();
+
+        /*
          * Do NOT use PG_RE_THROW() here - that causes the worker to exit
          * abnormally, which PostgreSQL interprets as a crash and terminates
          * all connections. Instead, clean up and exit gracefully.
@@ -2608,6 +2650,17 @@ pg_background_worker_main(Datum main_arg)
             AbortCurrentTransaction();
 
         /*
+         * Mirror happy-path shutdown: mark session idle, send 'Z' so the
+         * launcher's result state machine flips state->complete = true,
+         * then flush any bytes still buffered in pqmq before proc_exit
+         * detaches the shm_mq (otherwise trailing 'E'/'Z' frames would be
+         * dropped together with the queue).
+         */
+        pgstat_report_activity(STATE_IDLE, NULL);
+        ReadyForQuery(DestRemote);
+        pq_flush();
+
+        /*
          * Exit with code 1 to indicate failure (not 0 for success).
          * This is a clean exit, not a crash, so PostgreSQL won't panic.
          */
@@ -2616,12 +2669,159 @@ pg_background_worker_main(Datum main_arg)
     PG_END_TRY();
 
     disable_timeout(STATEMENT_TIMEOUT, false);
-    CommitTransactionCommand();
+    }
+    PG_CATCH();
+    {
+        ErrorData *edata;
 
-    pgstat_report_activity(STATE_IDLE, sql);
-    pgstat_report_stat(true);
+        /*
+         * v1.9 Phase 2: Init-phase PG_CATCH.
+         *
+         * Catches failures from BackgroundWorkerInitializeConnection,
+         * StartTransactionCommand, RestoreGUCState, SetUserIdAndSecContext,
+         * and the execute-phase PG_END_TRY fall-through (disable_timeout).
+         * Execute-phase SQL errors are caught by the inner execute PG_CATCH
+         * above (which calls proc_exit(1) directly), so this handler only
+         * fires on init-phase errors.
+         */
+        HOLD_INTERRUPTS();
 
-    ReadyForQuery(DestRemote);
+        /*
+         * Switch out of ErrorContext before CopyErrorData (Assert prevents
+         * use-after-free when ErrorContext is reset on next error).
+         */
+        MemoryContextSwitchTo(TopMemoryContext);
+        edata = CopyErrorData();
+
+        /* Clear stale result metadata — no rows produced on init failure. */
+        fdata->result_row_count = 0;
+        fdata->command_tag[0] = '\0';
+
+        if (edata->message != NULL)
+            strlcpy(fdata->error_message, edata->message, sizeof(fdata->error_message));
+        if (edata->detail != NULL)
+            strlcpy(fdata->error_detail, edata->detail, sizeof(fdata->error_detail));
+        if (edata->hint != NULL)
+            strlcpy(fdata->error_hint, edata->hint, sizeof(fdata->error_hint));
+        if (edata->context != NULL)
+            strlcpy(fdata->error_context, edata->context, sizeof(fdata->error_context));
+
+        /* Publish: other fields first, then sqlstate as presence flag. */
+        pg_write_barrier();
+        snprintf(fdata->error_sqlstate, sizeof(fdata->error_sqlstate), "%s",
+                 unpack_sql_state(edata->sqlerrcode));
+
+        FreeErrorData(edata);
+
+        /*
+         * Nested PG_TRY around EmitErrorReport: pq_sendstring OOM inside
+         * EmitErrorReport could ereport(ERROR) and recurse into this frame.
+         * Mirror ParallelWorkerMain swallow pattern — FlushErrorState only.
+         */
+        PG_TRY();
+        {
+            EmitErrorReport();
+        }
+        PG_CATCH();
+        {
+            FlushErrorState();
+        }
+        PG_END_TRY();
+
+        FlushErrorState();
+
+        /* Guard against double-abort after AbortCurrentTransaction already ran. */
+        if (IsTransactionState())
+            AbortCurrentTransaction();
+
+        pgstat_report_activity(STATE_IDLE, NULL);
+        ReadyForQuery(DestRemote);
+        pq_flush();
+
+        RESUME_INTERRUPTS();
+
+        proc_exit(1);
+    }
+    PG_END_TRY();
+
+    /*
+     * v1.9 Phase 2: Commit-wrapper PG_TRY (SEQUENTIAL, NOT nested).
+     *
+     * CommitTransactionCommand() fires deferred constraint triggers and
+     * AFTER-triggers, so commit-time errors (23503 deferred FK, 57014 cancel,
+     * 23505 deferred unique) surface here. Wrapping commit in its own PG_TRY
+     * keeps "exactly one EmitErrorReport per error" invariant — init-phase
+     * PG_CATCH above already ran PG_END_TRY, so a commit failure here does
+     * not double-report via init catch.
+     */
+    PG_TRY();
+    {
+        CommitTransactionCommand();
+
+        pgstat_report_activity(STATE_IDLE, sql);
+        pgstat_report_stat(true);
+
+        ReadyForQuery(DestRemote);
+    }
+    PG_CATCH();
+    {
+        /*
+         * v1.9 Phase 2: Commit-phase PG_CATCH. Same full Phase 1 pattern as
+         * init-phase catch above.
+         */
+        ErrorData *edata;
+
+        HOLD_INTERRUPTS();
+
+        MemoryContextSwitchTo(TopMemoryContext);
+        edata = CopyErrorData();
+
+        fdata->result_row_count = 0;
+        fdata->command_tag[0] = '\0';
+
+        if (edata->message != NULL)
+            strlcpy(fdata->error_message, edata->message, sizeof(fdata->error_message));
+        if (edata->detail != NULL)
+            strlcpy(fdata->error_detail, edata->detail, sizeof(fdata->error_detail));
+        if (edata->hint != NULL)
+            strlcpy(fdata->error_hint, edata->hint, sizeof(fdata->error_hint));
+        if (edata->context != NULL)
+            strlcpy(fdata->error_context, edata->context, sizeof(fdata->error_context));
+
+        pg_write_barrier();
+        snprintf(fdata->error_sqlstate, sizeof(fdata->error_sqlstate), "%s",
+                 unpack_sql_state(edata->sqlerrcode));
+
+        FreeErrorData(edata);
+
+        PG_TRY();
+        {
+            EmitErrorReport();
+        }
+        PG_CATCH();
+        {
+            FlushErrorState();
+        }
+        PG_END_TRY();
+
+        FlushErrorState();
+
+        /*
+         * CommitTransactionCommand may have partially torn down the xact
+         * before erroring. Guard the abort with IsTransactionState().
+         */
+        if (IsTransactionState())
+            AbortCurrentTransaction();
+
+        pgstat_report_activity(STATE_IDLE, NULL);
+        ReadyForQuery(DestRemote);
+        pq_flush();
+
+        RESUME_INTERRUPTS();
+
+        proc_exit(1);
+    }
+    PG_END_TRY();
 
     /*
      * Explicit ResourceOwner cleanup on normal exit path.
