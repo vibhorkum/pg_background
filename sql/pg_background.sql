@@ -897,8 +897,9 @@ END$$;
 -- -------------------------------------------------------------------------
 
 SELECT
-  workers_launched > 0   AS has_launched,
-  workers_failed >= 5    AS has_failed,
-  workers_canceled >= 1  AS has_canceled,
-  workers_active >= 0    AS has_active
+  workers_launched   > 0  AS has_launched,
+  workers_completed  > 0  AS has_completed,
+  workers_failed    >= 5  AS has_failed,
+  workers_canceled  >= 1  AS has_canceled,
+  workers_active    >= 0  AS has_active
 FROM pg_background_stats_v2();
