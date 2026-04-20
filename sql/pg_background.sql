@@ -65,7 +65,7 @@ SELECT pg_background_detach(
   pg_background_launch('INSERT INTO t_detach_v1 SELECT 1', 65536)
 );
 
-SELECT pg_sleep(0.2);
+SELECT pg_sleep(1.0);
 SELECT count(*) FROM t_detach_v1;
 
 DROP TABLE IF EXISTS t_detach_v2;
@@ -79,7 +79,7 @@ BEGIN
 END;
 $$;
 
-SELECT pg_sleep(0.2);
+SELECT pg_sleep(1.0);
 SELECT count(*) FROM t_detach_v2;
 
 -- -------------------------------------------------------------------------
