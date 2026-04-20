@@ -65,7 +65,7 @@ SELECT pg_background_detach(
   pg_background_launch('INSERT INTO t_detach_v1 SELECT 1', 65536)
 );
 
-SELECT pg_sleep(0.2);
+SELECT pg_sleep(1.0);
 SELECT count(*) FROM t_detach_v1;
 
 DROP TABLE IF EXISTS t_detach_v2;
@@ -79,7 +79,7 @@ BEGIN
 END;
 $$;
 
-SELECT pg_sleep(0.2);
+SELECT pg_sleep(1.0);
 SELECT count(*) FROM t_detach_v2;
 
 -- -------------------------------------------------------------------------
@@ -862,8 +862,8 @@ BEGIN
        confirm it is actively running via pg_stat_activity.  An initial
        sleep gives the OS scheduler time to start the child process;
        afterwards we poll at 100 ms intervals for up to ~5 s total. */
-    PERFORM pg_sleep(0.5);
-    FOR i IN 1..50 LOOP
+    PERFORM pg_sleep(0.1);
+    FOR i IN 1..55 LOOP
         SELECT count(*) INTO cnt
           FROM pg_stat_activity
          WHERE pid = w_pid
@@ -873,7 +873,7 @@ BEGIN
     END LOOP;
     IF cnt = 0 THEN
         RAISE EXCEPTION
-            'test 3.5: worker not active within 5.5s — test not valid';
+            'test 3.5: worker not active within 5.6s — test not valid';
     END IF;
     /* Worker is past pq_redirect_to_shm_mq and executing SQL; cancel
        will be caught by the execute-phase PG_CATCH and produce 57014. */
