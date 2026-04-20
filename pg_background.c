@@ -349,7 +349,6 @@ static HeapTuple form_result_tuple(pg_background_result_state *state,
 /* Worker execution */
 static void handle_sigterm(SIGNAL_ARGS);
 static void execute_sql_string(const char *sql, pg_background_fixed_data *fdata);
-static void pg_background_worker_error_exit(pg_background_fixed_data *fdata) pg_attribute_noreturn();
 static bool exists_binary_recv_fn(Oid type);
 
 /* Internal launcher (shared by v1 and v2 APIs) */
@@ -406,7 +405,6 @@ pgbg_portal_run_compat(Portal portal,
 }
 /* v2 API helpers */
 static uint64 pg_background_make_cookie(void);
-static inline long pgbg_timestamp_diff_ms(TimestampTz start, TimestampTz stop);
 static void pgbg_request_cancel(pg_background_worker_info *info);
 static void pgbg_send_cancel_signals(pg_background_worker_info *info, int32 grace_ms);
 static const char *pgbg_state_from_handle(pg_background_worker_info *info);
