@@ -2415,6 +2415,8 @@ pg_background_worker_error_exit(pg_background_fixed_data *fdata)
 {
     ErrorData  *edata;
 
+    Assert(fdata != NULL);  /* callers guarantee this; crash loudly if violated */
+
     HOLD_INTERRUPTS();
 
     /*
@@ -2443,10 +2445,9 @@ pg_background_worker_error_exit(pg_background_fixed_data *fdata)
      * readers before we set the publish flag (error_sqlstate).
      */
     pg_write_barrier();
-    snprintf(fdata->error_sqlstate, sizeof(fdata->error_sqlstate), "%s",
-             unpack_sql_state(edata->sqlerrcode));
-
-    FreeErrorData(edata);
+    /* unpack_sql_state() always returns 5 chars + NUL, fits in PGBG_ERROR_SQLSTATE_LEN */
+    strlcpy(fdata->error_sqlstate, unpack_sql_state(edata->sqlerrcode),
+            sizeof(fdata->error_sqlstate));
 
     /*
      * Emit the real 'E' frame over shm_mq so the launcher's result state
@@ -2461,10 +2462,19 @@ pg_background_worker_error_exit(pg_background_fixed_data *fdata)
     }
     PG_CATCH();
     {
-        FlushErrorState();
+        FlushErrorState();  /* flush any error raised by EmitErrorReport itself */
     }
     PG_END_TRY();
 
+    FreeErrorData(edata);
+
+    /*
+     * Two FlushErrorState calls are both required:
+     * - The PG_CATCH above flushed any secondary error raised by EmitErrorReport.
+     * - This call flushes the *original* worker error, which CopyErrorData() copied
+     *   but did not remove from the ErrorContext stack.  Without this, the caller's
+     *   PG_END_TRY would observe stale error state.
+     */
     FlushErrorState();
 
     if (IsTransactionState())
@@ -2650,10 +2660,9 @@ pg_background_worker_main(Datum main_arg)
     {
         /*
          * Init-phase error: BackgroundWorkerInitializeConnection,
-         * StartTransactionCommand, RestoreGUCState, SetUserIdAndSecContext,
-         * or disable_timeout after the inner execute phase.  Execute-phase
-         * SQL errors exit via proc_exit(1) inside the inner PG_CATCH above
-         * and never reach here.
+         * StartTransactionCommand, RestoreGUCState, or SetUserIdAndSecContext.
+         * Execute-phase SQL errors exit via proc_exit(1) inside the inner
+         * PG_CATCH above and never reach here.
          */
         pg_background_worker_error_exit(fdata);
     }
