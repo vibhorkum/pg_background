@@ -1239,7 +1239,7 @@ SELECT
   workers_canceled  >= 1  AS has_canceled,
   workers_active    >= 0  AS has_active
 FROM pg_background_stats_v2();
- has_launched | has_completed | has_failed | has_canceled | has_active
+ has_launched | has_completed | has_failed | has_canceled | has_active 
 --------------+---------------+------------+--------------+------------
  t            | t             | t          | t            | t
 (1 row)
