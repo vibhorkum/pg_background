@@ -154,15 +154,18 @@ SELECT extname, extversion FROM pg_extension WHERE extname = 'pg_background';
 
 `pg_background` does **not** require `shared_preload_libraries`. Workers are
 registered dynamically (`RegisterDynamicBackgroundWorker`) and each worker
-process loads the library on its own via `dlopen`.
+process loads the library dynamically when it starts.
 
 Adding `pg_background` to `shared_preload_libraries` is **optional** and only
 needed if you want the extension's GUC parameters
 (`pg_background.max_workers`, `pg_background.default_queue_size`,
 `pg_background.worker_timeout`) available in `postgresql.conf` and visible in
 all sessions from the start. Without SPL, the GUCs are registered on first
-use (`CREATE EXTENSION`, `LOAD`, or the first `launch_v2` call) and a `SET`
-before that point produces a harmless warning.
+use (`CREATE EXTENSION`, `LOAD`, or the first `launch_v2` call). A session
+`SET` before that point raises an `unrecognized configuration parameter`
+error. The warning behavior applies to configuration file entries (for
+example, `postgresql.conf` or `ALTER SYSTEM`) that are read before the
+library is loaded.
 
 | | Without SPL | With SPL |
 |---|---|---|

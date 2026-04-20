@@ -2455,7 +2455,7 @@ pg_background_worker_main(Datum main_arg)
     pq_redirect_to_shm_mq(seg, responseq);
 
     /*
-     * v1.9 Phase 2: Init-phase PG_TRY.
+     * Init-phase PG_TRY.
      *
      * Outer PG_TRY covers init-phase calls (BackgroundWorkerInitializeConnection,
      * StartTransactionCommand, RestoreGUCState, SetUserIdAndSecContext) and the
@@ -2470,212 +2470,212 @@ pg_background_worker_main(Datum main_arg)
      */
     PG_TRY();
     {
-    BackgroundWorkerInitializeConnection(NameStr(fdata->database),
-                                         NameStr(fdata->authenticated_user),
-                                         BGWORKER_BYPASS_ALLOWCONN);
+        BackgroundWorkerInitializeConnection(NameStr(fdata->database),
+                                             NameStr(fdata->authenticated_user),
+                                             BGWORKER_BYPASS_ALLOWCONN);
 
-    if (fdata->database_id != MyDatabaseId ||
-        fdata->authenticated_user_id != GetAuthenticatedUserId())
-        ereport(ERROR,
-                (errmsg("user or database renamed during pg_background startup")));
+        if (fdata->database_id != MyDatabaseId ||
+            fdata->authenticated_user_id != GetAuthenticatedUserId())
+            ereport(ERROR,
+                    (errmsg("user or database renamed during pg_background startup")));
 
-    StartTransactionCommand();
-    RestoreGUCState(gucstate);
-    CommitTransactionCommand();
+        StartTransactionCommand();
+        RestoreGUCState(gucstate);
+        CommitTransactionCommand();
 
-    /* If cancel was requested before we began, exit quietly */
-    /*
-     * I5: Volatile access for cancel flag race protection
-     * 
-     * The cancel_requested field is shared memory accessed by:
-     * 1. Launcher session (writes via pgbg_request_cancel)
-     * 2. Worker process (reads here and potentially in signal handler)
-     * 
-     * Without volatile, compiler could cache the read and miss concurrent updates.
-     * While PostgreSQL's CHECK_FOR_INTERRUPTS() handles most cancellation via
-     * signals, this flag provides best-effort early exit before SQL execution.
-     * 
-     * NOTE: Full memory barrier semantics not required here - we only need to
-     * prevent compiler optimization. Signal handler will set InterruptPending
-     * which is already volatile in PostgreSQL core.
-     */
-    if (*(volatile uint32 *)&fdata->cancel_requested != 0)
-    {
+        /* If cancel was requested before we began, exit quietly */
         /*
-         * Explicitly delete the ResourceOwner before proc_exit to ensure
-         * clean resource cleanup. This prevents warnings about leaked
-         * resources in PostgreSQL debug builds.
+         * I5: Volatile access for cancel flag race protection
+         * 
+         * The cancel_requested field is shared memory accessed by:
+         * 1. Launcher session (writes via pgbg_request_cancel)
+         * 2. Worker process (reads here and potentially in signal handler)
+         * 
+         * Without volatile, compiler could cache the read and miss concurrent updates.
+         * While PostgreSQL's CHECK_FOR_INTERRUPTS() handles most cancellation via
+         * signals, this flag provides best-effort early exit before SQL execution.
+         * 
+         * NOTE: Full memory barrier semantics not required here - we only need to
+         * prevent compiler optimization. Signal handler will set InterruptPending
+         * which is already volatile in PostgreSQL core.
          */
-        ResourceOwnerDelete(CurrentResourceOwner);
-        CurrentResourceOwner = NULL;
-        proc_exit(0);
-    }
+        if (*(volatile uint32 *)&fdata->cancel_requested != 0)
+        {
+            /*
+             * Explicitly delete the ResourceOwner before proc_exit to ensure
+             * clean resource cleanup. This prevents warnings about leaked
+             * resources in PostgreSQL debug builds.
+             */
+            ResourceOwnerDelete(CurrentResourceOwner);
+            CurrentResourceOwner = NULL;
+            proc_exit(0);
+        }
 
-    SetCurrentStatementStartTimestamp();
-    debug_query_string = sql;
-    pgstat_report_activity(STATE_RUNNING, sql);
+        SetCurrentStatementStartTimestamp();
+        debug_query_string = sql;
+        pgstat_report_activity(STATE_RUNNING, sql);
 
-    StartTransactionCommand();
-
-    /*
-     * Apply worker timeout. Priority:
-     * 1. pg_background.worker_timeout if set (> 0)
-     * 2. session's statement_timeout if set (> 0)
-     * 3. no timeout
-     */
-    {
-        int effective_timeout = 0;
-
-        if (pgbg_worker_timeout > 0)
-            effective_timeout = pgbg_worker_timeout;
-        else if (StatementTimeout > 0)
-            effective_timeout = StatementTimeout;
-
-        if (effective_timeout > 0)
-            enable_timeout_after(STATEMENT_TIMEOUT, effective_timeout);
-        else
-            disable_timeout(STATEMENT_TIMEOUT, false);
-    }
-
-    SetUserIdAndSecContext(fdata->current_user_id, fdata->sec_context);
-
-    /*
-     * Execute with error capture for v1.9 structured errors.
-     *
-     * NOTE: Structured error capture only covers SQL execution errors.
-     * Early worker failures (DSM attach, TOC lookup, connection init) happen
-     * before this point and won't populate error_sqlstate/error_message.
-     * For those cases, error_info_v2() returns NULL and result_info_v2().has_error
-     * is false, but the worker still fails visibly (detected via BgwHandleStatus).
-     * This is acceptable since early failures are infrastructure errors, not SQL errors.
-     */
-    PG_TRY();
-    {
-        execute_sql_string(sql, fdata);
-    }
-    PG_CATCH();
-    {
-        ErrorData *edata;
+        StartTransactionCommand();
 
         /*
-         * v1.9: Capture structured error info before re-throwing.
+         * Apply worker timeout. Priority:
+         * 1. pg_background.worker_timeout if set (> 0)
+         * 2. session's statement_timeout if set (> 0)
+         * 3. no timeout
+         */
+        {
+            int effective_timeout = 0;
+
+            if (pgbg_worker_timeout > 0)
+                effective_timeout = pgbg_worker_timeout;
+            else if (StatementTimeout > 0)
+                effective_timeout = StatementTimeout;
+
+            if (effective_timeout > 0)
+                enable_timeout_after(STATEMENT_TIMEOUT, effective_timeout);
+            else
+                disable_timeout(STATEMENT_TIMEOUT, false);
+        }
+
+        SetUserIdAndSecContext(fdata->current_user_id, fdata->sec_context);
+
+        /*
+         * Execute with error capture for v1.9 structured errors.
          *
-         * IMPORTANT: Must switch out of ErrorContext before calling
-         * CopyErrorData(). PostgreSQL's CopyErrorData() allocates the copy
-         * in CurrentMemoryContext, and asserts that it's not ErrorContext
-         * (to prevent use-after-free when ErrorContext is reset on next error).
-         */
-        MemoryContextSwitchTo(TopMemoryContext);
-        edata = CopyErrorData();
-
-        /*
-         * Clear result metadata to avoid stale values from earlier successful
-         * statements in a multi-statement SQL string. On error, row_count and
-         * command_tag should not reflect partial success.
-         */
-        fdata->result_row_count = 0;
-        fdata->command_tag[0] = '\0';
-
-        /*
-         * Write error fields in safe order for concurrent readers.
-         * error_sqlstate is the presence flag checked by error_info_v2 and
-         * result_info_v2, so write it LAST after all other fields are populated.
-         * This ensures readers never see partial error data.
-         */
-
-        /* Store error message (truncate if needed) */
-        if (edata->message != NULL)
-            strlcpy(fdata->error_message, edata->message, sizeof(fdata->error_message));
-
-        /* Store detail if available */
-        if (edata->detail != NULL)
-            strlcpy(fdata->error_detail, edata->detail, sizeof(fdata->error_detail));
-
-        /* Store hint if available */
-        if (edata->hint != NULL)
-            strlcpy(fdata->error_hint, edata->hint, sizeof(fdata->error_hint));
-
-        /* Store context if available */
-        if (edata->context != NULL)
-            strlcpy(fdata->error_context, edata->context, sizeof(fdata->error_context));
-
-        /*
-         * Write barrier: ensure all fields above are visible before the
-         * presence flag. pg_write_barrier() is a compiler barrier that
-         * prevents reordering; on x86 stores are already ordered.
-         */
-        pg_write_barrier();
-
-        /* Store SQLSTATE LAST - this is the publish flag for readers */
-        snprintf(fdata->error_sqlstate, sizeof(fdata->error_sqlstate), "%s",
-                 unpack_sql_state(edata->sqlerrcode));
-
-        FreeErrorData(edata);
-
-        /*
-         * v1.9: Propagate real SQLSTATE to the launcher via shm_mq.
-         *
-         * EmitErrorReport() writes the 'E' error frame to the hijacked
-         * destination set up by pq_redirect_to_shm_mq(), so the launcher
-         * sees the actual sqlerrcode (e.g. 22012 / P0001 / 23502) instead
-         * of degrading to ERRCODE_CONNECTION_FAILURE ("lost connection to
-         * worker process").
-         *
-         * Wrap in a nested PG_TRY: if pq_sendstring hits OOM inside
-         * EmitErrorReport it would ereport(ERROR) and recurse into this
-         * very PG_CATCH frame (→ backend crash). Mirror PostgreSQL core's
-         * ParallelWorkerMain() swallow pattern — on inner failure just
-         * FlushErrorState() and continue; the DSM error fields already
-         * carry the SQLSTATE so the launcher still gets useful info.
+         * NOTE: Structured error capture only covers SQL execution errors.
+         * Early worker failures (DSM attach, TOC lookup, connection init) happen
+         * before this point and won't populate error_sqlstate/error_message.
+         * For those cases, error_info_v2() returns NULL and result_info_v2().has_error
+         * is false, but the worker still fails visibly (detected via BgwHandleStatus).
+         * This is acceptable since early failures are infrastructure errors, not SQL errors.
          */
         PG_TRY();
         {
-            EmitErrorReport();
+            execute_sql_string(sql, fdata);
         }
         PG_CATCH();
         {
+            ErrorData *edata;
+
+            /*
+             * v1.9: Capture structured error info before re-throwing.
+             *
+             * IMPORTANT: Must switch out of ErrorContext before calling
+             * CopyErrorData(). PostgreSQL's CopyErrorData() allocates the copy
+             * in CurrentMemoryContext, and asserts that it's not ErrorContext
+             * (to prevent use-after-free when ErrorContext is reset on next error).
+             */
+            MemoryContextSwitchTo(TopMemoryContext);
+            edata = CopyErrorData();
+
+            /*
+             * Clear result metadata to avoid stale values from earlier successful
+             * statements in a multi-statement SQL string. On error, row_count and
+             * command_tag should not reflect partial success.
+             */
+            fdata->result_row_count = 0;
+            fdata->command_tag[0] = '\0';
+
+            /*
+             * Write error fields in safe order for concurrent readers.
+             * error_sqlstate is the presence flag checked by error_info_v2 and
+             * result_info_v2, so write it LAST after all other fields are populated.
+             * This ensures readers never see partial error data.
+             */
+
+            /* Store error message (truncate if needed) */
+            if (edata->message != NULL)
+                strlcpy(fdata->error_message, edata->message, sizeof(fdata->error_message));
+
+            /* Store detail if available */
+            if (edata->detail != NULL)
+                strlcpy(fdata->error_detail, edata->detail, sizeof(fdata->error_detail));
+
+            /* Store hint if available */
+            if (edata->hint != NULL)
+                strlcpy(fdata->error_hint, edata->hint, sizeof(fdata->error_hint));
+
+            /* Store context if available */
+            if (edata->context != NULL)
+                strlcpy(fdata->error_context, edata->context, sizeof(fdata->error_context));
+
+            /*
+             * Write barrier: ensure all fields above are visible before the
+             * presence flag. pg_write_barrier() is a compiler barrier that
+             * prevents reordering; on x86 stores are already ordered.
+             */
+            pg_write_barrier();
+
+            /* Store SQLSTATE LAST - this is the publish flag for readers */
+            snprintf(fdata->error_sqlstate, sizeof(fdata->error_sqlstate), "%s",
+                     unpack_sql_state(edata->sqlerrcode));
+
+            FreeErrorData(edata);
+
+            /*
+             * v1.9: Propagate real SQLSTATE to the launcher via shm_mq.
+             *
+             * EmitErrorReport() writes the 'E' error frame to the hijacked
+             * destination set up by pq_redirect_to_shm_mq(), so the launcher
+             * sees the actual sqlerrcode (e.g. 22012 / P0001 / 23502) instead
+             * of degrading to ERRCODE_CONNECTION_FAILURE ("lost connection to
+             * worker process").
+             *
+             * Wrap in a nested PG_TRY: if pq_sendstring hits OOM inside
+             * EmitErrorReport it would ereport(ERROR) and recurse into this
+             * very PG_CATCH frame (→ backend crash). Mirror PostgreSQL core's
+             * ParallelWorkerMain() swallow pattern — on inner failure just
+             * FlushErrorState() and continue; the DSM error fields already
+             * carry the SQLSTATE so the launcher still gets useful info.
+             */
+            PG_TRY();
+            {
+                EmitErrorReport();
+            }
+            PG_CATCH();
+            {
+                FlushErrorState();
+            }
+            PG_END_TRY();
+
+            /*
+             * Do NOT use PG_RE_THROW() here - that causes the worker to exit
+             * abnormally, which PostgreSQL interprets as a crash and terminates
+             * all connections. Instead, clean up and exit gracefully.
+             */
             FlushErrorState();
+
+            /* Abort the transaction cleanly */
+            if (IsTransactionState())
+                AbortCurrentTransaction();
+
+            /*
+             * Mirror happy-path shutdown: mark session idle, send 'Z' so the
+             * launcher's result state machine flips state->complete = true,
+             * then flush any bytes still buffered in pqmq before proc_exit
+             * detaches the shm_mq (otherwise trailing 'E'/'Z' frames would be
+             * dropped together with the queue).
+             */
+            pgstat_report_activity(STATE_IDLE, NULL);
+            ReadyForQuery(DestRemote);
+            pq_flush();
+
+            /*
+             * Exit with code 1 to indicate failure (not 0 for success).
+             * This is a clean exit, not a crash, so PostgreSQL won't panic.
+             */
+            proc_exit(1);
         }
         PG_END_TRY();
 
-        /*
-         * Do NOT use PG_RE_THROW() here - that causes the worker to exit
-         * abnormally, which PostgreSQL interprets as a crash and terminates
-         * all connections. Instead, clean up and exit gracefully.
-         */
-        FlushErrorState();
-
-        /* Abort the transaction cleanly */
-        if (IsTransactionState())
-            AbortCurrentTransaction();
-
-        /*
-         * Mirror happy-path shutdown: mark session idle, send 'Z' so the
-         * launcher's result state machine flips state->complete = true,
-         * then flush any bytes still buffered in pqmq before proc_exit
-         * detaches the shm_mq (otherwise trailing 'E'/'Z' frames would be
-         * dropped together with the queue).
-         */
-        pgstat_report_activity(STATE_IDLE, NULL);
-        ReadyForQuery(DestRemote);
-        pq_flush();
-
-        /*
-         * Exit with code 1 to indicate failure (not 0 for success).
-         * This is a clean exit, not a crash, so PostgreSQL won't panic.
-         */
-        proc_exit(1);
-    }
-    PG_END_TRY();
-
-    disable_timeout(STATEMENT_TIMEOUT, false);
+        disable_timeout(STATEMENT_TIMEOUT, false);
     }
     PG_CATCH();
     {
         ErrorData *edata;
 
         /*
-         * v1.9 Phase 2: Init-phase PG_CATCH.
+         * Init-phase PG_CATCH.
          *
          * Catches failures from BackgroundWorkerInitializeConnection,
          * StartTransactionCommand, RestoreGUCState, SetUserIdAndSecContext,
@@ -2745,20 +2745,20 @@ pg_background_worker_main(Datum main_arg)
     PG_END_TRY();
 
     /*
-     * v1.9 Phase 2: Commit-wrapper PG_TRY (SEQUENTIAL, NOT nested).
+     * Commit-wrapper PG_TRY (SEQUENTIAL, NOT nested).
      *
      * CommitTransactionCommand() fires deferred constraint triggers and
      * AFTER-triggers, so commit-time errors (23503 deferred FK, 57014 cancel,
      * 23505 deferred unique) surface here. Wrapping commit in its own PG_TRY
-     * keeps "exactly one EmitErrorReport per error" invariant — init-phase
+     * keeps "exactly one EmitErrorReport per error" invariant — the init-phase
      * PG_CATCH above already ran PG_END_TRY, so a commit failure here does
-     * not double-report via init catch.
+     * not double-report via the init catch.
      */
     PG_TRY();
     {
         CommitTransactionCommand();
 
-        pgstat_report_activity(STATE_IDLE, sql);
+        pgstat_report_activity(STATE_IDLE, NULL);
         pgstat_report_stat(true);
 
         ReadyForQuery(DestRemote);
@@ -2766,8 +2766,8 @@ pg_background_worker_main(Datum main_arg)
     PG_CATCH();
     {
         /*
-         * v1.9 Phase 2: Commit-phase PG_CATCH. Same full Phase 1 pattern as
-         * init-phase catch above.
+         * Commit-phase PG_CATCH. Same full pattern as the execute-phase
+         * catch above.
          */
         ErrorData *edata;
 

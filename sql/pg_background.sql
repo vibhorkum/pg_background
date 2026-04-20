@@ -753,7 +753,7 @@ BEGIN
     h := pg_background_launch_v2('SELECT 1/0');
     PERFORM pg_background_wait_v2(h.pid, h.cookie);
     SELECT sqlstate INTO s FROM pg_background_error_info_v2(h.pid, h.cookie);
-    IF s <> '22012' THEN
+    IF s IS DISTINCT FROM '22012' THEN
         RAISE EXCEPTION 'test 3.1: expected sqlstate 22012, got %', s;
     END IF;
     PERFORM pg_background_detach_v2(h.pid, h.cookie);
@@ -773,7 +773,7 @@ BEGIN
     h := pg_background_launch_v2('SELECT pgbg_test_raise_p0001()');
     PERFORM pg_background_wait_v2(h.pid, h.cookie);
     SELECT sqlstate INTO s FROM pg_background_error_info_v2(h.pid, h.cookie);
-    IF s <> 'P0001' THEN
+    IF s IS DISTINCT FROM 'P0001' THEN
         RAISE EXCEPTION 'test 3.2: expected sqlstate P0001, got %', s;
     END IF;
     PERFORM pg_background_detach_v2(h.pid, h.cookie);
@@ -796,7 +796,7 @@ BEGIN
     h := pg_background_launch_v2('INSERT INTO pgbg_test_nn_23502 VALUES (NULL)');
     PERFORM pg_background_wait_v2(h.pid, h.cookie);
     SELECT sqlstate INTO s FROM pg_background_error_info_v2(h.pid, h.cookie);
-    IF s <> '23502' THEN
+    IF s IS DISTINCT FROM '23502' THEN
         RAISE EXCEPTION 'test 3.3: expected sqlstate 23502, got %', s;
     END IF;
     PERFORM pg_background_detach_v2(h.pid, h.cookie);
@@ -832,7 +832,7 @@ BEGIN
     );
     PERFORM pg_background_wait_v2(h.pid, h.cookie);
     SELECT sqlstate INTO s FROM pg_background_error_info_v2(h.pid, h.cookie);
-    IF s <> '23503' THEN
+    IF s IS DISTINCT FROM '23503' THEN
         RAISE EXCEPTION 'test 3.4: expected sqlstate 23503, got %', s;
     END IF;
     PERFORM pg_background_detach_v2(h.pid, h.cookie);
@@ -884,7 +884,7 @@ BEGIN
         RAISE EXCEPTION 'test 3.5: worker did not stop within 5s after cancel';
     END IF;
     SELECT sqlstate INTO s FROM pg_background_error_info_v2(h.pid, h.cookie);
-    IF s <> '57014' THEN
+    IF s IS DISTINCT FROM '57014' THEN
         RAISE EXCEPTION 'test 3.5: expected sqlstate 57014, got %', s;
     END IF;
     PERFORM pg_background_detach_v2(h.pid, h.cookie);
