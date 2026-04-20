@@ -2613,16 +2613,7 @@ pg_background_worker_main(Datum main_arg)
 
         SetUserIdAndSecContext(fdata->current_user_id, fdata->sec_context);
 
-        /*
-         * Execute with error capture for v1.9 structured errors.
-         *
-         * NOTE: Structured error capture only covers SQL execution errors.
-         * Early worker failures (DSM attach, TOC lookup, connection init) happen
-         * before this point and won't populate error_sqlstate/error_message.
-         * For those cases, error_info_v2() returns NULL and result_info_v2().has_error
-         * is false, but the worker still fails visibly (detected via BgwHandleStatus).
-         * This is acceptable since early failures are infrastructure errors, not SQL errors.
-         */
+        /* execute-phase: errors call pg_background_worker_error_exit and proc_exit(1) */
         PG_TRY();
         {
             execute_sql_string(sql, fdata);
