@@ -2398,8 +2398,8 @@ pg_background_error_callback(void *arg)
 /*
  * pg_background_worker_error_exit
  *
- * Common error-path exit shared by all three worker PG_CATCH handlers
- * (execute-phase, init-phase, commit-phase).  Must be called from inside
+ * Common error-path exit shared by both worker PG_CATCH handlers
+ * (pre-commit, commit-phase).  Must be called from inside
  * a PG_CATCH block with the current error still on the stack.
  *
  * Copies error data into the DSM fixed block for the launcher, emits the
@@ -2639,9 +2639,9 @@ pg_background_worker_main(Datum main_arg)
      * CommitTransactionCommand() fires deferred constraint triggers and
      * AFTER-triggers, so commit-time errors (23503 deferred FK, 57014 cancel,
      * 23505 deferred unique) surface here. Wrapping commit in its own PG_TRY
-     * keeps "exactly one EmitErrorReport per error" invariant — the init-phase
+     * keeps "exactly one EmitErrorReport per error" invariant — the pre-commit
      * PG_CATCH above already ran PG_END_TRY, so a commit failure here does
-     * not double-report via the init catch.
+     * not double-report via the pre-commit catch.
      */
     PG_TRY();
     {
