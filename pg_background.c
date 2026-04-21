@@ -2549,13 +2549,19 @@ pg_background_worker_main(Datum main_arg)
     pq_redirect_to_shm_mq(seg, responseq);
 
     /*
-     * Init-phase PG_TRY.
+     * Combined init- and execute-phase PG_TRY.
      *
-     * Outer PG_TRY covers init-phase calls (BackgroundWorkerInitializeConnection,
-     * StartTransactionCommand, RestoreGUCState, SetUserIdAndSecContext) and the
-     * execute phase below. Commit is wrapped in a separate sequential PG_TRY
-     * after PG_END_TRY so that a single EmitErrorReport is produced per error
-     * (no overlap between init/execute and commit catches).
+     * A single PG_TRY covers all pre-commit work: connection init, GUC restore,
+     * user/database checks, and SQL execution.  Both init and execute errors
+     * produce identical handling — pg_background_worker_error_exit writes the
+     * DSM fields, emits the real 'E' frame, and calls proc_exit(1) — so a
+     * nested PG_TRY is not needed.  Flattening also avoids
+     * -Wshadow=compatible-local warnings that arise when nested PG_TRY blocks
+     * expand to the same local variable names.
+     *
+     * Commit is wrapped in a separate sequential PG_TRY after PG_END_TRY so
+     * that a single EmitErrorReport is produced per error with no overlap
+     * between the pre-commit and commit catch handlers.
      *
      * PG_TRY starts AFTER pq_redirect_to_shm_mq() so EmitErrorReport can write
      * the 'E' frame into the hijacked pqmq destination. Failures before redirect
@@ -2613,27 +2619,15 @@ pg_background_worker_main(Datum main_arg)
 
         SetUserIdAndSecContext(fdata->current_user_id, fdata->sec_context);
 
-        /* execute-phase: errors call pg_background_worker_error_exit and proc_exit(1) */
-        PG_TRY();
-        {
-            execute_sql_string(sql, fdata);
-        }
-        PG_CATCH();
-        {
-            /* SQL execution error — store in DSM, emit 'E' frame, exit. */
-            pg_background_worker_error_exit(fdata);
-        }
-        PG_END_TRY();
+        execute_sql_string(sql, fdata);
 
         disable_timeout(STATEMENT_TIMEOUT, false);
     }
     PG_CATCH();
     {
         /*
-         * Init-phase error: BackgroundWorkerInitializeConnection,
-         * StartTransactionCommand, RestoreGUCState, or SetUserIdAndSecContext.
-         * Execute-phase SQL errors exit via proc_exit(1) inside the inner
-         * PG_CATCH above and never reach here.
+         * Any pre-commit error — connection init, GUC restore, user/database
+         * check, or SQL execution — lands here. All paths call proc_exit(1).
          */
         pg_background_worker_error_exit(fdata);
     }
