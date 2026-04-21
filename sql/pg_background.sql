@@ -892,14 +892,15 @@ BEGIN
 END$$;
 
 -- -------------------------------------------------------------------------
--- Final stats check (defensive form: >= N instead of hard-coded counts)
--- This avoids brittleness when test count changes between phases.
+-- Final stats check: exact counts covering the full test suite.
+-- Baseline (master): 26 launched, 17 completed, 1 failed, 8 canceled, 0 active.
+-- Tests 3.1-3.4 add 4 failed workers; test 3.5 adds 1 canceled worker.
 -- -------------------------------------------------------------------------
 
 SELECT
-  workers_launched   > 0  AS has_launched,
-  workers_completed  > 0  AS has_completed,
-  workers_failed    >= 5  AS has_failed,
-  workers_canceled  >= 1  AS has_canceled,
-  workers_active    >= 0  AS has_active
+  workers_launched  AS total_launched,
+  workers_completed AS total_completed,
+  workers_failed    AS total_failed,
+  workers_canceled  AS total_canceled,
+  workers_active    AS currently_active
 FROM pg_background_stats_v2();
