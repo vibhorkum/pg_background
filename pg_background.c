@@ -2407,15 +2407,17 @@ pg_background_error_callback(void *arg)
  * instead of a synthesized 08006), sends ReadyForQuery, flushes the queue,
  * and calls proc_exit(1).  Never returns.
  *
- * HOLD_INTERRUPTS/RESUME_INTERRUPTS bracket the body so that SIGTERM cannot
- * interrupt pq_flush mid-frame, matching the ParallelWorkerMain pattern.
+ * HOLD_INTERRUPTS/RESUME_INTERRUPTS bracket only the pqmq protocol phase
+ * (EmitErrorReport + ReadyForQuery + pq_flush) so that SIGTERM cannot split
+ * an 'E'/'Z' frame mid-write or abort pq_flush before the queue drains.
+ * Keeping CopyErrorData and DSM writes outside the bracket means a palloc
+ * OOM there cannot leave InterruptHoldoffCount unbalanced.  Matches the
+ * ParallelWorkerMain pattern.
  */
 static void
 pg_background_worker_error_exit(pg_background_fixed_data *fdata)
 {
     ErrorData  *edata;
-
-    HOLD_INTERRUPTS();
 
     /*
      * Switch out of ErrorContext before CopyErrorData — PostgreSQL asserts
@@ -2447,6 +2449,15 @@ pg_background_worker_error_exit(pg_background_fixed_data *fdata)
              unpack_sql_state(edata->sqlerrcode));
 
     FreeErrorData(edata);
+
+    /*
+     * Hold interrupts only across the pqmq protocol writes below, so a
+     * SIGTERM arriving now cannot split the 'E'/'Z' frames or truncate
+     * pq_flush.  CopyErrorData and DSM writes above ran with normal
+     * interrupt handling; if either had OOMed, the new ERROR would have
+     * propagated cleanly without leaving the holdoff counter unbalanced.
+     */
+    HOLD_INTERRUPTS();
 
     /*
      * Emit the real 'E' frame over shm_mq so the launcher's result state
