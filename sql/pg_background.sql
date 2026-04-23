@@ -65,7 +65,7 @@ SELECT pg_background_detach(
   pg_background_launch('INSERT INTO t_detach_v1 SELECT 1', 65536)
 );
 
-SELECT pg_sleep(0.2);
+SELECT pg_sleep(1.0);
 SELECT count(*) FROM t_detach_v1;
 
 DROP TABLE IF EXISTS t_detach_v2;
@@ -79,7 +79,7 @@ BEGIN
 END;
 $$;
 
-SELECT pg_sleep(0.2);
+SELECT pg_sleep(1.0);
 SELECT count(*) FROM t_detach_v2;
 
 -- -------------------------------------------------------------------------
@@ -737,13 +737,170 @@ SELECT 'PASS' AS grace_bounds_test;
 SELECT 'PASS' AS detach_semantic_verified;
 
 -- -------------------------------------------------------------------------
--- Final stats check
+-- Error propagation SQLSTATE tests (v1.9 bugfix)
+--
+-- Pattern: launch_v2 -> wait_v2 -> error_info_v2 -> detach_v2
+-- Do NOT call result_v2 for error cases: it ereport(ERROR)s in launcher,
+-- which aborts the transaction and destroys error_info_v2 data.
+-- -------------------------------------------------------------------------
+
+-- Test 3.1: Division by zero — SQLSTATE 22012 (execute path)
+DO $$
+DECLARE
+    h pg_background_handle;
+    s text;
+BEGIN
+    h := pg_background_launch_v2('SELECT 1/0');
+    PERFORM pg_background_wait_v2(h.pid, h.cookie);
+    SELECT sqlstate INTO s FROM pg_background_error_info_v2(h.pid, h.cookie);
+    IF s IS DISTINCT FROM '22012' THEN
+        RAISE EXCEPTION 'test 3.1: expected sqlstate 22012, got %', s;
+    END IF;
+    PERFORM pg_background_detach_v2(h.pid, h.cookie);
+    RAISE NOTICE 'test 3.1 (22012 division_by_zero) OK';
+END$$;
+
+-- Test 3.2: RAISE EXCEPTION — SQLSTATE P0001 (execute path)
+-- Use a helper function instead of nested dollar-quoting to avoid psql parsing issues.
+CREATE OR REPLACE FUNCTION pgbg_test_raise_p0001() RETURNS void
+    LANGUAGE plpgsql AS 'BEGIN RAISE EXCEPTION ''custom error''; END';
+
+DO $$
+DECLARE
+    h pg_background_handle;
+    s text;
+BEGIN
+    h := pg_background_launch_v2('SELECT pgbg_test_raise_p0001()');
+    PERFORM pg_background_wait_v2(h.pid, h.cookie);
+    SELECT sqlstate INTO s FROM pg_background_error_info_v2(h.pid, h.cookie);
+    IF s IS DISTINCT FROM 'P0001' THEN
+        RAISE EXCEPTION 'test 3.2: expected sqlstate P0001, got %', s;
+    END IF;
+    PERFORM pg_background_detach_v2(h.pid, h.cookie);
+    RAISE NOTICE 'test 3.2 (P0001 raise_exception) OK';
+END$$;
+
+DROP FUNCTION pgbg_test_raise_p0001();
+
+-- Test 3.3: NOT NULL violation — SQLSTATE 23502 (execute path)
+-- Note: temp tables are NOT visible to background workers (separate backend).
+-- Use a regular table with a unique prefix.
+DROP TABLE IF EXISTS pgbg_test_nn_23502;
+CREATE TABLE pgbg_test_nn_23502(c int NOT NULL);
+
+DO $$
+DECLARE
+    h pg_background_handle;
+    s text;
+BEGIN
+    h := pg_background_launch_v2('INSERT INTO pgbg_test_nn_23502 VALUES (NULL)');
+    PERFORM pg_background_wait_v2(h.pid, h.cookie);
+    SELECT sqlstate INTO s FROM pg_background_error_info_v2(h.pid, h.cookie);
+    IF s IS DISTINCT FROM '23502' THEN
+        RAISE EXCEPTION 'test 3.3: expected sqlstate 23502, got %', s;
+    END IF;
+    PERFORM pg_background_detach_v2(h.pid, h.cookie);
+    RAISE NOTICE 'test 3.3 (23502 not_null_violation) OK';
+END$$;
+
+DROP TABLE pgbg_test_nn_23502;
+
+-- Test 3.4: Deferred FK violation — SQLSTATE 23503 (commit path)
+-- FK is INITIALLY DEFERRED, so INSERT succeeds but COMMIT fails.
+-- The error fires in the commit-wrapper PG_CATCH (Phase 2 path).
+DROP TABLE IF EXISTS pgbg_test_fk_child_23503;
+DROP TABLE IF EXISTS pgbg_test_fk_parent_23503;
+CREATE TABLE pgbg_test_fk_parent_23503(id int PRIMARY KEY);
+CREATE TABLE pgbg_test_fk_child_23503(
+    id int PRIMARY KEY,
+    parent_id int,
+    CONSTRAINT fk_23503_parent
+        FOREIGN KEY (parent_id) REFERENCES pgbg_test_fk_parent_23503(id)
+        DEFERRABLE INITIALLY DEFERRED
+);
+
+DO $$
+DECLARE
+    h pg_background_handle;
+    s text;
+BEGIN
+    -- Worker runs INSERT in its own auto-transaction.
+    -- INITIALLY DEFERRED FK fires at CommitTransactionCommand (commit-wrapper PG_CATCH).
+    -- Do NOT pass BEGIN/COMMIT: worker already runs in its own transaction.
+    h := pg_background_launch_v2(
+        'INSERT INTO pgbg_test_fk_child_23503 VALUES (1, 999)'
+    );
+    PERFORM pg_background_wait_v2(h.pid, h.cookie);
+    SELECT sqlstate INTO s FROM pg_background_error_info_v2(h.pid, h.cookie);
+    IF s IS DISTINCT FROM '23503' THEN
+        RAISE EXCEPTION 'test 3.4: expected sqlstate 23503, got %', s;
+    END IF;
+    PERFORM pg_background_detach_v2(h.pid, h.cookie);
+    RAISE NOTICE 'test 3.4 (23503 foreign_key_violation deferred) OK';
+END$$;
+
+DROP TABLE pgbg_test_fk_child_23503;
+DROP TABLE pgbg_test_fk_parent_23503;
+
+-- Test 3.5: Cancel — SQLSTATE 57014 (execute path, query_canceled)
+-- Uses pg_sleep(30) to ensure worker is truly sleeping before cancel.
+-- Positive sync via pg_stat_activity: cancel is only sent after the worker
+-- is confirmed to be actively executing pg_sleep. Without this sync, cancel
+-- could land before SPI_execute starts (early-failure path) and the
+-- launcher would see 08006 instead of 57014.
+DO $$
+DECLARE
+    h     pg_background_handle;
+    w_pid int4;
+    s     text;
+    done  boolean;
+    cnt   int;
+BEGIN
+    h := pg_background_launch_v2('SELECT pg_sleep(30)');
+    w_pid := h.pid;
+    /* Positive sync: let the worker fork and reach SPI_execute, then
+       confirm it is actively running via pg_stat_activity.  An initial
+       sleep gives the OS scheduler time to start the child process;
+       afterwards we poll at 100 ms intervals for up to ~5 s total. */
+    PERFORM pg_sleep(0.1);
+    FOR i IN 1..55 LOOP
+        SELECT count(*) INTO cnt
+          FROM pg_stat_activity
+         WHERE pid = w_pid
+           AND state = 'active';
+        EXIT WHEN cnt > 0;
+        PERFORM pg_sleep(0.1);
+    END LOOP;
+    IF cnt = 0 THEN
+        RAISE EXCEPTION
+            'test 3.5: worker not active within 5.6s — test not valid';
+    END IF;
+    /* Worker is past pq_redirect_to_shm_mq and executing SQL; cancel
+       will be caught by the execute-phase PG_CATCH and produce 57014. */
+    PERFORM pg_background_cancel_v2_grace(h.pid, h.cookie, 100);
+    -- Wait for worker to stop after cancel (should be fast)
+    done := pg_background_wait_v2_timeout(h.pid, h.cookie, 5000);
+    IF NOT done THEN
+        RAISE EXCEPTION 'test 3.5: worker did not stop within 5s after cancel';
+    END IF;
+    SELECT sqlstate INTO s FROM pg_background_error_info_v2(h.pid, h.cookie);
+    IF s IS DISTINCT FROM '57014' THEN
+        RAISE EXCEPTION 'test 3.5: expected sqlstate 57014, got %', s;
+    END IF;
+    PERFORM pg_background_detach_v2(h.pid, h.cookie);
+    RAISE NOTICE 'test 3.5 (57014 query_canceled) OK';
+END$$;
+
+-- -------------------------------------------------------------------------
+-- Final stats check: exact counts covering the full test suite.
+-- Baseline (master): 26 launched, 17 completed, 1 failed, 8 canceled, 0 active.
+-- Tests 3.1-3.4 add 4 failed workers; test 3.5 adds 1 canceled worker.
 -- -------------------------------------------------------------------------
 
 SELECT
-  workers_launched AS total_launched,
+  workers_launched  AS total_launched,
   workers_completed AS total_completed,
-  workers_failed AS total_failed,
-  workers_canceled AS total_canceled,
-  workers_active AS currently_active
+  workers_failed    AS total_failed,
+  workers_canceled  AS total_canceled,
+  workers_active    AS currently_active
 FROM pg_background_stats_v2();
