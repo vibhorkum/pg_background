@@ -150,6 +150,30 @@ SELECT extname, extversion FROM pg_extension WHERE extname = 'pg_background';
 --  pg_background | 1.9
 ```
 
+### Library Loading
+
+`pg_background` does **not** require `shared_preload_libraries`. Workers are
+registered dynamically (`RegisterDynamicBackgroundWorker`) and each worker
+process loads the library dynamically when it starts.
+
+Adding `pg_background` to `shared_preload_libraries` is **optional** and only
+needed if you want the extension's GUC parameters
+(`pg_background.max_workers`, `pg_background.default_queue_size`,
+`pg_background.worker_timeout`) available in `postgresql.conf` and visible in
+all sessions from the start. Without SPL, the GUCs are registered on first
+use (`CREATE EXTENSION`, `LOAD`, or the first `launch_v2` call). A session
+`SET` before that point raises an `unrecognized configuration parameter`
+error. The warning behavior applies to configuration file entries (for
+example, `postgresql.conf` or `ALTER SYSTEM`) that are read before the
+library is loaded.
+
+| | Without SPL | With SPL |
+|---|---|---|
+| Extension works? | Yes | Yes |
+| GUCs in `postgresql.conf` | Not until first load | Immediately |
+| After `make install` | Workers pick up new `.so` automatically | **Restart required** (postmaster caches the library) |
+| Recommended for | Development, staging, simple setups | Production with tuned GUCs |
+
 ### Custom Schema Installation
 
 The extension is **relocatable**, allowing installation in any schema. This is useful for organizing extensions or avoiding namespace conflicts.
@@ -492,6 +516,108 @@ CREATE TYPE pg_background_error AS (
   context   text    -- Error context/stack trace
 );
 ```
+
+#### Structured Error Returns — SQLSTATE Semantics
+
+`pg_background_error_info_v2(pid, cookie)` returns the **real** five-character
+`SQLSTATE` emitted by the worker's failed statement, not a synthesized
+`08006 "lost connection to worker process"`. The worker's `PG_CATCH` handler
+copies `ErrorData` from the caught `ereport(ERROR)`, stores the fields in DSM
+(with `error_sqlstate` written last as a publish flag) and calls
+`EmitErrorReport()` + `ReadyForQuery(DestRemote)` + `pq_flush()` so the launcher
+sees the actual `'E'` error frame over `shm_mq`.
+
+Typical codes returned end-to-end (v1.9+):
+
+| Trigger SQL                                      | Returned `sqlstate` | Path            |
+|--------------------------------------------------|---------------------|-----------------|
+| `SELECT 1/0`                                     | `22012`             | execute         |
+| `RAISE EXCEPTION 'custom error'`                 | `P0001`             | execute         |
+| `INSERT NULL` into `NOT NULL` column             | `23502`             | execute         |
+| `INSERT` violating `INITIALLY DEFERRED` FK       | `23503`             | commit          |
+| `pg_background_cancel_v2()` during `pg_sleep()`  | `57014`             | execute         |
+
+**Recommended pattern**: call `error_info_v2` from the same PL/pgSQL
+`EXCEPTION` block that observes the failure. Once the launcher's transaction
+aborts, `cleanup_worker_info` removes the hash entry and the next transaction
+will see `ERRCODE_UNDEFINED_OBJECT` ("PID N is not attached to this session").
+
+```sql
+DO $$
+DECLARE
+    h pg_background_handle;
+    s text;
+BEGIN
+    h := pg_background_launch_v2('SELECT 1/0');
+    PERFORM pg_background_wait_v2(h.pid, h.cookie);
+    SELECT sqlstate INTO s
+      FROM pg_background_error_info_v2(h.pid, h.cookie);
+    RAISE NOTICE 'worker sqlstate=%', s;   -- 22012
+    PERFORM pg_background_detach_v2(h.pid, h.cookie);
+END$$;
+```
+
+> **Important — do not call `result_v2()` on an error path.** `result_v2()`
+> re-raises the worker's error in the launcher via `ereport(ERROR)`, which
+> aborts the current transaction and triggers `cleanup_worker_info` before you
+> can inspect `error_info_v2()`. For error diagnosis, the supported pattern is
+> `launch_v2 -> wait_v2 -> error_info_v2 -> detach_v2` (no `result_v2`).
+
+> **`08006` is now reserved for infra-level failures only.** The launcher
+> synthesizes `ERRCODE_CONNECTION_FAILURE "lost connection to worker process"`
+> only when the worker died before it could propagate a real error (see
+> [Known Limitations — Early worker failures](#9-early-worker-failures-before-pq_redirect_to_shm_mq)).
+> Under normal operation, any SQL-level error inside the worker surfaces as
+> the concrete SQLSTATE shown in the table above.
+
+### Deployment Order
+
+The fix for end-to-end SQLSTATE propagation lives in the compiled
+`pg_background.so`. Whether a server restart is required depends on how the
+library is loaded (see [Library Loading](#library-loading)):
+
+- **With `shared_preload_libraries`**: the postmaster dlopens the library
+  once at startup and every forked background worker inherits the cached
+  handle. After replacing the `.so` on disk you must restart PostgreSQL —
+  a plain `pg_reload_conf()` is not sufficient.
+- **Without SPL** (the default): each background worker dlopens the library
+  in its own process, so a fresh `pg_background_launch_v2(...)` call picks
+  up the new binary automatically. No server restart is needed; at most,
+  reconnect long-lived client sessions.
+
+1. Build and install: `make clean && make && sudo make install`.
+2. **Reload the library:**
+   - SPL setup → `pg_ctl restart` / systemd / platform equivalent.
+   - On-demand setup → no action required (optionally reconnect clients).
+3. Verify on staging that real SQLSTATEs propagate:
+   ```sql
+   DO $$
+   DECLARE h pg_background_handle; s text;
+   BEGIN
+       h := pg_background_launch_v2('SELECT 1/0');
+       PERFORM pg_background_wait_v2(h.pid, h.cookie);
+       SELECT sqlstate INTO s FROM pg_background_error_info_v2(h.pid, h.cookie);
+       ASSERT s = '22012', 'expected 22012, got ' || s;
+       PERFORM pg_background_detach_v2(h.pid, h.cookie);
+   END$$;
+   ```
+4. **Only after step 3 succeeds**, remove any PL/pgSQL workarounds that read
+   `error_info_v2` as a fallback after catching `08006`. Before the fix ships
+   they were the only way to get a usable SQLSTATE; after the fix they become
+   dead code, but keeping them in place during the rollout is harmless.
+
+### Rollback Order
+
+To roll back to a pre-fix `.so` (for example if another extension in the same
+image regresses):
+
+1. **First** restore the PL/pgSQL workarounds in user code (they expect
+   `SQLERRM` to degrade to `08006` and then read `error_info_v2` out of band).
+2. **Only after step 1**, install the old `.so` and restart PostgreSQL.
+
+Doing rollback in the reverse order (old `.so` first) causes user functions to
+see raw `08006` errors without the fallback path, which can manifest as
+`WHEN others` branches swallowing what used to be diagnosable SQLSTATEs.
 
 ### V1 Functions (Deprecated)
 
@@ -1880,6 +2006,47 @@ WHERE backend_type LIKE '%background%';
 **Impact**: Cannot implement 2PC-like patterns natively.
 
 **Workaround**: Use `dblink` with `PREPARE TRANSACTION` for XA-like semantics.
+
+### 9. Early Worker Failures (Before `pq_redirect_to_shm_mq`)
+
+**Limitation**: Errors raised in the worker **before** `pq_redirect_to_shm_mq()`
+installs the shm_mq destination cannot be captured as a structured error.
+
+**What is "early"**: The small window between worker startup and the
+`pq_redirect_to_shm_mq()` call in `pg_background_worker_main` — primarily:
+
+- Failure to attach the DSM segment (`dsm_attach` returning NULL).
+- `shm_toc_lookup` failure (missing TOC entry — implies an internally
+  inconsistent DSM, typically a sign of server misconfiguration).
+- Out-of-memory during the initial worker setup allocations.
+
+**Observable behavior for the launcher**:
+
+- `pg_background_result_v2()` raises `SQLSTATE 08006 "lost connection to
+  worker process"` when it tries to read results from the detached shm_mq.
+  `pg_background_wait_v2()` blocks on `WaitForBackgroundWorkerShutdown` and
+  returns silently — it does not raise; the early worker exit leaves no
+  structured error on the wire for it to observe.
+- `pg_background_error_info_v2()` returns `NULL` row (no structured info).
+- `pg_background_result_info_v2()` reports `completed=true, has_error=false`
+  since the worker never got far enough to run SQL.
+
+**Why it cannot be captured**: the worker's error-propagation contract
+(`EmitErrorReport` over shm_mq, `ReadyForQuery(DestRemote)`, `pq_flush`)
+requires the shm_mq destination to already be installed. Before
+`pq_redirect_to_shm_mq`, `ereport(ERROR)` goes to the server log only; the
+launcher observes the worker exit and synthesizes `08006`.
+
+**Impact in practice**: these are infrastructure-level failures (DSM OOM,
+misconfigured `dynamic_shared_memory_type`, missing `shm_toc` entry). They
+are rare in a correctly configured server and do not indicate user-level SQL
+problems.
+
+**Recommended handling**: treat a `08006` from `pg_background_result_v2()`
+as an infra signal — do not attempt to parse an `error_info_v2` row that may
+be `NULL`. All ordinary SQL errors (syntax, constraint violation,
+division-by-zero, `RAISE EXCEPTION`, statement cancel) propagate through the
+normal path and appear as their real SQLSTATE, not `08006`.
 
 ---
 

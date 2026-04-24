@@ -66,14 +66,13 @@ docker exec "${CONTAINER_NAME}" bash -c "
     locale-gen
 "
 
-step "Downloading PostgreSQL ${PG_VERSION} source..."
+# Use the .0 release tarball — it is kept on the PostgreSQL FTP permanently.
+# The exact patch level does not matter for assert-enabled regression testing;
+# we only need the source to build with --enable-cassert.
+step "Downloading PostgreSQL ${PG_VERSION}.0 source..."
 docker exec "${CONTAINER_NAME}" bash -c "
     cd /tmp
-    wget -q https://ftp.postgresql.org/pub/source/v${PG_VERSION}.0/postgresql-${PG_VERSION}.0.tar.gz || \
-    wget -q https://ftp.postgresql.org/pub/source/v${PG_VERSION}.1/postgresql-${PG_VERSION}.1.tar.gz || \
-    wget -q https://ftp.postgresql.org/pub/source/v${PG_VERSION}.2/postgresql-${PG_VERSION}.2.tar.gz || \
-    wget -q https://ftp.postgresql.org/pub/source/v${PG_VERSION}.21/postgresql-${PG_VERSION}.21.tar.gz || \
-    wget -q https://ftp.postgresql.org/pub/source/v${PG_VERSION}.22/postgresql-${PG_VERSION}.22.tar.gz
+    wget -q https://ftp.postgresql.org/pub/source/v${PG_VERSION}.0/postgresql-${PG_VERSION}.0.tar.gz
     tar xzf postgresql-*.tar.gz
 "
 

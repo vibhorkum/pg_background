@@ -264,7 +264,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg: [14, 17]
+        pg: [14, 15, 16, 17, 18]
 
     steps:
       - name: Checkout code
