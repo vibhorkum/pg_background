@@ -365,6 +365,7 @@ static void ensure_worker_info_memory_context(void);
 
 /* Polling with exponential backoff */
 static void pgbg_sleep_with_backoff(long *interval_us, long remaining_us);
+static bool pgbg_wait_for_stop(pg_background_worker_info *info, int32 timeout_ms);
 
 /*
  * PostgreSQL 18 changed portal APIs:
@@ -664,6 +665,50 @@ pgbg_sleep_with_backoff(long *interval_us, long remaining_us)
     *interval_us *= PGBG_POLL_BACKOFF_FACTOR;
     if (*interval_us > PGBG_POLL_INTERVAL_MAX_US)
         *interval_us = PGBG_POLL_INTERVAL_MAX_US;
+}
+
+/*
+ * pgbg_wait_for_stop
+ *     Block until the worker stops, or timeout_ms elapses.
+ *
+ * Returns:
+ *   true  - worker is BGWH_STOPPED (or info/handle was NULL: nothing to wait for)
+ *   false - timeout expired and the worker is still running
+ *
+ * Shared by pg_background_wait_v2_timeout and pgbg_send_cancel_signals'
+ * grace period; keeping the loop in one place makes the
+ * CHECK_FOR_INTERRUPTS / backoff / remaining-time accounting consistent.
+ */
+static bool
+pgbg_wait_for_stop(pg_background_worker_info *info, int32 timeout_ms)
+{
+    TimestampTz start;
+    long        poll_interval_us = PGBG_POLL_INTERVAL_MIN_US;
+
+    if (info == NULL || info->handle == NULL)
+        return true;
+
+    start = GetCurrentTimestamp();
+
+    for (;;)
+    {
+        pid_t            wpid = 0;
+        BgwHandleStatus  hs;
+        long             elapsed_ms;
+        long             remaining_us;
+
+        hs = GetBackgroundWorkerPid(info->handle, &wpid);
+        if (hs == BGWH_STOPPED)
+            return true;
+
+        elapsed_ms = pgbg_timestamp_diff_ms(start, GetCurrentTimestamp());
+        if (elapsed_ms >= timeout_ms)
+            return false;
+
+        remaining_us = (timeout_ms - elapsed_ms) * 1000L;
+        pgbg_sleep_with_backoff(&poll_interval_us, remaining_us);
+        CHECK_FOR_INTERRUPTS();
+    }
 }
 
 /* ============================================================================
@@ -1800,8 +1845,6 @@ pg_background_wait_v2_timeout(PG_FUNCTION_ARGS)
     int64 cookie_in = PG_GETARG_INT64(1);
     int32 timeout_ms = PG_GETARG_INT32(2);
     pg_background_worker_info *info = find_worker_info(pid);
-    TimestampTz start;
-    long poll_interval_us = PGBG_POLL_INTERVAL_MIN_US;
 
     if (info == NULL)
         ereport(ERROR,
@@ -1821,33 +1864,7 @@ pg_background_wait_v2_timeout(PG_FUNCTION_ARGS)
     else if (timeout_ms > PGBG_TIMEOUT_MS_MAX)
         timeout_ms = PGBG_TIMEOUT_MS_MAX;
 
-    start = GetCurrentTimestamp();
-
-    for (;;)
-    {
-        pid_t wpid = 0;
-        BgwHandleStatus hs;
-        long elapsed_ms;
-        long remaining_us;
-
-        if (info->handle == NULL)
-            PG_RETURN_BOOL(true);
-
-        hs = GetBackgroundWorkerPid(info->handle, &wpid);
-        if (hs == BGWH_STOPPED)
-            PG_RETURN_BOOL(true);
-
-        elapsed_ms = pgbg_timestamp_diff_ms(start, GetCurrentTimestamp());
-        if (elapsed_ms >= timeout_ms)
-            PG_RETURN_BOOL(false);
-
-        /* Calculate remaining time to avoid overshooting timeout */
-        remaining_us = (timeout_ms - elapsed_ms) * 1000L;
-
-        /* Sleep with exponential backoff, capped to remaining time */
-        pgbg_sleep_with_backoff(&poll_interval_us, remaining_us);
-        CHECK_FOR_INTERRUPTS();
-    }
+    PG_RETURN_BOOL(pgbg_wait_for_stop(info, timeout_ms));
 }
 
 /* ============================================================================
@@ -2040,39 +2057,34 @@ pgbg_request_cancel(pg_background_worker_info *info)
 static void
 pgbg_send_cancel_signals(pg_background_worker_info *info, int32 grace_ms)
 {
-    TimestampTz start;
-    pid_t wpid = 0;
-    BgwHandleStatus hs;
-    long poll_interval_us = PGBG_POLL_INTERVAL_MIN_US;
-
     if (info == NULL)
         return;
 
 #ifndef WIN32
     /*
      * Windows Cancel Limitations
-     * 
+     *
      * On Unix systems, we use SIGTERM for cooperative cancellation.
      * Worker checks InterruptPending via CHECK_FOR_INTERRUPTS() in query
      * execution and can cleanly abort.
-     * 
+     *
      * WINDOWS LIMITATION:
      * PostgreSQL on Windows does not support signal-based cancellation for
      * background workers. The kill() call is not available, and Windows uses
      * events/threads for IPC instead of signals.
-     * 
+     *
      * WORKAROUND:
      * Workers still check fdata->cancel_requested flag before executing SQL.
      * This provides limited cancellation:
      * - WORKS: Cancel before worker starts SQL execution
      * - DOES NOT WORK: Cancel during long-running query (no mid-query interrupt)
-     * 
+     *
      * PRODUCTION IMPACT:
      * On Windows, cancel_v2() may not interrupt long-running SQL. Use:
      * 1. statement_timeout to bound query execution time
      * 2. Application-level timeouts
      * 3. Connection pooler limits
-     * 
+     *
      * SEE ALSO: windows/ReadMe.md for Windows-specific build notes
      */
     if (info->pid > 0)
@@ -2082,28 +2094,12 @@ pgbg_send_cancel_signals(pg_background_worker_info *info, int32 grace_ms)
     if (grace_ms <= 0 || info->handle == NULL)
         return;
 
-    start = GetCurrentTimestamp();
-
-    for (;;)
-    {
-        long elapsed_ms;
-        long remaining_us;
-
-        hs = GetBackgroundWorkerPid(info->handle, &wpid);
-        if (hs == BGWH_STOPPED)
-            return;
-
-        elapsed_ms = pgbg_timestamp_diff_ms(start, GetCurrentTimestamp());
-        if (elapsed_ms >= grace_ms)
-            break;
-
-        /* Calculate remaining time to avoid overshooting grace period */
-        remaining_us = (grace_ms - elapsed_ms) * 1000L;
-
-        /* Sleep with exponential backoff, capped to remaining time */
-        pgbg_sleep_with_backoff(&poll_interval_us, remaining_us);
-        CHECK_FOR_INTERRUPTS();
-    }
+    /*
+     * Wait up to grace_ms for the worker to exit cooperatively.
+     * If it does not exit, escalate to SIGKILL on Unix.
+     */
+    if (pgbg_wait_for_stop(info, grace_ms))
+        return;
 
 #ifndef WIN32
     if (info->pid > 0)
