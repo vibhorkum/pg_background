@@ -51,7 +51,7 @@ main() {
 
     echo ""
     echo "========================================================================"
-    echo "pg_background UPGRADE PATH TEST (1.8 -> 1.9)"
+    echo "pg_background UPGRADE PATH TEST (1.8 -> 1.9 -> 1.10)"
     echo "========================================================================"
     echo "PostgreSQL Version: $PG_VERSION"
     echo "========================================================================"
@@ -123,7 +123,7 @@ main() {
 
     echo ""
     echo "========================================================================"
-    log_test "UPGRADE PATH TEST: 1.8 -> 1.9"
+    log_test "UPGRADE PATH TEST: 1.8 -> 1.9 -> 1.10"
     echo "========================================================================"
 
     local TEST_RESULT=0
@@ -326,6 +326,71 @@ EOF
         log_info "Old functionality verified after upgrade"
     fi
 
+    # Test 6: Upgrade to 1.10
+    log_test "Step 6: Upgrading from 1.9 to 1.10..."
+    if docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres -c "ALTER EXTENSION pg_background UPDATE TO '1.10';" 2>&1; then
+        log_info "Upgrade to 1.10 completed"
+    else
+        log_error "Upgrade to 1.10 failed"
+        TEST_RESULT=1
+    fi
+
+    INSTALLED_VERSION=$(docker exec "$CONTAINER_NAME" psql -X -t -A -U postgres -c "SELECT extversion FROM pg_extension WHERE extname = 'pg_background';")
+    if [ "$INSTALLED_VERSION" = "1.10" ]; then
+        log_info "Verified version 1.10 is installed"
+    else
+        log_error "Expected version 1.10 after upgrade, got: $INSTALLED_VERSION"
+        TEST_RESULT=1
+    fi
+
+    # Test 7: Verify 1.10 new features work
+    log_test "Step 7: Verifying 1.10 new features..."
+    if ! docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres <<'EOF'
+-- pg_background_list view should be queryable without column-defs
+SELECT CASE WHEN count(*) >= 0 THEN 'PASS: pg_background_list view works'
+            ELSE 'FAIL: pg_background_list view broken' END AS test_1_10_list_view
+FROM pg_background_list;
+
+-- pg_background_activity view (joined with pg_stat_activity)
+SELECT CASE WHEN count(*) >= 0 THEN 'PASS: pg_background_activity view works'
+            ELSE 'FAIL: pg_background_activity view broken' END AS test_1_10_activity_view
+FROM pg_background_activity;
+
+-- pg_background_outcome_v2: never raises on missing handle
+DO $$
+DECLARE
+    o pg_background_outcome;
+BEGIN
+    o := pg_background_outcome_v2(0, 0);
+    IF o.pid = 0 AND o.state IS NULL THEN
+        RAISE NOTICE 'PASS: outcome_v2 never-raises works';
+    ELSE
+        RAISE NOTICE 'FAIL: outcome_v2 returned unexpected fields';
+    END IF;
+END;
+$$;
+
+-- pg_background_run_v2: synchronous one-shot
+DO $$
+DECLARE
+    r pg_background_run_result;
+BEGIN
+    r := pg_background_run_v2('SELECT 1', 65536, 0, 'upgrade-1_10');
+    IF r.completed AND NOT r.has_error THEN
+        RAISE NOTICE 'PASS: run_v2 synchronous helper works';
+    ELSE
+        RAISE NOTICE 'FAIL: run_v2 broken (completed=%, has_error=%)', r.completed, r.has_error;
+    END IF;
+END;
+$$;
+EOF
+    then
+        log_error "Version 1.10 feature tests failed"
+        TEST_RESULT=1
+    else
+        log_info "Version 1.10 new features verified"
+    fi
+
     # Summary
     echo ""
     echo "========================================================================"
@@ -342,6 +407,11 @@ EOF
         echo "    - error_info_v2()"
         echo "    - detach_all_v2()"
         echo "  - Old functionality preserved after upgrade"
+        echo "  - Upgrade from 1.9 to 1.10 succeeds"
+        echo "  - Version 1.10 new features work:"
+        echo "    - pg_background_list / pg_background_activity views"
+        echo "    - pg_background_outcome_v2() never-raises helper"
+        echo "    - pg_background_run_v2() synchronous one-shot"
         echo "========================================================================"
     else
         log_error "SOME UPGRADE TESTS FAILED"
@@ -358,7 +428,7 @@ case "${1:-}" in
         echo "Usage: $0 [PG_VERSION]"
         echo ""
         echo "Test pg_background extension upgrade paths using Docker."
-        echo "Validates upgrade from version 1.8 to 1.9."
+        echo "Validates upgrade from version 1.8 -> 1.9 -> 1.10."
         echo ""
         echo "PG_VERSION can be: 14, 15, 16, 17, 18"
         echo "Default: $DEFAULT_PG_VERSION"

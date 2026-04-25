@@ -242,9 +242,9 @@ jobs:
       - name: Run relocatable tests
         run: ./test-relocatable.sh 17
 
-  # Test upgrade path from 1.8 to 1.9
+  # Test upgrade path 1.8 -> 1.9 -> 1.10
   upgrade-test:
-    name: Upgrade Test (1.8 → 1.9)
+    name: Upgrade Test (1.8 → 1.9 → 1.10)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
 

@@ -5,6 +5,8 @@ EXTENSION = pg_background
 
 # Ship the base + upgrade scripts you support
 DATA = \
+	pg_background--1.10.sql \
+	pg_background--1.9--1.10.sql \
 	pg_background--1.9.sql \
 	pg_background--1.8--1.9.sql \
 	pg_background--1.8.sql \

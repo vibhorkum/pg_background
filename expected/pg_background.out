@@ -1245,3 +1245,138 @@ FROM pg_background_stats_v2();
              31 |              17 |            5 |              9 |                0
 (1 row)
 
+-- =========================================================================
+-- v1.10: ergonomics (pg_background_list view, outcome_v2, run_v2)
+-- =========================================================================
+-- pg_background_list view should expose the same row as list_v2() without
+-- requiring a column-definition list at the call site.
+DO $$
+DECLARE
+    h pg_background_handle;
+    cnt int;
+BEGIN
+    h := pg_background_launch_v2('SELECT pg_sleep(0.5)', 65536, 'v1_10_view');
+    SELECT count(*) INTO cnt
+      FROM pg_background_list
+     WHERE pid = h.pid AND cookie = h.cookie AND label = 'v1_10_view';
+    IF cnt <> 1 THEN
+        RAISE EXCEPTION 'v1.10 list view: expected 1 row, got %', cnt;
+    END IF;
+    PERFORM pg_background_wait_v2(h.pid, h.cookie);
+    PERFORM pg_background_detach_v2(h.pid, h.cookie);
+    RAISE NOTICE 'v1.10 list view OK';
+END$$;
+NOTICE:  v1.10 list view OK
+-- pg_background_activity view should be queryable and join cleanly.
+DO $$
+DECLARE
+    cnt int;
+BEGIN
+    SELECT count(*) INTO cnt FROM pg_background_activity;
+    -- count is whatever; we only check the view is not broken.
+    RAISE NOTICE 'v1.10 activity view OK';
+END$$;
+NOTICE:  v1.10 activity view OK
+-- pg_background_outcome_v2: success path
+DO $$
+DECLARE
+    h pg_background_handle;
+    o pg_background_outcome;
+BEGIN
+    h := pg_background_launch_v2('SELECT 1', 65536, 'v1_10_outcome_ok');
+    PERFORM pg_background_wait_v2(h.pid, h.cookie);
+    o := pg_background_outcome_v2(h.pid, h.cookie);
+    IF o.completed IS DISTINCT FROM true THEN
+        RAISE EXCEPTION 'v1.10 outcome ok: expected completed=true, got %', o.completed;
+    END IF;
+    IF o.has_error IS DISTINCT FROM false THEN
+        RAISE EXCEPTION 'v1.10 outcome ok: expected has_error=false, got %', o.has_error;
+    END IF;
+    IF o.label IS DISTINCT FROM 'v1_10_outcome_ok' THEN
+        RAISE EXCEPTION 'v1.10 outcome ok: expected label v1_10_outcome_ok, got %', o.label;
+    END IF;
+    PERFORM pg_background_detach_v2(h.pid, h.cookie);
+    RAISE NOTICE 'v1.10 outcome ok OK';
+END$$;
+NOTICE:  v1.10 outcome ok OK
+-- pg_background_outcome_v2: missing handle returns NULL fields, never raises
+DO $$
+DECLARE
+    o pg_background_outcome;
+BEGIN
+    o := pg_background_outcome_v2(0, 0);
+    IF o.pid <> 0 OR o.cookie <> 0 THEN
+        RAISE EXCEPTION 'v1.10 outcome missing: pid/cookie not echoed';
+    END IF;
+    IF o.state IS NOT NULL OR o.completed IS NOT NULL OR o.has_error IS NOT NULL THEN
+        RAISE EXCEPTION 'v1.10 outcome missing: expected all NULL fields';
+    END IF;
+    RAISE NOTICE 'v1.10 outcome missing OK';
+END$$;
+NOTICE:  v1.10 outcome missing OK
+-- pg_background_run_v2: success path verifies row_count and command_tag.
+DROP TABLE IF EXISTS t_v1_10_run;
+NOTICE:  table "t_v1_10_run" does not exist, skipping
+CREATE TABLE t_v1_10_run(id int);
+DO $$
+DECLARE
+    r pg_background_run_result;
+BEGIN
+    r := pg_background_run_v2('INSERT INTO t_v1_10_run VALUES (1), (2), (3)',
+                              65536, 0, 'v1_10_run_ok');
+    IF r.completed IS DISTINCT FROM true THEN
+        RAISE EXCEPTION 'v1.10 run ok: expected completed=true, got %', r.completed;
+    END IF;
+    IF r.has_error IS DISTINCT FROM false THEN
+        RAISE EXCEPTION 'v1.10 run ok: expected has_error=false, got %', r.has_error;
+    END IF;
+    IF r.row_count IS DISTINCT FROM 3 THEN
+        RAISE EXCEPTION 'v1.10 run ok: expected row_count=3, got %', r.row_count;
+    END IF;
+    IF r.command_tag IS NULL OR r.command_tag NOT LIKE 'INSERT%' THEN
+        RAISE EXCEPTION 'v1.10 run ok: expected command_tag like INSERT%%, got %', r.command_tag;
+    END IF;
+    IF r.timed_out IS DISTINCT FROM false THEN
+        RAISE EXCEPTION 'v1.10 run ok: expected timed_out=false, got %', r.timed_out;
+    END IF;
+    RAISE NOTICE 'v1.10 run ok OK';
+END$$;
+NOTICE:  v1.10 run ok OK
+-- The launched worker actually inserted rows (committed via worker exit).
+SELECT count(*) AS v1_10_run_inserted FROM t_v1_10_run;
+ v1_10_run_inserted 
+--------------------
+                  3
+(1 row)
+
+DROP TABLE t_v1_10_run;
+-- pg_background_run_v2: error case (1/0 -> sqlstate 22012)
+DO $$
+DECLARE
+    r pg_background_run_result;
+BEGIN
+    r := pg_background_run_v2('SELECT 1/0', 65536, 0, 'v1_10_run_err');
+    IF r.has_error IS DISTINCT FROM true THEN
+        RAISE EXCEPTION 'v1.10 run err: expected has_error=true, got %', r.has_error;
+    END IF;
+    IF r.sqlstate IS DISTINCT FROM '22012' THEN
+        RAISE EXCEPTION 'v1.10 run err: expected sqlstate=22012, got %', r.sqlstate;
+    END IF;
+    IF r.timed_out IS DISTINCT FROM false THEN
+        RAISE EXCEPTION 'v1.10 run err: expected timed_out=false, got %', r.timed_out;
+    END IF;
+    RAISE NOTICE 'v1.10 run err OK';
+END$$;
+NOTICE:  v1.10 run err OK
+-- pg_background_run_v2: timeout case (pg_sleep 5s, timeout 200ms)
+DO $$
+DECLARE
+    r pg_background_run_result;
+BEGIN
+    r := pg_background_run_v2('SELECT pg_sleep(5)', 65536, 200, 'v1_10_run_timeout');
+    IF r.timed_out IS DISTINCT FROM true THEN
+        RAISE EXCEPTION 'v1.10 run timeout: expected timed_out=true, got %', r.timed_out;
+    END IF;
+    RAISE NOTICE 'v1.10 run timeout OK';
+END$$;
+NOTICE:  v1.10 run timeout OK
