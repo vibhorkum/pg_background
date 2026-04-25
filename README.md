@@ -1,17 +1,50 @@
 # pg_background: Production-Grade Background SQL for PostgreSQL
 
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14--18-blue.svg)](https://www.postgresql.org/)
-[![Version](https://img.shields.io/badge/version-1.9-brightgreen.svg)](https://github.com/vibhorkum/pg_background)
+[![Version](https://img.shields.io/badge/version-1.10-brightgreen.svg)](https://github.com/vibhorkum/pg_background)
 [![License](https://img.shields.io/badge/license-PostgreSQL-green.svg)](LICENSE)
 [![CI](https://github.com/vibhorkum/pg_background/actions/workflows/ci.yml/badge.svg)](https://github.com/vibhorkum/pg_background/actions/workflows/ci.yml)
 
 Execute arbitrary SQL commands in **background worker processes** within PostgreSQL. Built for production workloads requiring asynchronous execution, autonomous transactions, and long-running operations without blocking client sessions.
+
+### 30-second tour
+
+```sql
+CREATE EXTENSION pg_background;
+
+-- Simplest case: run something in an autonomous transaction, get the outcome.
+SELECT completed, has_error, sqlstate, error_message, row_count, command_tag, elapsed_ms
+  FROM pg_background_run_v2(
+         'INSERT INTO audit_log (ts, who) VALUES (now(), current_user)',
+         queue_size := 0,
+         timeout_ms := 30000,
+         label      := 'audit-login'
+       );
+
+-- See every worker tracked by this session.
+SELECT pid, state, label, sql_preview FROM pg_background_list;
+```
+
+When you need the actual result rows, swap `run_v2` for the
+`launch_v2 → wait_v2 → result_v2` pattern shown in [Quick Start](#quick-start)
+or [Cookbook recipe 2](#cookbook).
+
+**Where to go next**
+
+| If you want to… | Read |
+|---|---|
+| See it in 5 minutes | [Quick Start](#quick-start) |
+| Copy a working pattern | [Cookbook](#cookbook) — three battle-tested templates |
+| Look up a function | [API Reference](#complete-api-reference) |
+| Understand the `cancel` vs `detach` distinction | [Critical Semantic Distinctions](#critical-semantic-distinctions) |
+| Decide whether this fits your problem | [When to use this — and when not to](#when-to-use-this--and-when-not-to) |
 
 ---
 
 ## Table of Contents
 
 - [Overview](#overview)
+- [When to use this — and when not to](#when-to-use-this--and-when-not-to)
 - [Key Features](#key-features)
 - [PostgreSQL Version Compatibility](#postgresql-version-compatibility)
 - [Installation](#installation)
@@ -65,41 +98,46 @@ Execute arbitrary SQL commands in **background worker processes** within Postgre
 
 ---
 
+## When to use this — and when not to
+
+### Good fit ✅
+- **Autonomous transactions** — log audit events, send notifications, or update counters that must commit even if the parent transaction rolls back.
+- **Ad-hoc async maintenance** — kick off a `VACUUM`, `REINDEX`, or backfill from a SQL session without blocking it.
+- **Pre-known fan-out** — split a workload into N independent SQL statements and gather their outcomes (see [Cookbook recipe 3](#cookbook)).
+- **Bounded long-running queries** with a deadline — `pg_background_run_v2(sql, queue_size, timeout_ms, label)` gives you a single SQL call with timeout and cancel-on-overrun.
+
+### Not a fit ❌
+| You want… | Use instead |
+|---|---|
+| A cron-style job scheduler | [`pg_cron`](https://github.com/citusdata/pg_cron) |
+| Cross-server SQL execution | `dblink` or `postgres_fdw` |
+| Cross-database execution | Workers are per-database; use `dblink` from inside a worker if you must |
+| Workflow orchestration with retries / DAGs | An application-layer job runner |
+| Persistent job queue with state across restarts | A real queue (Redis, RabbitMQ) or table-backed queue with explicit polling |
+| Result caching / re-fetching | Workers stream results once; persist them to a table yourself |
+
+`pg_background` provides primitives, not orchestration. If you need durable queueing, retries, scheduling, or coordination across sessions, build it on top — or use a tool that specializes in it.
+
+---
+
 ## Key Features
 
-### Core Capabilities
-- ✅ **Async SQL Execution**: Offload queries to background workers  
-- ✅ **Result Retrieval**: Stream results back via shared memory queues  
-- ✅ **Autonomous Transactions**: Commit independently of calling session  
-- ✅ **Explicit Lifecycle Control**: Launch, wait, cancel, detach, and list operations  
-- ✅ **Production-Hardened Security**: NOLOGIN role, privilege helpers, zero PUBLIC access  
+### Core capabilities
+- **Async SQL execution** — offload queries to background workers running inside the server
+- **Autonomous transactions** — workers commit (or roll back) independently of the caller
+- **Explicit lifecycle** — `launch`, `wait`, `cancel`, `detach`, and `list` operations with documented semantics
+- **Cookie-protected handles** — `(pid, cookie)` tuples prevent PID-reuse confusion in long-lived sessions
+- **Structured error reporting** — real `SQLSTATE`, message, detail, hint, and context propagated from worker to launcher
+- **Observability built in** — per-session worker registry (`pg_background_list`), counters (`pg_background_stats_v2`), progress reporting, optional labels
+- **Hardened security** — NOLOGIN executor role, no PUBLIC grants, privilege helpers with pinned `search_path`
+- **Relocatable** — `CREATE EXTENSION pg_background WITH SCHEMA myschema` works fully
 
-### V2 API Enhancements (v1.6+)
-- **Cookie-Based Identity**: `(pid, cookie)` tuples prevent PID reuse confusion
-- **Explicit Cancellation**: `cancel_v2()` distinct from `detach_v2()`
-- **Synchronous Wait**: `wait_v2()` blocks until completion or timeout
-- **Worker Observability**: `list_v2()` for real-time monitoring and cleanup
-- **Fire-and-Forget Submit**: `submit_v2()` for side-effect queries
+### What's new in v1.10
+- `pg_background_list` and `pg_background_activity` **views** — query the worker registry without repeating a 10-column definition list; the activity view joins `pg_stat_activity` for combined worker + backend visibility.
+- `pg_background_outcome_v2(pid, cookie)` — combined `list_v2 + result_info_v2 + error_info_v2` snapshot that **never raises**; returns NULL fields when the handle is gone or results are already consumed.
+- `pg_background_run_v2(sql, queue_size, timeout_ms, label)` — **synchronous one-shot**: launch + wait + outcome + detach in one call, with 1 s cancel-grace on timeout. Returns metadata only.
 
-### V1.8 Enhancements
-- **Session Statistics**: `stats_v2()` provides worker counts, success/failure rates, and execution times
-- **Progress Reporting**: Workers can report progress via `pg_background_progress()`
-- **GUC Configuration**: `pg_background.max_workers`, `worker_timeout`, `default_queue_size`
-- **Resource Limits**: Built-in max workers enforcement per session
-- **Enhanced Robustness**: Overflow protection, UTF-8 aware truncation, race condition fixes
-- **Relocatable Extension**: Full support for `CREATE EXTENSION ... WITH SCHEMA`
-
-### V1.9 Enhancements
-- **Worker Labels**: Optional `label` parameter on `launch_v2()`/`submit_v2()` for operational clarity
-- **Structured Error Returns**: `pg_background_error_info_v2()` returns SQLSTATE, message, detail, hint, context
-- **Result Metadata**: `pg_background_result_info_v2()` returns row_count, command_tag, completed, has_error
-- **Batch Operations**: `pg_background_detach_all_v2()` and `pg_background_cancel_all_v2()` for session cleanup
-
-### V1.10 Enhancements (Current)
-- **`pg_background_list` view**: Wraps `list_v2()` so callers no longer have to repeat a 10-column definition list at every query site
-- **`pg_background_activity` view**: Joins worker registry with `pg_stat_activity` for combined worker + backend visibility
-- **`pg_background_run_v2()`**: Synchronous one-shot helper (`launch + wait + outcome + detach`) returning `(pid, completed, timed_out, has_error, row_count, command_tag, sqlstate, error_message, elapsed_ms)`. Cancels the worker with 1s grace on timeout
-- **`pg_background_outcome_v2()`**: Never-raises status helper combining `list_v2` + `result_info_v2` + `error_info_v2` into one snapshot — returns NULL fields instead of raising on missing/consumed handles
+Full changelog and history: [`IMPROVEMENTS_v1.10.md`](IMPROVEMENTS_v1.10.md). Older milestones (v1.6 cookies, v1.8 stats/GUCs/progress, v1.9 labels/structured errors/batch ops) are listed in [Migration Guide](#migration-guide).
 
 ---
 
@@ -299,7 +337,27 @@ SET pg_background.worker_timeout = '5min';
 
 ### V2 API (Recommended)
 
-The v2 API provides cookie-based handle protection and explicit lifecycle semantics.
+The v2 API provides cookie-based handle protection and explicit lifecycle semantics. If you only ever read one section, **use `pg_background_run_v2()`** (item 0 below) — it covers the common case in one SQL call.
+
+#### 0. Easiest path: synchronous one-shot (`pg_background_run_v2`)
+
+Use this when you want autonomous-transaction semantics and just need to know whether the SQL succeeded, how many rows it affected, and the SQLSTATE if it failed. Returns metadata only — no result rows.
+
+```sql
+SELECT completed, has_error, sqlstate, error_message,
+       row_count, command_tag, elapsed_ms, timed_out
+  FROM pg_background_run_v2(
+         'INSERT INTO audit_log (ts, who) VALUES (now(), current_user)',
+         queue_size := 0,
+         timeout_ms := 30000,         -- 30 s cap; cancels with 1 s grace on overrun
+         label      := 'audit-login'
+       );
+
+-- completed | has_error | sqlstate | error_message | row_count | command_tag | elapsed_ms | timed_out
+-- t         | f         | NULL     | NULL          | 1         | INSERT 0 1  | 14         | f
+```
+
+When you actually need **result rows**, use the launch + wait + result_v2 pattern (items 1, 2, 5 below) or jump straight to [Cookbook recipe 2](#cookbook).
 
 #### 1. Launch a Background Job
 
@@ -2333,6 +2391,40 @@ SELECT pg_background_detach_all_v2();
 
 ## Migration Guide
 
+### Upgrading from v1.9 to v1.10
+
+```sql
+ALTER EXTENSION pg_background UPDATE TO '1.10';
+```
+
+**What you get**:
+- `pg_background_list` view (no column-definition list at the call site).
+- `pg_background_activity` view (joined with `pg_stat_activity`).
+- `pg_background_outcome_v2()` — never-raises status snapshot.
+- `pg_background_run_v2()` — synchronous one-shot.
+
+**Action items**:
+1. No code change required. Existing v1 and v2 callers keep working.
+2. Optional: replace ad-hoc column-def lists with the new `pg_background_list` view in monitoring queries.
+3. Optional: replace bespoke `launch + wait + cleanup` wrappers with `pg_background_run_v2()`.
+
+See [`IMPROVEMENTS_v1.10.md`](IMPROVEMENTS_v1.10.md) for the full set of changes and the list of features deferred to future PRs.
+
+### Upgrading from v1.8 to v1.9
+
+```sql
+ALTER EXTENSION pg_background UPDATE TO '1.9';
+```
+
+**What you get**:
+- `label` parameter on `launch_v2`/`submit_v2` for operational clarity.
+- `pg_background_error_info_v2()` returning structured errors with real `SQLSTATE`.
+- `pg_background_result_info_v2()` for row count / command tag / completion flags.
+- Batch helpers: `pg_background_detach_all_v2()`, `pg_background_cancel_all_v2()`.
+
+<details>
+<summary><b>Older upgrade paths (v1.0 → v1.8)</b> — click to expand</summary>
+
 ### Upgrading from v1.7 to v1.8
 
 ```sql
@@ -2416,6 +2508,8 @@ ALTER EXTENSION pg_background UPDATE TO '1.6';
 1. Test on non-production first
 2. Audit existing privilege grants
 3. Update application code to use v2 API
+
+</details>
 
 ### Migrating from v1 to v2 API
 
