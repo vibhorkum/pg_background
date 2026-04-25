@@ -1,0 +1,50 @@
+{
+   "name": "pg_background",
+   "abstract": "Run SQL queries in background workers with autonomous transactions",
+   "description": "pg_background is a PostgreSQL extension that executes SQL commands in background worker processes. Workers run inside the PostgreSQL server with their own transactions, enabling asynchronous SQL execution without blocking the client session, autonomous transactions that commit or roll back independently of the caller, and an observable worker lifecycle with explicit launch, wait, cancel, and detach semantics. Includes a v2 cookie-protected API, structured error returns, worker labels, batch operations, and convenience helpers like pg_background_run_v2() and pg_background_outcome_v2().",
+   "version": "1.10.0",
+   "maintainer": [
+      "Vibhor Kumar <vibhor.kumar@enterprisedb.com>"
+   ],
+   "license": "postgresql",
+   "provides": {
+      "pg_background": {
+         "abstract": "Run SQL queries in background workers",
+         "file": "pg_background--1.10.sql",
+         "docfile": "README.md",
+         "version": "1.10.0"
+      }
+   },
+   "prereqs": {
+      "runtime": {
+         "requires": {
+            "PostgreSQL": "14.0.0"
+         }
+      }
+   },
+   "resources": {
+      "homepage": "https://github.com/vibhorkum/pg_background",
+      "bugtracker": {
+         "web": "https://github.com/vibhorkum/pg_background/issues"
+      },
+      "repository": {
+         "url": "git://github.com/vibhorkum/pg_background.git",
+         "web": "https://github.com/vibhorkum/pg_background",
+         "type": "git"
+      }
+   },
+   "generated_by": "Vibhor Kumar",
+   "meta-spec": {
+      "version": "1.0.0",
+      "url": "https://pgxn.org/meta/spec.txt"
+   },
+   "tags": [
+      "background",
+      "worker",
+      "asynchronous",
+      "autonomous transaction",
+      "background worker",
+      "async",
+      "spi"
+   ]
+}

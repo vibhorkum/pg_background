@@ -36,6 +36,7 @@ Execute arbitrary SQL commands in **background worker processes** within Postgre
 - [Architecture & Design](#architecture--design)
 - [Known Limitations](#known-limitations)
 - [Best Practices](#best-practices)
+- [Cookbook](#cookbook)
 - [Migration Guide](#migration-guide)
 - [Testing](#testing)
 - [Contributing](#contributing)
@@ -88,11 +89,17 @@ Execute arbitrary SQL commands in **background worker processes** within Postgre
 - **Enhanced Robustness**: Overflow protection, UTF-8 aware truncation, race condition fixes
 - **Relocatable Extension**: Full support for `CREATE EXTENSION ... WITH SCHEMA`
 
-### V1.9 Enhancements (Current)
+### V1.9 Enhancements
 - **Worker Labels**: Optional `label` parameter on `launch_v2()`/`submit_v2()` for operational clarity
 - **Structured Error Returns**: `pg_background_error_info_v2()` returns SQLSTATE, message, detail, hint, context
 - **Result Metadata**: `pg_background_result_info_v2()` returns row_count, command_tag, completed, has_error
 - **Batch Operations**: `pg_background_detach_all_v2()` and `pg_background_cancel_all_v2()` for session cleanup
+
+### V1.10 Enhancements (Current)
+- **`pg_background_list` view**: Wraps `list_v2()` so callers no longer have to repeat a 10-column definition list at every query site
+- **`pg_background_activity` view**: Joins worker registry with `pg_stat_activity` for combined worker + backend visibility
+- **`pg_background_run_v2()`**: Synchronous one-shot helper (`launch + wait + outcome + detach`) returning `(pid, completed, timed_out, has_error, row_count, command_tag, sqlstate, error_message, elapsed_ms)`. Cancels the worker with 1s grace on timeout
+- **`pg_background_outcome_v2()`**: Never-raises status helper combining `list_v2` + `result_info_v2` + `error_info_v2` into one snapshot — returns NULL fields instead of raising on missing/consumed handles
 
 ---
 
@@ -456,6 +463,10 @@ SELECT pg_background_detach(:pid);
 | `pg_background_stats_v2()` | `pg_background_stats` | Session statistics (v1.8+) | Monitoring, debugging |
 | `pg_background_progress(pct, msg)` | `void` | Report progress from worker (v1.8+) | Long-running task feedback |
 | `pg_background_get_progress_v2(pid, cookie)` | `pg_background_progress` | Get worker progress (v1.8+) | Monitor long-running tasks |
+| `pg_background_outcome_v2(pid, cookie)` | `pg_background_outcome` | Combined status snapshot — never raises (v1.10) | Safe status retrieval |
+| `pg_background_run_v2(sql, queue_size, timeout_ms, label)` | `pg_background_run_result` | Synchronous one-shot: launch + wait + outcome + detach (v1.10) | Autonomous-transaction-style runs |
+| `pg_background_list` (view, v1.10) | rows of `list_v2()` | Convenience view; no column-definition list required | Day-to-day observation |
+| `pg_background_activity` (view, v1.10) | join with `pg_stat_activity` | Worker registry + backend state in one query | Combined monitoring |
 
 **Parameters**:
 - `sql`: SQL command(s) to execute (multiple statements allowed)
@@ -516,6 +527,53 @@ CREATE TYPE pg_background_error AS (
   context   text    -- Error context/stack trace
 );
 ```
+
+**Outcome Type** (v1.10+):
+```sql
+CREATE TYPE pg_background_outcome AS (
+  pid            int4,
+  cookie         int8,
+  state          text,         -- starting/running/stopped/canceled/error (NULL if not in this session)
+  consumed       bool,
+  completed      bool,         -- from result_info_v2
+  has_error      bool,         -- from result_info_v2
+  row_count      int8,         -- from result_info_v2
+  command_tag    text,         -- from result_info_v2
+  sqlstate       text,         -- from error_info_v2
+  error_message  text,         -- from error_info_v2.message
+  label          text,
+  launched_at    timestamptz
+);
+```
+
+`pg_background_outcome_v2()` populates this snapshot by combining
+`pg_background_list_v2`, `pg_background_result_info_v2`, and
+`pg_background_error_info_v2`. It catches all exceptions internally and leaves
+unavailable fields NULL — handy after `result_v2` has consumed results, after a
+worker has been cleaned up, or when you simply do not want to write three
+nested `BEGIN ... EXCEPTION` blocks.
+
+**Run Result Type** (v1.10+):
+```sql
+CREATE TYPE pg_background_run_result AS (
+  pid             int4,
+  completed       bool,
+  timed_out       bool,
+  has_error       bool,
+  row_count       int8,
+  command_tag     text,
+  sqlstate        text,
+  error_message   text,
+  elapsed_ms      int8
+);
+```
+
+`pg_background_run_v2(sql, queue_size, timeout_ms, label)` runs a single SQL
+command in a worker, waits up to `timeout_ms` (0 = wait forever), cancels the
+worker with 1 s grace if it does not finish in time, gathers the outcome, and
+detaches the handle. It returns metadata only — no result rows. Use the
+launch/wait/result_v2 pattern (see [Cookbook recipe 2](#cookbook)) when you
+need result rows.
 
 #### Structured Error Returns — SQLSTATE Semantics
 
@@ -2179,6 +2237,100 @@ SELECT pg_background_wait_v2(:'h.pid', :'h.cookie');  -- Should error gracefully
 
 ---
 
+## Cookbook
+
+Copy-paste templates for the most common patterns. Each is built on v1.10 helpers and avoids the `result_v2`-on-error footgun.
+
+### Recipe 1: Synchronous run with metadata (v1.10)
+
+When you want autonomous-transaction semantics and just need to know whether it worked, how many rows were affected, and the SQLSTATE on failure. Returns metadata only — for result rows use Recipe 2.
+
+```sql
+-- One call: launch, wait, capture metadata, detach.
+SELECT pid, completed, timed_out, has_error, row_count, command_tag,
+       sqlstate, error_message, elapsed_ms
+  FROM pg_background_run_v2(
+         'INSERT INTO audit_log SELECT now(), current_user, ''login''',
+         queue_size  := 0,
+         timeout_ms  := 30000,    -- 30s cap; cancels with 1s grace on overrun
+         label       := 'audit-login'
+       );
+```
+
+### Recipe 2: Wait-with-timeout, then capture result rows or error (no footgun)
+
+When you need the actual result rows. Uses `outcome_v2` to inspect state without raising; only calls `result_v2` on the success path.
+
+```sql
+DO $$
+DECLARE
+    h pg_background_handle;
+    o pg_background_outcome;
+    finished bool;
+BEGIN
+    h := pg_background_launch_v2('SELECT id, name FROM big_table WHERE active', 65536, 'lookup');
+
+    finished := pg_background_wait_v2_timeout(h.pid, h.cookie, 5000);
+    IF NOT finished THEN
+        PERFORM pg_background_cancel_v2_grace(h.pid, h.cookie, 1000);
+        PERFORM pg_background_detach_v2(h.pid, h.cookie);
+        RAISE EXCEPTION 'lookup did not complete within 5s';
+    END IF;
+
+    o := pg_background_outcome_v2(h.pid, h.cookie);
+    IF o.has_error THEN
+        PERFORM pg_background_detach_v2(h.pid, h.cookie);
+        RAISE EXCEPTION 'lookup failed: % (sqlstate %)', o.error_message, o.sqlstate;
+    END IF;
+
+    -- Safe: only consume result rows on the success path.
+    INSERT INTO lookup_cache (id, name)
+    SELECT id, name
+      FROM pg_background_result_v2(h.pid, h.cookie) AS r(id int, name text);
+
+    PERFORM pg_background_detach_v2(h.pid, h.cookie);
+END
+$$;
+```
+
+### Recipe 3: Launch many, gather outcomes
+
+When you fan out N independent jobs and want a per-worker outcome row.
+
+```sql
+WITH launched AS (
+    -- Launch N jobs; each row stores (pid, cookie) for later collection.
+    SELECT (pg_background_launch_v2(
+              format('VACUUM (ANALYZE) %I', tablename),
+              0,
+              'nightly-vacuum-' || tablename)).*
+      FROM pg_tables WHERE schemaname = 'public'
+),
+waited AS (
+    -- Block on each in parallel-ish (sequential here; parallelism is via async workers).
+    SELECT l.pid,
+           l.cookie,
+           pg_background_wait_v2_timeout(l.pid, l.cookie, 60000) AS finished
+      FROM launched l
+)
+SELECT w.pid,
+       w.finished,
+       o.completed,
+       o.has_error,
+       o.row_count,
+       o.command_tag,
+       o.sqlstate,
+       o.error_message,
+       o.label
+  FROM waited w,
+       LATERAL pg_background_outcome_v2(w.pid, w.cookie) AS o;
+
+-- Detach everything still tracked in this session.
+SELECT pg_background_detach_all_v2();
+```
+
+---
+
 ## Migration Guide
 
 ### Upgrading from v1.7 to v1.8
@@ -2267,28 +2419,45 @@ ALTER EXTENSION pg_background UPDATE TO '1.6';
 
 ### Migrating from v1 to v2 API
 
-| v1 API | v2 API Equivalent |
-|--------|-------------------|
-| `pg_background_launch(sql)` | `pg_background_launch_v2(sql)` (returns handle) |
-| `pg_background_result(pid)` | `pg_background_result_v2(pid, cookie)` |
-| `pg_background_detach(pid)` | `pg_background_detach_v2(pid, cookie)` |
-| N/A | `pg_background_submit_v2(sql)` (fire-forget) |
-| N/A | `pg_background_cancel_v2(pid, cookie)` |
-| N/A | `pg_background_wait_v2(pid, cookie)` |
-| N/A | `pg_background_list_v2()` |
+The v1 API is frozen and will receive only critical security fixes. New code should use v2 because it provides cookie-based PID-reuse protection, explicit cancel/wait semantics, structured error returns, and observability via `pg_background_list` / `pg_background_stats_v2`.
 
-**Example Migration**:
+#### Side-by-side mapping
+
+| v1 (Legacy) | v2 (Recommended) | Notes |
+|---|---|---|
+| `pg_background_launch(sql, queue_size)` → `int4` | `pg_background_launch_v2(sql, queue_size, label)` → `pg_background_handle` | v2 returns `(pid, cookie)` composite; cookie protects against PID reuse |
+| `pg_background_result(pid)` → `SETOF record` | `pg_background_result_v2(pid, cookie)` → `SETOF record` | Same one-time consumption rule. Avoid calling on errored workers — use `error_info_v2` instead |
+| `pg_background_detach(pid)` → `void` | `pg_background_detach_v2(pid, cookie)` → `void` | Detach removes tracking; the worker keeps running and commits |
+| _(no equivalent)_ | `pg_background_submit_v2(sql, queue_size, label)` → `pg_background_handle` | Dedicated fire-and-forget; clearer than `launch + detach` |
+| _(no equivalent)_ | `pg_background_cancel_v2(pid, cookie)` / `..._grace(pid, cookie, ms)` | Cooperative cancel via SIGTERM; grace variant escalates to SIGKILL after `ms` |
+| _(no equivalent)_ | `pg_background_wait_v2(pid, cookie)` / `..._timeout(pid, cookie, ms)` | Block until the worker exits, optionally with a deadline |
+| _(no equivalent)_ | `pg_background_list_v2()` / `pg_background_list` view | Per-session worker registry with state, label, last_error |
+| _(no equivalent)_ | `pg_background_stats_v2()` | Counters: launched, completed, failed, canceled, active, avg_execution_ms |
+| _(no equivalent)_ | `pg_background_result_info_v2(pid, cookie)` | Row count, command tag, completion/error flags — without consuming results |
+| _(no equivalent)_ | `pg_background_error_info_v2(pid, cookie)` | Structured error: SQLSTATE, message, detail, hint, context |
+| _(no equivalent)_ | `pg_background_outcome_v2(pid, cookie)` (v1.10) | Combined snapshot of state + result_info + error_info — never raises |
+| _(no equivalent)_ | `pg_background_run_v2(sql, queue_size, timeout_ms, label)` (v1.10) | Synchronous one-shot: launch + wait + outcome + detach |
+
+#### Example migration
 
 Before (v1):
 ```sql
+-- fire-and-forget VACUUM
 SELECT pg_background_launch('VACUUM my_table') AS pid \gset
 SELECT pg_background_detach(:pid);
 ```
 
-After (v2):
+After (v2, idiomatic):
 ```sql
-SELECT * FROM pg_background_submit_v2('VACUUM my_table') AS h \gset;
+-- explicit fire-and-forget
+SELECT * FROM pg_background_submit_v2('VACUUM my_table', 0, 'nightly-vacuum') AS h \gset
 SELECT pg_background_detach_v2(:'h.pid', :'h.cookie');
+```
+
+After (v2, simpler — v1.10 one-shot):
+```sql
+-- synchronous: returns when done with metadata, no result rows
+SELECT * FROM pg_background_run_v2('VACUUM my_table', 0, 0, 'nightly-vacuum');
 ```
 
 ---

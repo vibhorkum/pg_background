@@ -224,7 +224,7 @@ Do not blur the distinction between v1 and v2 semantics.
 ### CI pipeline coverage
 - **Main test matrix**: Runs `make installcheck` on PG 14-18 × ubuntu-22.04/24.04
 - **Relocatable test**: Verifies extension works in custom schema (not just `public`)
-- **Upgrade test**: Validates upgrade path from 1.8 → 1.9 using `test-upgrade.sh`
+- **Upgrade test**: Validates upgrade path 1.8 → 1.9 → 1.10 using `test-upgrade.sh`
 - All three test types must pass before merge
 
 ### Upgrade path testing
@@ -396,7 +396,7 @@ Do not blur the distinction between v1 and v2 semantics.
 | API ergonomics | Convenience wrappers, batch operations, better handle management |
 | Security hardening | Privilege model improvements, input validation |
 
-### v1.9 Features (Current)
+### v1.9 Features
 
 | Feature | Function/Type |
 |---------|---------------|
@@ -404,6 +404,14 @@ Do not blur the distinction between v1 and v2 semantics.
 | Structured errors | `pg_background_error_info_v2()`, `pg_background_error` type |
 | Result metadata | `pg_background_result_info_v2()`, `pg_background_result_info` type |
 | Batch operations | `pg_background_detach_all_v2()`, `pg_background_cancel_all_v2()` |
+
+### v1.10 Features (Current)
+
+| Feature | Function/Type |
+|---------|---------------|
+| Convenience views | `pg_background_list`, `pg_background_activity` (joins `pg_stat_activity`) |
+| Never-raises status | `pg_background_outcome_v2()`, `pg_background_outcome` type |
+| Synchronous one-shot | `pg_background_run_v2()`, `pg_background_run_result` type |
 
 ### Bad fit for pg_background
 
@@ -448,7 +456,7 @@ make installcheckclean
 ./test-local.sh all      # Test all supported versions (14-18)
 
 # Upgrade path testing
-./test-upgrade.sh        # Test 1.8 → 1.9 upgrade on PG 17
+./test-upgrade.sh        # Test 1.8 → 1.9 → 1.10 upgrade path on PG 17
 ./test-upgrade.sh 16     # Test upgrade on specific PG version
 ```
 
@@ -490,8 +498,10 @@ Launcher Session                    Background Worker
 |------|---------|
 | `pg_background.c` | All C implementation (~3200 lines) |
 | `pg_background.h` | Version compatibility macros |
-| `pg_background.control` | Extension metadata (version 1.9) |
-| `pg_background--1.9.sql` | Current version install script |
+| `pg_background.control` | Extension metadata (version 1.10) |
+| `pg_background--1.10.sql` | Current version install script |
+| `pg_background--1.9--1.10.sql` | Upgrade from 1.9 |
+| `pg_background--1.9.sql` | Previous version install script (kept for installs that pin 1.9) |
 | `pg_background--1.8--1.9.sql` | Upgrade from 1.8 |
 | `sql/pg_background.sql` | Regression tests |
 | `expected/pg_background.out` | Expected test output |
