@@ -1,5 +1,5 @@
 MODULE_big = pg_background
-OBJS = pg_background.o
+OBJS = pg_background.o pg_background_worker.o
 
 EXTENSION = pg_background
 
