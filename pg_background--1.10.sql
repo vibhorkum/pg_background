@@ -725,6 +725,22 @@ COMMENT ON FUNCTION pg_background_purge_v2() IS
 'Returns count purged. Use detach_all_v2() to detach all workers regardless of state.';
 
 -- ----------------------------------------------------------------------
+-- v1.10 (B3): full SQL accessor — beyond the 120-char preview
+-- ----------------------------------------------------------------------
+CREATE FUNCTION pg_background_full_sql_v2(
+    pid    pg_catalog.int4,
+    cookie pg_catalog.int8
+)
+RETURNS pg_catalog.text
+AS 'MODULE_PATHNAME', 'pg_background_full_sql_v2'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION pg_background_full_sql_v2(pg_catalog.int4, pg_catalog.int8) IS
+'Return the full SQL the worker is running, capped at 64 KiB with a [...] '
+'sentinel for longer queries. NULL if not stored. Use list_v2.sql_preview '
+'for monitoring; this function is for debugging.';
+
+-- ----------------------------------------------------------------------
 -- Role: NOLOGIN executor role for clean privilege assignment
 --   - not named pg_*
 --   - can be granted to users/roles by admins
@@ -977,6 +993,7 @@ REVOKE ALL ON FUNCTION pg_background_wait_any_v2(pg_background_handle[], pg_cata
 REVOKE ALL ON FUNCTION pg_background_cancel_by_label_v2(pg_catalog.text, pg_catalog.int4) FROM public;
 REVOKE ALL ON FUNCTION pg_background_status_v2(pg_catalog.int4, pg_catalog.int8) FROM public;
 REVOKE ALL ON FUNCTION pg_background_purge_v2() FROM public;
+REVOKE ALL ON FUNCTION pg_background_full_sql_v2(pg_catalog.int4, pg_catalog.int8) FROM public;
 
 -- ----------------------------------------------------------------------
 -- Optional: helper to drop role explicitly (because DROP EXTENSION won't)

@@ -41,6 +41,7 @@
 #include "tcop/pquery.h"
 #include "tcop/tcopprot.h"
 #include "tcop/utility.h"
+#include "utils/guc.h"
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
 #include "utils/resowner.h"
@@ -303,6 +304,25 @@ pg_background_worker_main(Datum main_arg)
         StartTransactionCommand();
         RestoreGUCState(gucstate);
         CommitTransactionCommand();
+
+        /*
+         * v1.10 (B6): set a recognizable application_name so the worker is
+         * easy to spot in pg_stat_activity and log lines. Format is
+         * "pg_background:<label>:<pid>" (or just "pg_background:<pid>" when
+         * the caller did not pass a label). RestoreGUCState above could
+         * restore the launcher's application_name, so this overrides it.
+         */
+        {
+            char appname[NAMEDATALEN];
+            if (fdata->label[0] != '\0')
+                snprintf(appname, sizeof(appname),
+                         "pg_background:%s:%d", fdata->label, (int) MyProcPid);
+            else
+                snprintf(appname, sizeof(appname),
+                         "pg_background:%d", (int) MyProcPid);
+            (void) SetConfigOption("application_name", appname,
+                                   PGC_USERSET, PGC_S_OVERRIDE);
+        }
 
         /* If cancel was requested before we began, exit quietly */
         if (*(volatile uint32 *)&fdata->cancel_requested != 0)

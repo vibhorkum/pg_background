@@ -1246,3 +1246,43 @@ BEGIN
     PERFORM pg_background_detach_all_v2();
     RAISE NOTICE 'Tier A purge_v2 OK';
 END$$;
+
+-- =========================================================================
+-- v1.10 Tier B (small): full_sql_v2 (B3), application_name (B6)
+-- =========================================================================
+
+-- B3: pg_background_full_sql_v2 returns the original SQL
+DO $$
+DECLARE
+    h pg_background_handle;
+    full_sql text;
+BEGIN
+    h := pg_background_launch_v2('SELECT pg_sleep(60), 1 AS phase2_marker', 65536, 'tier-b-fullsql');
+    full_sql := pg_background_full_sql_v2(h.pid, h.cookie);
+    IF full_sql IS NULL OR full_sql NOT LIKE '%phase2_marker%' THEN
+        RAISE EXCEPTION 'Tier B full_sql_v2: expected SQL containing phase2_marker, got %', full_sql;
+    END IF;
+    PERFORM pg_background_cancel_v2(h.pid, h.cookie);
+    PERFORM pg_background_detach_v2(h.pid, h.cookie);
+    RAISE NOTICE 'Tier B full_sql_v2 OK';
+END$$;
+
+-- B6: application_name should be 'pg_background:<label>:<pid>'
+DO $$
+DECLARE
+    h pg_background_handle;
+    appname_count int;
+BEGIN
+    h := pg_background_launch_v2('SELECT pg_sleep(3)', 65536, 'tier-b-appname');
+    /* allow worker to set its application_name */
+    PERFORM pg_sleep(0.3);
+    SELECT count(*) INTO appname_count
+      FROM pg_stat_activity
+     WHERE application_name = 'pg_background:tier-b-appname:' || h.pid;
+    IF appname_count <> 1 THEN
+        RAISE EXCEPTION 'Tier B application_name: expected exactly one worker with pg_background:tier-b-appname:<pid>, got %', appname_count;
+    END IF;
+    PERFORM pg_background_cancel_v2(h.pid, h.cookie);
+    PERFORM pg_background_detach_v2(h.pid, h.cookie);
+    RAISE NOTICE 'Tier B application_name OK';
+END$$;

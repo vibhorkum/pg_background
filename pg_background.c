@@ -182,7 +182,8 @@ static void save_worker_info(pid_t pid, uint64 cookie, dsm_segment *seg,
                              bool result_disabled,
                              int32 queue_size,
                              const char *sql_preview,
-                             const char *label);
+                             const char *label,
+                             const char *full_sql);
 
 /*
  * Error context callback. Defined in this file but used by both the
@@ -265,6 +266,9 @@ PG_FUNCTION_INFO_V1(pg_background_result_info_v2);
 PG_FUNCTION_INFO_V1(pg_background_error_info_v2);
 PG_FUNCTION_INFO_V1(pg_background_detach_all_v2);
 PG_FUNCTION_INFO_V1(pg_background_cancel_all_v2);
+
+/* v1.10 (B3): full SQL accessor */
+PG_FUNCTION_INFO_V1(pg_background_full_sql_v2);
 
 /* ============================================================================
  * MODULE INITIALIZATION
@@ -810,9 +814,21 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
     memcpy(preview, VARDATA(sql), preview_len);
     preview[preview_len] = '\0';
 
-    /* Save info */
-    save_worker_info(pid, cookie, seg, worker_handle, responseq,
-                     result_disabled, queue_size, preview, label);
+    /*
+     * Build a NUL-terminated full SQL cstring for save_worker_info to copy
+     * into WorkerInfoMemoryContext. save_worker_info caps and copies; this
+     * temporary buffer is freed with the current memory context.
+     */
+    {
+        char *full_sql_cstr = palloc(sql_len + 1);
+        memcpy(full_sql_cstr, VARDATA(sql), sql_len);
+        full_sql_cstr[sql_len] = '\0';
+
+        /* Save info */
+        save_worker_info(pid, cookie, seg, worker_handle, responseq,
+                         result_disabled, queue_size, preview, label,
+                         full_sql_cstr);
+    }
 
     /* Pin mapping so txn cleanup won't detach underneath us */
     dsm_pin_mapping(seg);
@@ -2104,7 +2120,8 @@ save_worker_info(pid_t pid, uint64 cookie, dsm_segment *seg,
                  bool result_disabled,
                  int32 queue_size,
                  const char *sql_preview,
-                 const char *label)
+                 const char *label,
+                 const char *full_sql)
 {
     pg_background_worker_info *info;
     Oid current_user_id;
@@ -2196,6 +2213,28 @@ save_worker_info(pid_t pid, uint64 cookie, dsm_segment *seg,
         strlcpy(info->label, label, sizeof(info->label));
     else
         info->label[0] = '\0';
+
+    /* v1.10 (B3): cache full SQL in launcher memory so it survives DSM detach. */
+    info->full_sql = NULL;
+    if (full_sql != NULL && full_sql[0] != '\0')
+    {
+        MemoryContext oldcontext = MemoryContextSwitchTo(WorkerInfoMemoryContext);
+        size_t       sql_len = strlen(full_sql);
+
+        if (sql_len <= PGBG_FULL_SQL_MAX_LEN)
+        {
+            info->full_sql = pstrdup(full_sql);
+        }
+        else
+        {
+            /* Truncate; mark with a sentinel so callers see the cap was hit. */
+            char *buf = palloc(PGBG_FULL_SQL_MAX_LEN + 8);
+            memcpy(buf, full_sql, PGBG_FULL_SQL_MAX_LEN);
+            memcpy(buf + PGBG_FULL_SQL_MAX_LEN, "[...]\0", 6);
+            info->full_sql = buf;
+        }
+        MemoryContextSwitchTo(oldcontext);
+    }
 
     /* v1.9 metadata (timing, result info, errors) stored in DSM, not cached here */
 }
@@ -2625,6 +2664,44 @@ pg_background_error_info_v2(PG_FUNCTION_ARGS)
 
     tuple = heap_form_tuple(tupdesc, values, nulls);
     PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
+
+/*
+ * pg_background_full_sql_v2
+ *     Return the full SQL the worker is/was running.
+ *
+ * The 120-char preview shown by pg_background_list is good for monitoring;
+ * for debugging, callers want the complete query. Stored in worker_info
+ * (palloc'd in WorkerInfoMemoryContext) so it survives DSM detach. Capped
+ * at PGBG_FULL_SQL_MAX_LEN with a "[...]" sentinel; longer queries should
+ * be debugged from the application's own logs.
+ *
+ * Subject to the same per-row authorization check as list_v2: only the
+ * owner (or a role with the worker's role privileges) can read the SQL.
+ */
+Datum
+pg_background_full_sql_v2(PG_FUNCTION_ARGS)
+{
+    int32 pid = PG_GETARG_INT32(0);
+    int64 cookie_in = PG_GETARG_INT64(1);
+    pg_background_worker_info *info = find_worker_info(pid);
+
+    if (info == NULL)
+        ereport(ERROR,
+                (errcode(ERRCODE_UNDEFINED_OBJECT),
+                 errmsg("PID %d is not attached to this session", pid)));
+    check_rights(info);
+
+    if (info->cookie != (uint64) cookie_in)
+        ereport(ERROR,
+                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                 errmsg("cookie mismatch for PID %d", pid),
+                 errhint("The worker may have been restarted or the handle is stale.")));
+
+    if (info->full_sql == NULL)
+        PG_RETURN_NULL();
+
+    PG_RETURN_TEXT_P(cstring_to_text(info->full_sql));
 }
 
 /*

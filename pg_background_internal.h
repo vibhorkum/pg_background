@@ -145,7 +145,23 @@ typedef struct pg_background_worker_info
 
     /* v1.9: Worker label for operational clarity */
     char        label[PGBG_LABEL_MAX_LEN + 1];          /* Optional label (empty = none) */
+
+    /*
+     * v1.10 (B3): full SQL text, palloc'd in WorkerInfoMemoryContext.
+     * Capped at PGBG_FULL_SQL_MAX_LEN bytes; longer queries are truncated
+     * with a "[...]" marker. Survives DSM detach so pg_background_full_sql_v2
+     * works after the worker exits.
+     */
+    char       *full_sql;
 } pg_background_worker_info;
+
+/*
+ * Maximum bytes of full SQL we cache in launcher memory per worker.
+ * Beyond this, we store only a truncated copy. 64 KiB matches the
+ * default queue_size and is large enough for >99% of real-world SQL
+ * while bounding worst-case session memory usage.
+ */
+#define PGBG_FULL_SQL_MAX_LEN  65536
 
 /*
  * pg_background_result_state
