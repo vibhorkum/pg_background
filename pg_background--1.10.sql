@@ -480,6 +480,251 @@ COMMENT ON FUNCTION pg_background_run_v2(pg_catalog.text, pg_catalog.int4, pg_ca
 'On timeout the worker is canceled with 1s grace. Returns metadata only; use launch_v2+result_v2 for result rows.';
 
 -- ----------------------------------------------------------------------
+-- v1.10: Tier A loop killers
+--
+-- Six convenience helpers built on top of the v2 primitives. Each removes
+-- a PL/pgSQL pattern users keep hand-rolling.
+-- ----------------------------------------------------------------------
+
+-- A1: synchronous one-shot returning rows
+CREATE FUNCTION pg_background_run_query_v2(
+    sql        pg_catalog.text,
+    queue_size pg_catalog.int4 DEFAULT 0,
+    timeout_ms pg_catalog.int4 DEFAULT 0,
+    label      pg_catalog.text DEFAULT NULL,
+    col_def    pg_catalog.text DEFAULT NULL
+)
+RETURNS SETOF pg_catalog.record
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    h        pg_background_handle;
+    o        pg_background_outcome;
+    finished pg_catalog.bool;
+BEGIN
+    IF label IS NULL THEN
+        h := pg_background_launch_v2(sql, queue_size);
+    ELSE
+        h := pg_background_launch_v2(sql, queue_size, label);
+    END IF;
+
+    IF timeout_ms > 0 THEN
+        finished := pg_background_wait_v2_timeout(h.pid, h.cookie, timeout_ms);
+        IF NOT finished THEN
+            BEGIN PERFORM pg_background_cancel_v2_grace(h.pid, h.cookie, 1000);
+            EXCEPTION WHEN OTHERS THEN NULL; END;
+            BEGIN PERFORM pg_background_detach_v2(h.pid, h.cookie);
+            EXCEPTION WHEN OTHERS THEN NULL; END;
+            RAISE EXCEPTION 'pg_background_run_query_v2: worker did not complete within % ms', timeout_ms
+                USING ERRCODE = '57014';
+        END IF;
+    ELSE
+        PERFORM pg_background_wait_v2(h.pid, h.cookie);
+    END IF;
+
+    o := pg_background_outcome_v2(h.pid, h.cookie);
+    IF o.has_error THEN
+        BEGIN PERFORM pg_background_detach_v2(h.pid, h.cookie);
+        EXCEPTION WHEN OTHERS THEN NULL; END;
+        RAISE EXCEPTION '%', COALESCE(o.error_message, 'worker error')
+            USING ERRCODE = COALESCE(o.sqlstate, 'XX000');
+    END IF;
+
+    IF col_def IS NULL THEN
+        BEGIN PERFORM pg_background_detach_v2(h.pid, h.cookie);
+        EXCEPTION WHEN OTHERS THEN NULL; END;
+        RETURN;
+    END IF;
+
+    RETURN QUERY EXECUTE pg_catalog.format(
+        'SELECT * FROM pg_background_result_v2($1, $2) AS r(%s)', col_def
+    ) USING h.pid, h.cookie;
+
+    BEGIN PERFORM pg_background_detach_v2(h.pid, h.cookie);
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+    RETURN;
+END;
+$function$;
+
+COMMENT ON FUNCTION pg_background_run_query_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.int4, pg_catalog.text, pg_catalog.text) IS
+'Synchronous launch+wait+result+detach with rows. col_def must match the AS clause at the call site, e.g. '
+'SELECT * FROM pg_background_run_query_v2(''SELECT 1'', col_def => ''x int'') AS r(x int).';
+
+-- A2: drain — wait for all handles, return one outcome each
+CREATE FUNCTION pg_background_drain_v2(
+    handles    pg_background_handle[],
+    timeout_ms pg_catalog.int4 DEFAULT 0
+)
+RETURNS SETOF pg_background_outcome
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    start_ts pg_catalog.timestamptz := pg_catalog.clock_timestamp();
+    h        pg_background_handle;
+    o        pg_background_outcome;
+    elapsed_ms pg_catalog.int8;
+    remaining_ms pg_catalog.int8;
+BEGIN
+    IF handles IS NULL THEN RETURN; END IF;
+
+    FOREACH h IN ARRAY handles LOOP
+        IF h IS NULL THEN CONTINUE; END IF;
+
+        IF timeout_ms > 0 THEN
+            elapsed_ms := (pg_catalog.date_part('epoch', pg_catalog.clock_timestamp() - start_ts) * 1000)::pg_catalog.int8;
+            remaining_ms := timeout_ms - elapsed_ms;
+            IF remaining_ms <= 0 THEN
+                /* deadline blown: emit minimal outcome and skip wait/detach */
+                o := pg_background_outcome_v2(h.pid, h.cookie);
+                RETURN NEXT o;
+                CONTINUE;
+            END IF;
+            PERFORM pg_background_wait_v2_timeout(h.pid, h.cookie, remaining_ms::pg_catalog.int4);
+        ELSE
+            BEGIN PERFORM pg_background_wait_v2(h.pid, h.cookie);
+            EXCEPTION WHEN OTHERS THEN NULL; END;
+        END IF;
+
+        o := pg_background_outcome_v2(h.pid, h.cookie);
+        RETURN NEXT o;
+
+        BEGIN PERFORM pg_background_detach_v2(h.pid, h.cookie);
+        EXCEPTION WHEN OTHERS THEN NULL; END;
+    END LOOP;
+    RETURN;
+END;
+$function$;
+
+COMMENT ON FUNCTION pg_background_drain_v2(pg_background_handle[], pg_catalog.int4) IS
+'Wait for every handle (wall-clock total timeout shared across handles), '
+'collect outcomes, and detach. Returns one row per input handle in input order.';
+
+-- A3: wait_any — return the first handle to finish, NULL on timeout
+CREATE FUNCTION pg_background_wait_any_v2(
+    handles    pg_background_handle[],
+    timeout_ms pg_catalog.int4 DEFAULT 0
+)
+RETURNS pg_background_handle
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    start_ts   pg_catalog.timestamptz := pg_catalog.clock_timestamp();
+    poll_ms    pg_catalog.int4 := 50;
+    h          pg_background_handle;
+    elapsed_ms pg_catalog.int8;
+BEGIN
+    IF handles IS NULL OR pg_catalog.array_length(handles, 1) IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    LOOP
+        FOREACH h IN ARRAY handles LOOP
+            IF h IS NULL THEN CONTINUE; END IF;
+            BEGIN
+                IF pg_background_wait_v2_timeout(h.pid, h.cookie, 0) THEN
+                    RETURN h;
+                END IF;
+            EXCEPTION WHEN OTHERS THEN
+                /* handle stale or invalid; treat as not-finished */
+                NULL;
+            END;
+        END LOOP;
+
+        IF timeout_ms > 0 THEN
+            elapsed_ms := (pg_catalog.date_part('epoch', pg_catalog.clock_timestamp() - start_ts) * 1000)::pg_catalog.int8;
+            IF elapsed_ms >= timeout_ms THEN
+                RETURN NULL;
+            END IF;
+        END IF;
+
+        PERFORM pg_catalog.pg_sleep(poll_ms / 1000.0);
+        IF poll_ms < 500 THEN poll_ms := poll_ms * 2; END IF;
+    END LOOP;
+END;
+$function$;
+
+COMMENT ON FUNCTION pg_background_wait_any_v2(pg_background_handle[], pg_catalog.int4) IS
+'Return the first handle whose worker has finished. Adaptive polling 50ms..500ms. '
+'Returns NULL on timeout. Caller decides what to do with the still-running handles.';
+
+-- A4: cancel_by_label — pattern-based cancel
+CREATE FUNCTION pg_background_cancel_by_label_v2(
+    pattern  pg_catalog.text,
+    grace_ms pg_catalog.int4 DEFAULT 0
+)
+RETURNS pg_catalog.int4
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    r   pg_catalog.record;
+    cnt pg_catalog.int4 := 0;
+BEGIN
+    IF pattern IS NULL THEN RETURN 0; END IF;
+    FOR r IN
+        SELECT pid, cookie FROM pg_background_list WHERE label LIKE pattern
+    LOOP
+        BEGIN
+            IF grace_ms > 0 THEN
+                PERFORM pg_background_cancel_v2_grace(r.pid, r.cookie, grace_ms);
+            ELSE
+                PERFORM pg_background_cancel_v2(r.pid, r.cookie);
+            END IF;
+            cnt := cnt + 1;
+        EXCEPTION WHEN OTHERS THEN
+            /* worker may have been cleaned up between list and cancel */
+            NULL;
+        END;
+    END LOOP;
+    RETURN cnt;
+END;
+$function$;
+
+COMMENT ON FUNCTION pg_background_cancel_by_label_v2(pg_catalog.text, pg_catalog.int4) IS
+'Cancel every worker whose label matches the SQL LIKE pattern. Returns count canceled.';
+
+-- A5: status_v2 — jsonb wrapper of outcome (driver-friendly)
+CREATE FUNCTION pg_background_status_v2(
+    p_pid    pg_catalog.int4,
+    p_cookie pg_catalog.int8
+)
+RETURNS pg_catalog.jsonb
+LANGUAGE sql
+AS $function$
+    SELECT pg_catalog.to_jsonb(pg_background_outcome_v2($1, $2));
+$function$;
+
+COMMENT ON FUNCTION pg_background_status_v2(pg_catalog.int4, pg_catalog.int8) IS
+'jsonb-shaped outcome snapshot. Easier to consume from drivers that decode JSON natively.';
+
+-- A6: purge — detach only stopped/done workers (vs detach_all_v2 which is non-discriminating)
+CREATE FUNCTION pg_background_purge_v2()
+RETURNS pg_catalog.int4
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    r   pg_catalog.record;
+    cnt pg_catalog.int4 := 0;
+BEGIN
+    FOR r IN SELECT pid, cookie FROM pg_background_list LOOP
+        BEGIN
+            IF pg_background_wait_v2_timeout(r.pid, r.cookie, 0) THEN
+                PERFORM pg_background_detach_v2(r.pid, r.cookie);
+                cnt := cnt + 1;
+            END IF;
+        EXCEPTION WHEN OTHERS THEN
+            /* worker raced cleanup; ignore */
+            NULL;
+        END;
+    END LOOP;
+    RETURN cnt;
+END;
+$function$;
+
+COMMENT ON FUNCTION pg_background_purge_v2() IS
+'Detach only workers that have already stopped (success/error/cancel). '
+'Returns count purged. Use detach_all_v2() to detach all workers regardless of state.';
+
+-- ----------------------------------------------------------------------
 -- Role: NOLOGIN executor role for clean privilege assignment
 --   - not named pg_*
 --   - can be granted to users/roles by admins
@@ -724,6 +969,14 @@ REVOKE ALL ON FUNCTION pg_background_outcome_v2(pg_catalog.int4, pg_catalog.int8
 REVOKE ALL ON FUNCTION pg_background_run_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.int4, pg_catalog.text) FROM public;
 REVOKE ALL ON TABLE pg_background_list FROM public;
 REVOKE ALL ON TABLE pg_background_activity FROM public;
+
+-- v1.10 Tier A new objects
+REVOKE ALL ON FUNCTION pg_background_run_query_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.int4, pg_catalog.text, pg_catalog.text) FROM public;
+REVOKE ALL ON FUNCTION pg_background_drain_v2(pg_background_handle[], pg_catalog.int4) FROM public;
+REVOKE ALL ON FUNCTION pg_background_wait_any_v2(pg_background_handle[], pg_catalog.int4) FROM public;
+REVOKE ALL ON FUNCTION pg_background_cancel_by_label_v2(pg_catalog.text, pg_catalog.int4) FROM public;
+REVOKE ALL ON FUNCTION pg_background_status_v2(pg_catalog.int4, pg_catalog.int8) FROM public;
+REVOKE ALL ON FUNCTION pg_background_purge_v2() FROM public;
 
 -- ----------------------------------------------------------------------
 -- Optional: helper to drop role explicitly (because DROP EXTENSION won't)

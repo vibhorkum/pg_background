@@ -118,6 +118,73 @@ or [Cookbook recipe 2](#cookbook).
 
 `pg_background` provides primitives, not orchestration. If you need durable queueing, retries, scheduling, or coordination across sessions, build it on top — or use a tool that specializes in it.
 
+### Side-by-side: `pg_background` vs neighboring tools
+
+A 30-second decision table. Pick the row that matches your job, not the column you've used before.
+
+| Capability | `pg_background` | `pg_cron` | `dblink` | `postgres_fdw` |
+|---|---|---|---|---|
+| Run SQL **in the background**, in the same db, in its own transaction | ✅ | ❌ runs on a schedule | ❌ runs in caller's flow | ❌ runs in caller's flow |
+| **Autonomous transactions** (commit independently of caller) | ✅ | ✅ | ✅ (separate connection) | ❌ |
+| **Scheduled / cron-style** execution | ❌ | ✅ | ❌ | ❌ |
+| Run SQL on a **different host** | ❌ | ❌ | ✅ | ✅ |
+| Run SQL in a **different database** of same cluster | ❌ | ✅ (per-db jobs) | ✅ | ✅ |
+| **Cookie-protected** lifecycle (cancel/wait/list with PID-reuse safety) | ✅ | ❌ | ❌ | ❌ |
+| **Structured error returns** (real SQLSTATE + detail/hint/context) | ✅ | partial | partial | partial |
+| Expose **plan choice from the worker process** | ✅ via `pg_background_explain_v2` | ❌ | ❌ | ❌ |
+| Persistent job state / **survives restart** | ❌ session-local | ✅ | ❌ | ❌ |
+| **DAG / retry / dependency** orchestration | ❌ | ❌ | ❌ | ❌ |
+
+**Common patterns**
+
+- **Audit logging that must commit even on rollback** → `pg_background_run_v2` with `submit_v2`-style fire-and-forget. Don't use `dblink` (callable but heavier per call).
+- **Nightly maintenance at 02:00** → `pg_cron`. Don't use `pg_background` (no scheduler).
+- **Read from another host's table** → `postgres_fdw`. Don't use `pg_background` (single-host).
+- **Synchronous fan-out: launch N updates, wait for all** → `pg_background_drain_v2`. Don't use `dblink` (no batch primitive).
+- **Cancel a long-running job from another session** — none of these tools is great. `pg_background_cancel_v2` works but only from the launching session today; cluster-wide cancel needs a manual `pg_cancel_backend` against the worker PID.
+
+---
+
+## Architecture (one-page mental model)
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant Launcher as Launcher session
+  participant DSM as DSM segment
+  participant SHMMQ as shm_mq
+  participant Worker as Background worker process
+
+  Launcher->>DSM: Allocate (fixed_data, sql, GUCs, queue)
+  Launcher->>Worker: RegisterDynamicBackgroundWorker
+  Launcher->>SHMMQ: shm_mq_wait_for_attach
+  Worker->>DSM: dsm_attach + shm_toc_lookup
+  Worker->>SHMMQ: shm_mq_attach (sender)
+  Note over Launcher,Worker: launch_v2 returns (pid, cookie) handle
+  Worker->>Worker: BackgroundWorkerInitializeConnection
+  Worker->>Worker: StartTransactionCommand
+  Worker->>Worker: execute_sql_string(sql)
+  alt success
+    Worker->>SHMMQ: stream rows + RowDescription
+    Worker->>DSM: row_count, command_tag
+    Worker->>SHMMQ: ReadyForQuery, pq_flush
+    Worker->>Worker: CommitTransactionCommand
+    Worker--xLauncher: proc_exit(0)
+  else error
+    Worker->>DSM: error_sqlstate (publish flag, written LAST)
+    Worker->>SHMMQ: EmitErrorReport (real 'E' frame)
+    Worker--xLauncher: proc_exit(1)
+  end
+  Launcher->>SHMMQ: pg_background_result_v2 (consume rows / get error)
+  Launcher->>Launcher: pg_background_detach_v2 (DSM cleanup callback fires)
+```
+
+**Key design points**
+
+- The DSM segment is the only shared mutable state. The launcher's session-local hash table tracks the segment and the BGW handle but never holds a long-lived pointer into it.
+- Errors propagate via two paths: the structured DSM fields (read by `error_info_v2`) and the live `'E'` frame on `shm_mq` (read by `result_v2`). Both must agree; the worker writes DSM first, then emits the frame.
+- The launcher's `cleanup_worker_info` callback runs at DSM detach, so leaking a handle is impossible — even abnormal exit paths reclaim resources.
+
 ---
 
 ## Key Features

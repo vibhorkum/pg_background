@@ -477,6 +477,15 @@ pgbg_sleep_with_backoff(long *interval_us, long remaining_us)
     *interval_us *= PGBG_POLL_BACKOFF_FACTOR;
     if (*interval_us > PGBG_POLL_INTERVAL_MAX_US)
         *interval_us = PGBG_POLL_INTERVAL_MAX_US;
+
+    /*
+     * Add a small (~12.5%) random jitter so concurrent sessions polling the
+     * same workers do not converge to identical wake-up times (thundering
+     * herd). random() is fine here — we are not doing cryptographic work,
+     * just decorrelating timing across sessions.
+     */
+    if (*interval_us > 8)
+        *interval_us += (long) (random() % (*interval_us / 8));
 }
 
 /*
@@ -760,7 +769,11 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
         ereport(ERROR,
                 (errcode(ERRCODE_INSUFFICIENT_RESOURCES),
                  errmsg("could not register background process"),
-                 errhint("You may need to increase max_worker_processes.")));
+                 errhint("Background worker slots are exhausted. Check the cluster-wide "
+                         "max_worker_processes setting and the per-session "
+                         "pg_background.max_workers GUC, and inspect existing workers "
+                         "with SELECT * FROM pg_background_list to identify candidates "
+                         "to detach or cancel.")));
     }
 
     MemoryContextSwitchTo(oldcontext);

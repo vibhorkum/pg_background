@@ -1467,4 +1467,128 @@ BEGIN
     RAISE NOTICE 'metadata-driven grant/revoke OK (% funcs, % views round-tripped)',
                  n_funcs_total, n_views_total;
 END$$;
-NOTICE:  metadata-driven grant/revoke OK (26 funcs, 2 views round-tripped)
+NOTICE:  metadata-driven grant/revoke OK (32 funcs, 2 views round-tripped)
+-- =========================================================================
+-- v1.10 Tier A: loop-killer helpers
+-- =========================================================================
+-- A1: pg_background_run_query_v2 success + error path
+SELECT * FROM pg_background_run_query_v2('SELECT 42 AS n', col_def => 'n int') AS r(n int);
+ n  
+----
+ 42
+(1 row)
+
+DO $$
+BEGIN
+    BEGIN
+        PERFORM * FROM pg_background_run_query_v2('SELECT 1/0', col_def => 'x int') AS r(x int);
+        RAISE EXCEPTION 'Tier A run_query_v2: error not propagated';
+    EXCEPTION WHEN division_by_zero THEN
+        RAISE NOTICE 'Tier A run_query_v2 SQLSTATE 22012 OK';
+    END;
+END$$;
+NOTICE:  Tier A run_query_v2 SQLSTATE 22012 OK
+-- A2: drain_v2 with N=3
+DO $$
+DECLARE
+    hs pg_background_handle[];
+    drained int;
+    all_completed bool;
+BEGIN
+    hs := ARRAY(
+        SELECT pg_background_launch_v2('SELECT pg_sleep(0.05)', 65536, 'tier-a-drain-' || g)
+          FROM generate_series(1,3) g
+    );
+    SELECT count(*), bool_and(completed)
+      INTO drained, all_completed
+      FROM pg_background_drain_v2(hs, 5000);
+    IF drained <> 3 OR NOT all_completed THEN
+        RAISE EXCEPTION 'Tier A drain_v2: drained=%, all_completed=%', drained, all_completed;
+    END IF;
+    RAISE NOTICE 'Tier A drain_v2 OK';
+END$$;
+NOTICE:  Tier A drain_v2 OK
+-- A3: wait_any_v2 returns one winner
+DO $$
+DECLARE
+    hs pg_background_handle[];
+    winner pg_background_handle;
+BEGIN
+    hs := ARRAY(
+        SELECT pg_background_launch_v2(format('SELECT pg_sleep(%s)', g*0.03), 65536, 'tier-a-any-' || g)
+          FROM generate_series(1,3) g
+    );
+    winner := pg_background_wait_any_v2(hs, 5000);
+    IF winner IS NULL THEN
+        RAISE EXCEPTION 'Tier A wait_any_v2: no winner';
+    END IF;
+    /* Cleanup via drain — it handles wait + detach for every handle */
+    PERFORM count(*) FROM pg_background_drain_v2(hs, 5000);
+    RAISE NOTICE 'Tier A wait_any_v2 OK';
+END$$;
+NOTICE:  Tier A wait_any_v2 OK
+-- A4: cancel_by_label_v2 with a LIKE pattern
+DO $$
+DECLARE
+    cnt int;
+BEGIN
+    PERFORM pg_background_launch_v2('SELECT pg_sleep(60)', 65536, 'tier-a-cancel-1');
+    PERFORM pg_background_launch_v2('SELECT pg_sleep(60)', 65536, 'tier-a-cancel-2');
+    PERFORM pg_background_launch_v2('SELECT pg_sleep(60)', 65536, 'tier-a-keep-1');
+
+    cnt := pg_background_cancel_by_label_v2('tier-a-cancel-%');
+    IF cnt <> 2 THEN
+        RAISE EXCEPTION 'Tier A cancel_by_label_v2: expected 2, got %', cnt;
+    END IF;
+
+    cnt := pg_background_cancel_by_label_v2('tier-a-keep-%', 100);
+    IF cnt <> 1 THEN
+        RAISE EXCEPTION 'Tier A cancel_by_label_v2 (keep): expected 1, got %', cnt;
+    END IF;
+    PERFORM pg_background_detach_all_v2();
+    RAISE NOTICE 'Tier A cancel_by_label_v2 OK';
+END$$;
+NOTICE:  Tier A cancel_by_label_v2 OK
+-- A5: status_v2 returns jsonb with expected keys
+DO $$
+DECLARE
+    r pg_background_run_result;
+    j jsonb;
+BEGIN
+    r := pg_background_run_v2('SELECT 1', label => 'tier-a-status');
+    j := pg_background_status_v2(r.pid, 0);
+    IF NOT (j ? 'pid' AND j ? 'completed' AND j ? 'has_error' AND j ? 'sqlstate') THEN
+        RAISE EXCEPTION 'Tier A status_v2: missing expected keys: %', j;
+    END IF;
+    RAISE NOTICE 'Tier A status_v2 OK';
+END$$;
+NOTICE:  Tier A status_v2 OK
+-- A6: purge_v2 detaches only stopped workers
+DO $$
+DECLARE
+    h_done    pg_background_handle;
+    h_running pg_background_handle;
+    purged    int;
+BEGIN
+    h_done := pg_background_launch_v2('SELECT 1', 65536, 'tier-a-purge-done');
+    PERFORM pg_background_wait_v2(h_done.pid, h_done.cookie);
+
+    h_running := pg_background_launch_v2('SELECT pg_sleep(60)', 65536, 'tier-a-purge-keep');
+    /* Give the running worker a moment to attach */
+    PERFORM pg_sleep(0.1);
+
+    purged := pg_background_purge_v2();
+    IF purged < 1 THEN
+        RAISE EXCEPTION 'Tier A purge_v2: expected at least 1, got %', purged;
+    END IF;
+    /* The still-running worker should remain in the list */
+    IF (SELECT count(*) FROM pg_background_list
+         WHERE pid = h_running.pid AND cookie = h_running.cookie) <> 1 THEN
+        RAISE EXCEPTION 'Tier A purge_v2: running worker incorrectly purged';
+    END IF;
+
+    PERFORM pg_background_cancel_v2(h_running.pid, h_running.cookie);
+    PERFORM pg_background_detach_all_v2();
+    RAISE NOTICE 'Tier A purge_v2 OK';
+END$$;
+NOTICE:  Tier A purge_v2 OK
