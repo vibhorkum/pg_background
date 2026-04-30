@@ -162,18 +162,24 @@ jobs:
           docker exec postgres-test mkdir -p "$SHAREDIR/extension"
           docker cp pg_background.control postgres-test:$SHAREDIR/extension/
 
-          # Copy all SQL files (base install and upgrade scripts)
-          for sqlfile in pg_background--*.sql; do
+          # Copy all SQL files (base install and upgrade scripts).
+          # Files now live under extension/ (current) and extension/legacy/.
+          for sqlfile in extension/pg_background--*.sql extension/legacy/pg_background--*.sql; do
+            [ -f "$sqlfile" ] || continue
             echo "Copying $sqlfile..."
             docker cp "$sqlfile" postgres-test:$SHAREDIR/extension/
           done
 
-          # Optionally copy bitcode if it was built successfully
-          if [ -f pg_background.bc ]; then
-            echo "Copying bitcode file..."
-            docker exec postgres-test mkdir -p "$PKGLIBDIR/bitcode/pg_background"
-            docker cp pg_background.bc postgres-test:$PKGLIBDIR/bitcode/pg_background/ || echo "Warning: Failed to copy bitcode (non-critical)"
-          fi
+          # Optionally copy bitcode if it was built successfully.
+          # PGXS emits one .bc per .o, so files live next to the sources in src/.
+          for bcfile in src/pg_background.bc src/pg_background_worker.bc; do
+            if [ -f "$bcfile" ]; then
+              echo "Copying $bcfile..."
+              docker exec postgres-test mkdir -p "$PKGLIBDIR/bitcode/pg_background/src"
+              docker cp "$bcfile" postgres-test:$PKGLIBDIR/bitcode/pg_background/src/ \
+                || echo "Warning: Failed to copy $bcfile (non-critical)"
+            fi
+          done
 
           echo "=== Verify installation in container ==="
           docker exec postgres-test ls -la "$PKGLIBDIR/pg_background.so"
@@ -240,7 +246,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run relocatable tests
-        run: ./test-relocatable.sh 17
+        run: ./scripts/test-relocatable.sh 17
 
   # Test upgrade path 1.8 -> 1.9 -> 1.10
   upgrade-test:
@@ -253,7 +259,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run upgrade test
-        run: ./test-upgrade.sh 17
+        run: ./scripts/test-upgrade.sh 17
 
   # Test with assert-enabled PostgreSQL (catches memory context bugs)
   assert-test:
@@ -271,7 +277,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run assert-enabled test
-        run: ./test-assert.sh ${{ matrix.pg }}
+        run: ./scripts/test-assert.sh ${{ matrix.pg }}
 
       - name: Show logs on failure
         if: failure()
@@ -349,12 +355,14 @@ jobs:
             --suppress=unusedFunction \
             --suppress=unmatchedSuppression \
             --error-exitcode=1 \
-            pg_background.c || echo "::warning::cppcheck found issues (non-blocking)"
+            src/pg_background.c src/pg_background_worker.c \
+            || echo "::warning::cppcheck found issues (non-blocking)"
 
       - name: Check code formatting
         run: |
           echo "=== Checking code formatting ==="
-          clang-format --dry-run --Werror pg_background.c 2>&1 || echo "::notice::Code formatting differs from clang-format style (informational)"
+          clang-format --dry-run --Werror src/pg_background.c src/pg_background_worker.c 2>&1 \
+            || echo "::notice::Code formatting differs from clang-format style (informational)"
 
   security:
     name: Security Scan

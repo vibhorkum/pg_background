@@ -81,7 +81,7 @@
 #include <unistd.h>
 
 #ifdef WIN32
-#include "windows/pg_background_win.h"
+#include "pg_background_win.h"
 #endif /* WIN32 */
 
 #include "pg_background.h"

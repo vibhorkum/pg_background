@@ -8,12 +8,12 @@
 #   - Upgrade to newer version
 #   - Verify new features work after upgrade
 #
-# Usage:
-#   ./test-upgrade.sh [PG_VERSION]
+# Usage (run from the repository root):
+#   ./scripts/test-upgrade.sh [PG_VERSION]
 #
 # Examples:
-#   ./test-upgrade.sh        # Test with PostgreSQL 17 (default)
-#   ./test-upgrade.sh 16     # Test with PostgreSQL 16
+#   ./scripts/test-upgrade.sh        # Test with PostgreSQL 17 (default)
+#   ./scripts/test-upgrade.sh 16     # Test with PostgreSQL 16
 #
 
 set -euo pipefail

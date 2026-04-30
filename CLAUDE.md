@@ -217,18 +217,18 @@ Do not blur the distinction between v1 and v2 semantics.
 - Timeout behavior: `wait_v2_timeout` returns false on timeout, true on completion
 
 ### Version-sensitive testing
-- `./test-local.sh all` tests PostgreSQL 14-18
+- `./scripts/test-local.sh all` tests PostgreSQL 14-18
 - CI matrix covers ubuntu-22.04 and ubuntu-24.04 with all PG versions
 - Version-specific expected outputs when necessary
 
 ### CI pipeline coverage
 - **Main test matrix**: Runs `make installcheck` on PG 14-18 × ubuntu-22.04/24.04
 - **Relocatable test**: Verifies extension works in custom schema (not just `public`)
-- **Upgrade test**: Validates upgrade path 1.8 → 1.9 → 1.10 using `test-upgrade.sh`
+- **Upgrade test**: Validates upgrade path 1.8 → 1.9 → 1.10 using `scripts/test-upgrade.sh`
 - All three test types must pass before merge
 
 ### Upgrade path testing
-- `./test-upgrade.sh [PG_VERSION]` tests extension upgrades in Docker
+- `./scripts/test-upgrade.sh [PG_VERSION]` tests extension upgrades in Docker
 - Validates: old version installs, old functionality works, upgrade succeeds, new features work, old features preserved
 - Always test upgrade paths when adding new functions or types
 - Upgrade scripts must be additive; never remove objects in upgrade scripts
@@ -374,7 +374,7 @@ Do not blur the distinction between v1 and v2 semantics.
 - For metadata features (labels, result info, error info), add direct assertions that query and verify the value
 - Example: if adding a label parameter, add a test that queries `list_v2()` and verifies the label is visible
 
-### Shell script patterns (test-upgrade.sh, test-local.sh)
+### Shell script patterns (scripts/test-upgrade.sh, scripts/test-local.sh)
 - With `set -e`, do not rely on `$?` checks after commands that would already abort
 - Use `if ! command; then` instead of `command; if [ $? -ne 0 ]`
 - Use `psql -X -v ON_ERROR_STOP=1` in automated test scripts to ensure SQL errors propagate as non-zero exit codes
@@ -451,13 +451,13 @@ make installcheck
 make installcheckclean
 
 # Docker-based testing (no local PostgreSQL required)
-./test-local.sh          # Test with PostgreSQL 17 (default)
-./test-local.sh 14       # Test with specific version
-./test-local.sh all      # Test all supported versions (14-18)
+./scripts/test-local.sh          # Test with PostgreSQL 17 (default)
+./scripts/test-local.sh 14       # Test with specific version
+./scripts/test-local.sh all      # Test all supported versions (14-18)
 
 # Upgrade path testing
-./test-upgrade.sh        # Test 1.8 → 1.9 → 1.10 upgrade path on PG 17
-./test-upgrade.sh 16     # Test upgrade on specific PG version
+./scripts/test-upgrade.sh        # Test 1.8 → 1.9 → 1.10 upgrade path on PG 17
+./scripts/test-upgrade.sh 16     # Test upgrade on specific PG version
 ```
 
 ---
@@ -496,17 +496,25 @@ Launcher Session                    Background Worker
 
 | File | Purpose |
 |------|---------|
-| `pg_background.c` | All C implementation (~3200 lines) |
-| `pg_background.h` | Version compatibility macros |
+| `src/pg_background.c` | Launcher-side C implementation |
+| `src/pg_background_worker.c` | Worker-process C implementation (worker_main, execute_sql_string, error_exit) |
+| `src/pg_background.h` | Version compatibility macros (public to other modules) |
+| `src/pg_background_internal.h` | Cross-file declarations between launcher and worker |
 | `pg_background.control` | Extension metadata (version 1.10) |
-| `pg_background--1.10.sql` | Current version install script |
-| `pg_background--1.9--1.10.sql` | Upgrade from 1.9 |
-| `pg_background--1.9.sql` | Previous version install script (kept for installs that pin 1.9) |
-| `pg_background--1.8--1.9.sql` | Upgrade from 1.8 |
+| `extension/pg_background--1.10.sql` | Current version install script |
+| `extension/pg_background--1.9--1.10.sql` | Upgrade from 1.9 |
+| `extension/pg_background--1.9.sql` | 1.9 install script (kept for installs that pin 1.9) |
+| `extension/pg_background--1.8--1.9.sql` | Upgrade from 1.8 |
+| `extension/pg_background--1.8.sql` | 1.8 install script |
+| `extension/legacy/` | Pre-1.8 base + upgrade scripts kept so older installs can still upgrade to 1.10 |
 | `sql/pg_background.sql` | Regression tests |
 | `expected/pg_background.out` | Expected test output |
-| `test-local.sh` | Docker-based multi-version testing |
-| `test-upgrade.sh` | Docker-based upgrade path testing |
+| `scripts/test-local.sh` | Docker-based multi-version testing |
+| `scripts/test-upgrade.sh` | Docker-based upgrade path testing |
+| `scripts/test-relocatable.sh` | Docker-based relocatable-schema test |
+| `scripts/test-assert.sh` | Docker-based assert-enabled PG test |
+| `docs/CONTRIBUTING.md`, `docs/SECURITY.md`, `docs/CI.md` | Contributor / ops docs |
+| `windows/pg_background_win.h` | Windows DLL symbol-export shim |
 | `.github/workflows/ci.yml` | CI pipeline (test matrix, relocatable, upgrade) |
 
 ## 11. Incremental Prompt Mode (AI Workflow Contract)

@@ -5,14 +5,14 @@
 # This script builds AND tests entirely within Docker containers,
 # so you don't need PostgreSQL development files installed locally.
 #
-# Usage:
-#   ./test-local.sh [PG_VERSION]
+# Usage (run from the repository root):
+#   ./scripts/test-local.sh [PG_VERSION]
 #
 # Examples:
-#   ./test-local.sh        # Test with PostgreSQL 17 (default)
-#   ./test-local.sh 14     # Test with PostgreSQL 14
-#   ./test-local.sh 15     # Test with PostgreSQL 15
-#   ./test-local.sh all    # Test with all supported versions (14-18)
+#   ./scripts/test-local.sh        # Test with PostgreSQL 17 (default)
+#   ./scripts/test-local.sh 14     # Test with PostgreSQL 14
+#   ./scripts/test-local.sh 15     # Test with PostgreSQL 15
+#   ./scripts/test-local.sh all    # Test with all supported versions (14-18)
 #
 # Requirements:
 #   - Docker installed and running

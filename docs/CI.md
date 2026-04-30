@@ -8,21 +8,21 @@ The pg_background CI pipeline uses GitHub Actions with containerized PostgreSQL 
 
 ### Local Testing with Docker
 
-The easiest way to run tests locally is using the provided `test-local.sh` script:
+The easiest way to run tests locally is using the provided `scripts/test-local.sh` script:
 
 ```bash
 # Test with default PostgreSQL version (17)
-./test-local.sh
+./scripts/test-local.sh
 
 # Test with a specific version
-./test-local.sh 14
-./test-local.sh 15
-./test-local.sh 16
-./test-local.sh 17
-./test-local.sh 18
+./scripts/test-local.sh 14
+./scripts/test-local.sh 15
+./scripts/test-local.sh 16
+./scripts/test-local.sh 17
+./scripts/test-local.sh 18
 
 # Test all supported versions (14-18)
-./test-local.sh all
+./scripts/test-local.sh all
 ```
 
 **Requirements**: Docker must be installed and running. No local PostgreSQL installation required.
@@ -100,7 +100,7 @@ The regression tests verify all pg_background v1.8 functionality:
 
 ## Manual Local Testing
 
-If you prefer not to use `test-local.sh`, follow these steps:
+If you prefer not to use `scripts/test-local.sh`, follow these steps:
 
 ### 1. Start PostgreSQL Container
 
@@ -249,7 +249,7 @@ ls results/
 
 When modifying CI:
 
-1. Test changes locally using `./test-local.sh` first
+1. Test changes locally using `./scripts/test-local.sh` first
 2. Consider all matrix combinations (10 total)
 3. Update this documentation if workflow changes
 4. Keep YAML readable; complex logic goes in step scripts

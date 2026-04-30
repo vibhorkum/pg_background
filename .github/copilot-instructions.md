@@ -228,13 +228,16 @@ When suggesting code changes:
 ### Files and Their Purposes
 | File | Review Focus |
 |------|--------------|
-| `pg_background.c` | Core implementation; watch for memory, concurrency, cleanup |
-| `pg_background.h` | Version compatibility; ensure macros work on all PG versions |
+| `src/pg_background.c` | Launcher-side implementation; watch for memory, concurrency, cleanup |
+| `src/pg_background_worker.c` | Worker-process implementation; SPI, error paths |
+| `src/pg_background.h` | Version compatibility; ensure macros work on all PG versions |
+| `src/pg_background_internal.h` | Cross-file declarations between launcher and worker |
 | `pg_background.control` | Version must match latest SQL script |
-| `pg_background--*.sql` | Upgrade paths, privilege grants, schema handling |
+| `extension/pg_background--*.sql` | Current install + upgrade scripts |
+| `extension/legacy/pg_background--*.sql` | Pre-1.8 base + upgrade chain (kept so older installs can still upgrade) |
 | `sql/pg_background.sql` | Test coverage for all behaviors |
 | `expected/pg_background.out` | Expected output; watch for version-sensitive differences |
-| `test-upgrade.sh` | Upgrade path validation; verify 1.8 → 1.9 transitions |
+| `scripts/test-upgrade.sh` | Upgrade path validation; verify 1.8 → 1.9 → 1.10 transitions |
 | `.github/workflows/ci.yml` | CI pipeline; test matrix + relocatable + upgrade tests |
 
 ### CI Pipeline Review Checklist

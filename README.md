@@ -204,7 +204,7 @@ sequenceDiagram
 - `pg_background_outcome_v2(pid, cookie)` — combined `list_v2 + result_info_v2 + error_info_v2` snapshot that **never raises**; returns NULL fields when the handle is gone or results are already consumed.
 - `pg_background_run_v2(sql, queue_size, timeout_ms, label)` — **synchronous one-shot**: launch + wait + outcome + detach in one call, with 1 s cancel-grace on timeout. Returns metadata only.
 
-Full changelog and history: [`IMPROVEMENTS_v1.10.md`](IMPROVEMENTS_v1.10.md). Older milestones (v1.6 cookies, v1.8 stats/GUCs/progress, v1.9 labels/structured errors/batch ops) are listed in [Migration Guide](#migration-guide).
+Older milestones (v1.6 cookies, v1.8 stats/GUCs/progress, v1.9 labels/structured errors/batch ops) are listed in the [Migration Guide](#migration-guide).
 
 ---
 
@@ -2475,8 +2475,6 @@ ALTER EXTENSION pg_background UPDATE TO '1.10';
 2. Optional: replace ad-hoc column-def lists with the new `pg_background_list` view in monitoring queries.
 3. Optional: replace bespoke `launch + wait + cleanup` wrappers with `pg_background_run_v2()`.
 
-See [`IMPROVEMENTS_v1.10.md`](IMPROVEMENTS_v1.10.md) for the full set of changes and the list of features deferred to future PRs.
-
 ### Upgrading from v1.8 to v1.9
 
 ```sql
@@ -2647,14 +2645,14 @@ Docker-based testing requires no local PostgreSQL installation:
 
 ```bash
 # Test with PostgreSQL 17 (default)
-./test-local.sh
+./scripts/test-local.sh
 
 # Test with specific PostgreSQL version
-./test-local.sh 14
-./test-local.sh 16
+./scripts/test-local.sh 14
+./scripts/test-local.sh 16
 
 # Test all supported versions (14-18)
-./test-local.sh all
+./scripts/test-local.sh all
 ```
 
 ### Relocatable Extension Testing
@@ -2663,7 +2661,7 @@ Verify the extension works correctly when installed in a custom schema:
 
 ```bash
 # Run comprehensive relocatable tests
-./test-relocatable.sh 17
+./scripts/test-relocatable.sh 17
 ```
 
 ### Upgrade Path Testing
@@ -2672,7 +2670,7 @@ Validate extension upgrades work correctly:
 
 ```bash
 # Test 1.8 → 1.9 upgrade path
-./test-upgrade.sh 17
+./scripts/test-upgrade.sh 17
 ```
 
 ### CI Pipeline
@@ -2693,7 +2691,7 @@ All tests must pass before merging to main branches.
 
 ## Contributing
 
-We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for:
+We welcome contributions! Please see [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) for:
 - Code of conduct
 - Development setup
 - Coding standards (PostgreSQL style, `pgindent`)

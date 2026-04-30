@@ -127,10 +127,10 @@ We use `pgindent` for automatic formatting:
 
 ```bash
 # Format a single file
-pgindent pg_background.c
+pgindent src/pg_background.c
 
 # Check formatting without modifying
-pgindent --check pg_background.c
+pgindent --check src/pg_background.c
 ```
 
 **Note**: `pgindent` requires PostgreSQL source tree. See [PostgreSQL wiki](https://wiki.postgresql.org/wiki/Running_pgindent) for setup.
