@@ -57,16 +57,27 @@ cleanup() {
     docker rm "$container" 2>/dev/null || true
 }
 
+#
+# Per-version run owns CURRENT_CONTAINER, and we install an EXIT trap that
+# cleans up whatever's currently set so a script abort (Ctrl-C, set -e
+# trip, etc.) cannot leave a docker container behind. CLAUDE.md §7 calls
+# out the explicit-cleanup-everywhere pattern as fragile and mandates the
+# trap form.
+#
+CURRENT_CONTAINER=""
+trap '[ -n "$CURRENT_CONTAINER" ] && cleanup "$CURRENT_CONTAINER"' EXIT
+
 run_test() {
     local pg_ver="$1"
     local container="${CONTAINER_NAME}_pg${pg_ver}"
+    CURRENT_CONTAINER="$container"
 
     echo ""
     echo "========================================"
     log_info "Testing with PostgreSQL $pg_ver"
     echo "========================================"
 
-    # Cleanup any existing container
+    # Cleanup any existing container from a prior aborted run.
     cleanup "$container"
 
     # Start PostgreSQL container with build tools

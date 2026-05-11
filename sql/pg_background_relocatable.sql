@@ -68,14 +68,14 @@ FROM pg_type t
 JOIN pg_namespace n ON n.oid = t.typnamespace
 WHERE t.typname = 'pg_background_stats';
 
--- Test pg_background_progress type (v1.8)
+-- Test pg_background_progress_info type (v2.0 rename of pg_background_progress)
 SELECT
     CASE WHEN n.nspname = 'custom_ext' THEN 'PASS' ELSE 'FAIL' END AS test_2c_progress_type,
     t.typname,
     n.nspname AS type_schema
 FROM pg_type t
 JOIN pg_namespace n ON n.oid = t.typnamespace
-WHERE t.typname = 'pg_background_progress';
+WHERE t.typname = 'pg_background_progress_info';
 
 -- Test type construction with schema qualification
 SELECT
@@ -83,30 +83,12 @@ SELECT
     (ROW(123, 9876543210)::custom_ext.pg_background_handle).*;
 
 -- ==========================================================================
--- TEST 3: v1 API functions with schema qualification
+-- TEST 3: (v2.0) v1 API was removed — section retained as a placeholder.
 -- ==========================================================================
 \echo ''
-\echo '>>> Test 3: v1 API functions with custom schema'
-
-DROP TABLE IF EXISTS t_relocate_v1;
-CREATE TABLE t_relocate_v1(id int, val text);
-
--- v1: launch with schema-qualified call
-SELECT custom_ext.pg_background_launch('INSERT INTO t_relocate_v1 VALUES (1, ''v1_test'')') AS pid \gset
-
--- v1: result with schema-qualified call
-SELECT * FROM custom_ext.pg_background_result(:pid) AS (result TEXT);
-
--- Verify data was inserted
-SELECT
-    CASE WHEN count(*) = 1 THEN 'PASS' ELSE 'FAIL' END AS test_3a_v1_launch_result,
-    'v1 launch/result' AS test_name
-FROM t_relocate_v1 WHERE val = 'v1_test';
-
--- v1: detach with schema-qualified call
-SELECT custom_ext.pg_background_launch('SELECT 1') AS pid2 \gset
-SELECT custom_ext.pg_background_detach(:pid2);
-SELECT 'PASS' AS test_3b_v1_detach, 'v1 detach completed' AS description;
+\echo '>>> Test 3: v1 API removed in v2.0; coverage moved to Test 4'
+SELECT 'PASS' AS test_3_v1_removed_note,
+       'v1 API dropped in 2.0; v2 coverage continues below' AS description;
 
 -- ==========================================================================
 -- TEST 4: v2 API functions with schema qualification
@@ -199,7 +181,7 @@ FROM (SELECT custom_ext.pg_background_launch_v2('SELECT pg_sleep(10); INSERT INT
 \gset
 
 SELECT pg_sleep(0.2);
-SELECT custom_ext.pg_background_cancel_v2_grace(:cang_pid, :cang_cookie, 500);
+SELECT custom_ext.pg_background_cancel_v2(:cang_pid, :cang_cookie, 500);
 SELECT pg_sleep(0.5);
 
 SELECT
@@ -221,11 +203,11 @@ FROM (SELECT custom_ext.pg_background_launch_v2('SELECT pg_sleep(0.5)', 65536) A
 
 -- Short timeout should return false
 SELECT
-    CASE WHEN NOT custom_ext.pg_background_wait_v2_timeout(:wt_pid, :wt_cookie, 100) THEN 'PASS' ELSE 'FAIL' END AS test_7a_timeout_short;
+    CASE WHEN NOT custom_ext.pg_background_wait_v2(:wt_pid, :wt_cookie, 100) THEN 'PASS' ELSE 'FAIL' END AS test_7a_timeout_short;
 
 -- Long timeout should return true
 SELECT
-    CASE WHEN custom_ext.pg_background_wait_v2_timeout(:wt_pid, :wt_cookie, 5000) THEN 'PASS' ELSE 'FAIL' END AS test_7b_timeout_long;
+    CASE WHEN custom_ext.pg_background_wait_v2(:wt_pid, :wt_cookie, 5000) THEN 'PASS' ELSE 'FAIL' END AS test_7b_timeout_long;
 
 SELECT custom_ext.pg_background_detach_v2(:wt_pid, :wt_cookie);
 
@@ -280,9 +262,9 @@ FROM custom_ext.pg_background_stats_v2();
 
 SELECT (h).pid AS prg_pid, (h).cookie AS prg_cookie
 FROM (SELECT custom_ext.pg_background_launch_v2($$
-    SELECT custom_ext.pg_background_progress(25, 'Quarter done');
+    SELECT custom_ext.pg_background_report_progress_v2(25, 'Quarter done');
     SELECT pg_sleep(0.2);
-    SELECT custom_ext.pg_background_progress(100, 'Complete');
+    SELECT custom_ext.pg_background_report_progress_v2(100, 'Complete');
 $$, 65536) AS h) s
 \gset
 
@@ -295,7 +277,7 @@ SELECT
     progress_msg
 FROM custom_ext.pg_background_get_progress_v2(:prg_pid, :prg_cookie);
 
-SELECT custom_ext.pg_background_wait_v2_timeout(:prg_pid, :prg_cookie, 5000);
+SELECT custom_ext.pg_background_wait_v2(:prg_pid, :prg_cookie, 5000);
 SELECT custom_ext.pg_background_detach_v2(:prg_pid, :prg_cookie);
 
 -- ==========================================================================

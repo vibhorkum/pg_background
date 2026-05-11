@@ -33,21 +33,54 @@ The easiest way to run tests locally is using the provided `scripts/test-local.s
 
 | Job | Purpose | Runs On | Timeout |
 |-----|---------|---------|---------|
-| **test** | Build and test against PostgreSQL matrix | ubuntu-22.04, ubuntu-24.04 | 15 min |
-| **test-summary** | Aggregate test results | ubuntu-latest | - |
-| **lint** | Static analysis (cppcheck, clang-format) | ubuntu-latest | 10 min |
+| **test** | Build and test against the PostgreSQL × Ubuntu matrix | ubuntu-22.04, ubuntu-24.04 (PG 14–18) | 15 min |
+| **relocatable-test** | Verify `CREATE EXTENSION ... WITH SCHEMA` on every supported PG | ubuntu-24.04 (PG 14–18) | 15 min |
+| **upgrade-test** | Validate the 1.8 → 1.9 → 1.10 → 2.0 upgrade chain on every supported PG | ubuntu-24.04 (PG 14–18) | 15 min |
+| **assert-test** | Run the regression suite against an assert-enabled PG build | ubuntu-24.04 (PG 14–18) | 30 min |
+| **sanitizer-test** | Run the regression suite under AddressSanitizer + UndefinedBehaviorSanitizer | ubuntu-24.04 (PG 17) | 30 min |
+| **test-summary** | Aggregate matrix results into a single status check | ubuntu-24.04 | — |
+| **lint** | Static analysis (**blocking** cppcheck + clang-format) | ubuntu-24.04 | 10 min |
 | **security** | CodeQL security scanning | ubuntu-latest | 20 min |
 
 ### Test Matrix
 
-The test job runs against all combinations:
+The **test** job runs against all combinations:
 
 | Ubuntu Version | PostgreSQL Versions |
 |----------------|---------------------|
 | 22.04 | 14, 15, 16, 17, 18 |
 | 24.04 | 14, 15, 16, 17, 18 |
 
-**Total: 10 parallel test jobs**
+**Per-job parallelism**:
+- `test`: **10** (2 OS × 5 PG)
+- `relocatable-test`: **5** (PG 14–18)
+- `upgrade-test`: **5** (PG 14–18)
+- `assert-test`: **5** (PG 14–18)
+- `sanitizer-test`: **1** (PG 17 only — the build is expensive; add more
+  versions if a class of issue is suspected to be PG-major-specific)
+- `test-summary`, `lint`, `security`: 1 each
+
+**Grand total: 28 jobs per CI run.** This is up from 19 in the
+pre-2.0 layout because the relocatable, upgrade, and sanitizer paths
+were either single-shot or didn't exist; 2.0's matrix expansion is
+deliberate so a PG-major-specific issue in any of those paths cannot
+slip through.
+
+### Sanitizer build details
+
+The `sanitizer-test` job builds PostgreSQL from source with
+`-fsanitize=address,undefined -fno-omit-frame-pointer
+-fno-sanitize-recover=all -O1 -g3` and builds pg_background with the
+matching flags. Loading an instrumented `.so` into a vanilla PG silently
+misses bugs because the runtime allocator is unhooked, so we need a
+PG that was itself instrumented.
+
+Runtime knobs:
+- `ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:halt_on_error=1` — leak
+  detection is off because postmaster's small known leaks would
+  otherwise drown out real issues; halt+abort on error so CI fails on
+  the first real find.
+- `UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1` — same idea.
 
 ### Workflow Triggers
 

@@ -18,10 +18,11 @@
 #include "postgres.h"
 #include "fmgr.h"
 
-/* v1 API */
-PGDLLEXPORT Datum pg_background_launch(PG_FUNCTION_ARGS);
-PGDLLEXPORT Datum pg_background_result(PG_FUNCTION_ARGS);
-PGDLLEXPORT Datum pg_background_detach(PG_FUNCTION_ARGS);
+/*
+ * v2.0: the v1 (no-suffix) API has been dropped.
+ * cancel_v2 / wait_v2 are now single entrypoints; the separate _grace
+ * and _timeout exports are gone.
+ */
 
 /* v2 API */
 PGDLLEXPORT Datum pg_background_launch_v2(PG_FUNCTION_ARGS);
@@ -29,14 +30,12 @@ PGDLLEXPORT Datum pg_background_submit_v2(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum pg_background_result_v2(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum pg_background_detach_v2(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum pg_background_cancel_v2(PG_FUNCTION_ARGS);
-PGDLLEXPORT Datum pg_background_cancel_v2_grace(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum pg_background_wait_v2(PG_FUNCTION_ARGS);
-PGDLLEXPORT Datum pg_background_wait_v2_timeout(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum pg_background_list_v2(PG_FUNCTION_ARGS);
 
 /* Statistics and progress */
 PGDLLEXPORT Datum pg_background_stats_v2(PG_FUNCTION_ARGS);
-PGDLLEXPORT Datum pg_background_progress(PG_FUNCTION_ARGS);
+PGDLLEXPORT Datum pg_background_report_progress_v2(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum pg_background_get_progress_v2(PG_FUNCTION_ARGS);
 
 /* v1.9: Observability and batch operations */
@@ -44,6 +43,12 @@ PGDLLEXPORT Datum pg_background_result_info_v2(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum pg_background_error_info_v2(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum pg_background_detach_all_v2(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum pg_background_cancel_all_v2(PG_FUNCTION_ARGS);
+
+/* v1.10: Full SQL accessor */
+PGDLLEXPORT Datum pg_background_full_sql_v2(PG_FUNCTION_ARGS);
+
+/* v2.0 (B5a): private bumper for run_v2 timeout accounting */
+PGDLLEXPORT Datum pg_background_record_timeout_v2(PG_FUNCTION_ARGS);
 
 /* Worker entry point */
 PGDLLEXPORT void pg_background_worker_main(Datum);

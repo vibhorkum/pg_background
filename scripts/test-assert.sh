@@ -4,7 +4,11 @@
 # This reproduces the FailedAssertion in CopyErrorData on error paths
 #
 
-set -e
+# Aligned with the other scripts/test-*.sh hygiene per CLAUDE.md §7:
+# -e exits on first failure, -u flags unset-variable refs, -o pipefail
+# propagates failures through `producer | tee`-style pipelines so a
+# silent producer failure doesn't get swallowed.
+set -euo pipefail
 
 PG_VERSION="${1:-14}"
 CONTAINER_NAME="pg_background_assert_test_pg${PG_VERSION}"

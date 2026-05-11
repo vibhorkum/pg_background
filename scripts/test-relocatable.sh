@@ -36,6 +36,11 @@ cleanup() {
 }
 
 main() {
+    # Ensure cleanup runs on every exit path — error, success, Ctrl-C —
+    # so a failed test doesn't leave the docker container behind. Mirrors
+    # the trap in scripts/test-assert.sh per CLAUDE.md §7.
+    trap 'cleanup' EXIT
+
     echo ""
     echo "========================================================================"
     echo "pg_background RELOCATABLE SCHEMA TEST"
@@ -69,7 +74,7 @@ main() {
         fi
         if [ "$i" -eq 30 ]; then
             log_error "PostgreSQL failed to start"
-            cleanup
+            # trap 'cleanup' EXIT handles container teardown.
             exit 1
         fi
         sleep 2
@@ -116,10 +121,15 @@ main() {
     echo "========================================================================"
     echo ""
 
-    # Run the test and capture output
+    # Run the test and capture output.
+    #
+    # CLAUDE.md §7: psql with `-X -v ON_ERROR_STOP=1` so a SQL error aborts
+    # the script with a non-zero exit code instead of being swallowed
+    # silently. -X also skips the user's ~/.psqlrc, which keeps the
+    # captured output deterministic across machines.
     local OUTPUT_FILE="/tmp/relocatable_test_output.txt"
     docker exec -w /build "$CONTAINER_NAME" bash -c "
-        psql -U postgres -f sql/pg_background_relocatable.sql 2>&1
+        psql -X -v ON_ERROR_STOP=1 -U postgres -f sql/pg_background_relocatable.sql 2>&1
     " | tee "$OUTPUT_FILE"
 
     echo ""
@@ -127,19 +137,43 @@ main() {
     echo "TEST RESULTS ANALYSIS"
     echo "========================================================================"
 
-    # Count PASS and FAIL results from test output
-    local PASS_COUNT=$(grep -c "PASS" "$OUTPUT_FILE" 2>/dev/null || echo "0")
-    # Only count actual FAIL test results, exclude instructional text
-    local FAIL_COUNT=$(grep "FAIL" "$OUTPUT_FILE" 2>/dev/null | grep -v "Any FAIL" | grep -v "FAIL results" | wc -l | tr -d ' ')
+    # Count PASS and FAIL results from test output.
+    #
+    # Important: do NOT use the `grep -c ... || echo 0` pattern here.
+    # `grep -c` returns 1 (failure) on zero matches, and under `set -e` the
+    # `|| echo 0` would mask both the bad case (no PASS at all) and the
+    # broken-pipe case. Instead, capture the count via `wc -l` after grep,
+    # which always returns 0 even with no matches. (CLAUDE.md §7
+    # anti-pattern.)
+    local PASS_COUNT
+    PASS_COUNT=$(grep -c "PASS" "$OUTPUT_FILE" 2>/dev/null | tr -d ' ')
+    PASS_COUNT=${PASS_COUNT:-0}
+
+    # Only count actual FAIL test results, exclude instructional text.
+    local FAIL_COUNT
+    FAIL_COUNT=$(grep "FAIL" "$OUTPUT_FILE" 2>/dev/null | grep -v "Any FAIL" | grep -v "FAIL results" | wc -l | tr -d ' ')
+    FAIL_COUNT=${FAIL_COUNT:-0}
+
+    # Hard-fail if we recorded any FAILs at all — relying on the
+    # PASS-grep alone (line 142 below) would let a partial-failure run
+    # squeak through if at least one PASS appeared elsewhere in the file.
+    if [ "$FAIL_COUNT" -gt 0 ]; then
+        log_error "Detected $FAIL_COUNT FAIL marker(s) in test output"
+    fi
 
     echo ""
     log_info "Total PASS occurrences: $PASS_COUNT"
     log_info "Total FAIL occurrences: $FAIL_COUNT"
 
-    # Check if CREATE EXTENSION succeeded and test_1 passed
-    # The output format has PASS on the line after the column headers
+    # Check if CREATE EXTENSION succeeded and test_1 passed.
+    #
+    # Both conditions must hold AND there must be no FAIL markers at all.
+    # The previous version trusted the PASS-grep alone, which would still
+    # report success even if 14 of 15 sub-tests printed FAIL.
     local TEST_RESULT=0
-    if grep -q "CREATE EXTENSION" "$OUTPUT_FILE" && grep -q "PASS.*pg_background.*custom_ext" "$OUTPUT_FILE"; then
+    if [ "$FAIL_COUNT" -eq 0 ] \
+       && grep -q "CREATE EXTENSION" "$OUTPUT_FILE" \
+       && grep -q "PASS.*pg_background.*custom_ext" "$OUTPUT_FILE"; then
         echo ""
         echo "========================================================================"
         log_info "ALL TESTS PASSED - Extension is fully relocatable!"
@@ -147,7 +181,6 @@ main() {
         echo ""
         echo "Verified capabilities:"
         echo "  ✓ Extension installs in custom schema"
-        echo "  ✓ All v1 API functions work with schema qualification"
         echo "  ✓ All v2 API functions work with schema qualification"
         echo "  ✓ Composite types accessible with schema qualification"
         echo "  ✓ Privilege helpers detect extension schema dynamically"
@@ -175,8 +208,7 @@ main() {
         TEST_RESULT=1
     fi
 
-    # Cleanup
-    cleanup
+    # Cleanup happens via the EXIT trap installed at the top of main().
     exit $TEST_RESULT
 }
 

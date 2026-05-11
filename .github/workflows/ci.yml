@@ -2,7 +2,10 @@ name: CI - PostgreSQL Extension Build & Test
 
 on:
   push:
-    branches: [ master, main, develop, 'v1.*', 'improvements/*' ]
+    # Branches we want pre-merge CI on. v1.* / v2.* track release-line work;
+    # refactor/* is the conventional staging branch for non-feature cleanups.
+    # `improvements/*` was historical and is dropped.
+    branches: [ master, main, develop, 'v1.*', 'v2.*', 'refactor/*' ]
     tags: [ 'v*' ]
   pull_request:
     branches: [ master, main ]
@@ -235,31 +238,66 @@ jobs:
           docker stop postgres-test 2>/dev/null || true
           docker rm postgres-test 2>/dev/null || true
 
-  # Test extension relocatability (custom schema installation)
+  # Test extension relocatability (custom schema installation) on the full
+  # PG matrix — 2.0's relocatable behavior depends on the privilege-helper
+  # rename (B4), which we want validated against every supported PG.
   relocatable-test:
-    name: Relocatable Test (PG 17)
+    name: Relocatable Test (PG ${{ matrix.pg }})
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [14, 15, 16, 17, 18]
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Run relocatable tests
-        run: ./scripts/test-relocatable.sh 17
+        run: ./scripts/test-relocatable.sh ${{ matrix.pg }}
 
-  # Test upgrade path 1.8 -> 1.9 -> 1.10
+  # Test upgrade path 1.8 -> 1.9 -> 1.10 -> 2.0 on the full PG matrix.
+  # 2.0 is a major release; an upgrade-script syntax issue specific to one
+  # PG major (e.g. removed catalogs, MERGE quirks) must not slip through.
   upgrade-test:
-    name: Upgrade Test (1.8 → 1.9 → 1.10)
+    name: Upgrade Test 1.8→2.0 (PG ${{ matrix.pg }})
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [14, 15, 16, 17, 18]
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Run upgrade test
-        run: ./scripts/test-upgrade.sh 17
+        run: ./scripts/test-upgrade.sh ${{ matrix.pg }}
+
+  # Test under AddressSanitizer + UndefinedBehaviorSanitizer.
+  #
+  # Builds PostgreSQL from source with -fsanitize=address,undefined and
+  # builds the extension with the matching flags so ASan can hook the
+  # allocator and stack metadata. Catches the memory-safety class of
+  # bugs that the assert-enabled job cannot — heap-use-after-free,
+  # stack-buffer-overflow, signed-integer-overflow, NULL-deref. Runs on
+  # PG 17 only because the build is expensive (~6 minutes); add more
+  # versions if a class of issue is suspected to be PG-major-specific.
+  sanitizer-test:
+    name: Sanitizer Test (ASan + UBSan, PG 17)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run sanitizer test
+        run: ./scripts/test-sanitizer.sh 17
 
   # Test with assert-enabled PostgreSQL (catches memory context bugs)
   assert-test:
@@ -289,7 +327,7 @@ jobs:
   test-summary:
     name: Test Summary
     runs-on: ubuntu-24.04
-    needs: [test, relocatable-test, upgrade-test, assert-test]
+    needs: [test, relocatable-test, upgrade-test, assert-test, sanitizer-test]
     if: always()
     steps:
       - name: Check test results
@@ -308,6 +346,10 @@ jobs:
           fi
           if [ "${{ needs.assert-test.result }}" != "success" ]; then
             echo "::error::Assert-enabled test failed (memory context bug detected)"
+            exit 1
+          fi
+          if [ "${{ needs.sanitizer-test.result }}" != "success" ]; then
+            echo "::error::ASan/UBSan run failed (memory-safety bug detected)"
             exit 1
           fi
           echo "All test jobs passed!"
@@ -348,6 +390,10 @@ jobs:
           sudo apt-get install -y -qq postgresql-server-dev-${{ env.DEFAULT_PG_VERSION }}
 
       - name: Run cppcheck
+        # BLOCKING. Previously the `|| echo "::warning"` swallowed cppcheck
+        # exit codes so the job stayed green even when cppcheck found
+        # actual issues. With --error-exitcode=1 set, any cppcheck error
+        # now fails the lint job and gates merge.
         run: |
           echo "=== Running cppcheck ==="
           cppcheck --enable=all --inconclusive --std=c11 \
@@ -355,8 +401,7 @@ jobs:
             --suppress=unusedFunction \
             --suppress=unmatchedSuppression \
             --error-exitcode=1 \
-            src/pg_background.c src/pg_background_worker.c \
-            || echo "::warning::cppcheck found issues (non-blocking)"
+            src/pg_background.c src/pg_background_worker.c
 
       - name: Check code formatting
         run: |

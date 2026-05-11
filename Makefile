@@ -8,26 +8,19 @@ EXTENSION = pg_background
 PG_CPPFLAGS += -I$(srcdir)/src -I$(srcdir)/windows
 
 # Ship the base + upgrade scripts you support.
-# extension/        — currently supported (1.8, 1.9, 1.10) and their upgrade chain
-# extension/legacy/ — pre-1.8 base + upgrade scripts kept so existing installs
-#                     can still run ALTER EXTENSION ... UPDATE all the way to 1.10.
+#
+# v2.0 supports upgrade only from 1.8 onward. Anyone on a pre-1.8 install
+# must first upgrade to 1.8 against the 1.10 release line before moving to
+# 2.0. The pre-1.8 legacy upgrade scripts have been removed (extension/legacy/
+# directory is gone).
 DATA = \
+	extension/pg_background--2.0.sql \
+	extension/pg_background--1.10--2.0.sql \
 	extension/pg_background--1.10.sql \
 	extension/pg_background--1.9--1.10.sql \
 	extension/pg_background--1.9.sql \
 	extension/pg_background--1.8--1.9.sql \
-	extension/pg_background--1.8.sql \
-	extension/legacy/pg_background--1.7--1.8.sql \
-	extension/legacy/pg_background--1.7.sql \
-	extension/legacy/pg_background--1.6--1.7.sql \
-	extension/legacy/pg_background--1.6.sql \
-	extension/legacy/pg_background--1.4--1.6.sql \
-	extension/legacy/pg_background--1.5--1.6.sql \
-	extension/legacy/pg_background--1.4--1.5.sql \
-	extension/legacy/pg_background--1.0--1.4.sql \
-	extension/legacy/pg_background--1.1--1.4.sql \
-	extension/legacy/pg_background--1.2--1.4.sql \
-	extension/legacy/pg_background--1.3--1.4.sql
+	extension/pg_background--1.8.sql
 
 # Regression
 REGRESS = pg_background

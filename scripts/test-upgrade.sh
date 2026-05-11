@@ -51,7 +51,7 @@ main() {
 
     echo ""
     echo "========================================================================"
-    echo "pg_background UPGRADE PATH TEST (1.8 -> 1.9 -> 1.10)"
+    echo "pg_background UPGRADE PATH TEST (1.8 -> 1.9 -> 1.10 -> 2.0)"
     echo "========================================================================"
     echo "PostgreSQL Version: $PG_VERSION"
     echo "========================================================================"
@@ -309,6 +309,10 @@ DO $$
 DECLARE
     h pg_background_handle;
 BEGIN
+    /*
+     * 1.10 still has the old pg_background_progress(...) function name; it
+     * is renamed to pg_background_report_progress_v2 only in 2.0.
+     */
     SELECT * INTO h FROM pg_background_launch_v2($$
         SELECT pg_background_progress(50, 'test progress');
     $$, 65536);
@@ -391,6 +395,96 @@ EOF
         log_info "Version 1.10 new features verified"
     fi
 
+    # Test 8: Upgrade to 2.0 (major release)
+    log_test "Step 8: Upgrading from 1.10 to 2.0..."
+    if docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres -c "ALTER EXTENSION pg_background UPDATE TO '2.0';" 2>&1; then
+        log_info "Upgrade to 2.0 completed"
+    else
+        log_error "Upgrade to 2.0 failed"
+        TEST_RESULT=1
+    fi
+
+    INSTALLED_VERSION=$(docker exec "$CONTAINER_NAME" psql -X -t -A -U postgres -c "SELECT extversion FROM pg_extension WHERE extname = 'pg_background';")
+    if [ "$INSTALLED_VERSION" = "2.0" ]; then
+        log_info "Verified version 2.0 is installed"
+    else
+        log_error "Expected version 2.0 after upgrade, got: $INSTALLED_VERSION"
+        TEST_RESULT=1
+    fi
+
+    # Test 9: Verify 2.0 reshape works
+    log_test "Step 9: Verifying 2.0 reshape..."
+    if ! docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres <<'EOF'
+-- v1 functions are gone
+SELECT CASE
+    WHEN NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'pg_background_launch')
+    THEN 'PASS: v1 pg_background_launch dropped'
+    ELSE 'FAIL: v1 pg_background_launch still present'
+END AS test_2_0_v1_dropped;
+
+-- collapsed cancel_v2 takes 3 args with default 0
+SELECT CASE
+    WHEN (SELECT count(*) FROM pg_proc WHERE proname = 'pg_background_cancel_v2') = 1
+    THEN 'PASS: cancel_v2 single overload'
+    ELSE 'FAIL: cancel_v2 has unexpected number of overloads'
+END AS test_2_0_cancel_v2;
+
+-- collapsed wait_v2 returns bool
+SELECT CASE
+    WHEN (SELECT prorettype::regtype::text FROM pg_proc WHERE proname = 'pg_background_wait_v2') = 'boolean'
+    THEN 'PASS: wait_v2 returns bool'
+    ELSE 'FAIL: wait_v2 has wrong return type'
+END AS test_2_0_wait_v2;
+
+-- renamed progress function
+DO $$
+DECLARE
+    h pg_background_handle;
+BEGIN
+    SELECT * INTO h FROM pg_background_launch_v2($$
+        SELECT pg_background_report_progress_v2(50, 'renamed');
+    $$, 65536);
+    PERFORM pg_sleep(0.2);
+    PERFORM pg_background_detach_v2(h.pid, h.cookie);
+    RAISE NOTICE 'PASS: pg_background_report_progress_v2 works after 2.0 upgrade';
+END;
+$$;
+
+-- new run_result columns are present
+DO $$
+DECLARE
+    r pg_background_run_result;
+BEGIN
+    r := pg_background_run_v2('SELECT 1', 65536, 0, 'upgrade-2_0');
+    IF r.completed AND NOT r.has_error AND r.cookie IS NOT NULL THEN
+        RAISE NOTICE 'PASS: 2.0 run_result extended (cookie=%)', r.cookie;
+    ELSE
+        RAISE NOTICE 'FAIL: 2.0 run_result missing fields';
+    END IF;
+END;
+$$;
+
+-- workers_timed_out is now part of pg_background_stats
+SELECT CASE
+    WHEN workers_timed_out IS NOT NULL THEN 'PASS: workers_timed_out exists'
+    ELSE 'FAIL: workers_timed_out missing'
+END AS test_2_0_stats_timed_out
+FROM pg_background_stats_v2();
+
+-- renamed privilege helper
+SELECT CASE
+    WHEN EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'pg_background_grant_privileges_v2')
+    THEN 'PASS: pg_background_grant_privileges_v2 exists'
+    ELSE 'FAIL: pg_background_grant_privileges_v2 missing'
+END AS test_2_0_grant_renamed;
+EOF
+    then
+        log_error "Version 2.0 reshape tests failed"
+        TEST_RESULT=1
+    else
+        log_info "Version 2.0 reshape verified"
+    fi
+
     # Summary
     echo ""
     echo "========================================================================"
@@ -412,6 +506,14 @@ EOF
         echo "    - pg_background_list / pg_background_activity views"
         echo "    - pg_background_outcome_v2() never-raises helper"
         echo "    - pg_background_run_v2() synchronous one-shot"
+        echo "  - Upgrade from 1.10 to 2.0 succeeds"
+        echo "  - Version 2.0 reshape verified:"
+        echo "    - v1 API removed"
+        echo "    - cancel_v2 / wait_v2 collapsed (single overload)"
+        echo "    - pg_background_report_progress_v2 rename"
+        echo "    - pg_background_run_result extended (cookie/state/...)"
+        echo "    - workers_timed_out stats counter"
+        echo "    - pg_background_grant_privileges_v2 rename"
         echo "========================================================================"
     else
         log_error "SOME UPGRADE TESTS FAILED"
@@ -428,7 +530,7 @@ case "${1:-}" in
         echo "Usage: $0 [PG_VERSION]"
         echo ""
         echo "Test pg_background extension upgrade paths using Docker."
-        echo "Validates upgrade from version 1.8 -> 1.9 -> 1.10."
+        echo "Validates upgrade from version 1.8 -> 1.9 -> 1.10 -> 2.0."
         echo ""
         echo "PG_VERSION can be: 14, 15, 16, 17, 18"
         echo "Default: $DEFAULT_PG_VERSION"

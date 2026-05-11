@@ -8,7 +8,7 @@
  * the background worker process: SQL parsing/execution, the structured
  * error-exit path that writes results back to the launcher via DSM and
  * shm_mq, and signal handling. The two halves communicate only through the
- * DSM-backed pg_background_fixed_data and the response shm_mq, never via
+ * DSM-backed pg_background_input/output structs and the response shm_mq, never via
  * direct function calls.
  *
  * Copyright (c) 2014-2026, Vibhor Kumar and contributors
@@ -72,7 +72,7 @@ static inline void
 pgbg_portal_define_query_compat(Portal portal,
                                 const char *prepStmtName,
                                 const char *sourceText,
-                                CommandTag_compat commandTag,
+                                CommandTag commandTag,
                                 List *stmts,
                                 CachedPlan *cplan)
 {
@@ -102,8 +102,8 @@ pgbg_portal_run_compat(Portal portal,
  * ============================================================================
  */
 
-static void pg_background_worker_error_exit(pg_background_fixed_data *fdata);
-static void execute_sql_string(const char *sql, pg_background_fixed_data *fdata);
+static void pg_background_worker_error_exit(pg_background_output *output);
+static void execute_sql_string(const char *sql, pg_background_output *output);
 static void handle_sigterm(SIGNAL_ARGS);
 /* exists_binary_recv_fn is exported via pg_background_internal.h */
 
@@ -124,15 +124,19 @@ static void handle_sigterm(SIGNAL_ARGS);
  * instead of a synthesized 08006), sends ReadyForQuery, flushes the queue,
  * and calls proc_exit(1).  Never returns.
  *
- * HOLD_INTERRUPTS/RESUME_INTERRUPTS bracket the body so that SIGTERM cannot
- * interrupt pq_flush mid-frame, matching the ParallelWorkerMain pattern.
+ * HOLD_INTERRUPTS keeps signals deferred through the body so that a
+ * second SIGTERM (e.g. from a launcher-side double-cancel or a
+ * cancel_by_label_v2 against multiple workers) cannot interrupt
+ * pq_flush / EmitErrorReport mid-frame. We deliberately do NOT call
+ * RESUME_INTERRUPTS before proc_exit — see the comment near the
+ * proc_exit(1) call at the bottom of this function for why.
  */
 static void
-pg_background_worker_error_exit(pg_background_fixed_data *fdata)
+pg_background_worker_error_exit(pg_background_output *output)
 {
     ErrorData  *edata;
 
-    Assert(fdata != NULL);  /* callers guarantee this; crash loudly if violated */
+    Assert(output != NULL);  /* callers guarantee this; crash loudly if violated */
 
     HOLD_INTERRUPTS();
 
@@ -144,18 +148,41 @@ pg_background_worker_error_exit(pg_background_fixed_data *fdata)
     MemoryContextSwitchTo(TopMemoryContext);
     edata = CopyErrorData();
 
-    /* Clear result metadata: no rows produced when the worker errors out. */
-    fdata->result_row_count = 0;
-    fdata->command_tag[0] = '\0';
+    /*
+     * Clear result metadata: no rows produced when the worker errors out.
+     * Also clear the publish flag — even if a prior successful command in a
+     * multi-statement SQL had set it, the cleared row_count/command_tag must
+     * not look "published" to a launcher reading after error_sqlstate is set.
+     */
+    output->result_row_count = 0;
+    output->command_tag[0] = '\0';
+    output->result_published = 0;
 
     if (edata->message != NULL)
-        strlcpy(fdata->error_message, edata->message, sizeof(fdata->error_message));
+        strlcpy(output->error_message, edata->message, sizeof(output->error_message));
     if (edata->detail != NULL)
-        strlcpy(fdata->error_detail, edata->detail, sizeof(fdata->error_detail));
+        strlcpy(output->error_detail, edata->detail, sizeof(output->error_detail));
     if (edata->hint != NULL)
-        strlcpy(fdata->error_hint, edata->hint, sizeof(fdata->error_hint));
+        strlcpy(output->error_hint, edata->hint, sizeof(output->error_hint));
     if (edata->context != NULL)
-        strlcpy(fdata->error_context, edata->context, sizeof(fdata->error_context));
+        strlcpy(output->error_context, edata->context, sizeof(output->error_context));
+
+    /*
+     * v2.0 (B5c): error-source identifiers from edata. Each is optional —
+     * PostgreSQL only populates them for errors raised by the heap/access
+     * layer (constraint violations, missing relations/columns, etc.).
+     */
+    if (edata->schema_name != NULL)
+        strlcpy(output->error_schema_name, edata->schema_name, sizeof(output->error_schema_name));
+    if (edata->table_name != NULL)
+        strlcpy(output->error_table_name, edata->table_name, sizeof(output->error_table_name));
+    if (edata->column_name != NULL)
+        strlcpy(output->error_column_name, edata->column_name, sizeof(output->error_column_name));
+    if (edata->constraint_name != NULL)
+        strlcpy(output->error_constraint_name, edata->constraint_name, sizeof(output->error_constraint_name));
+
+    /* v2.0 (B5b): mark execution end on the error path. */
+    output->finished_at = GetCurrentTimestamp();
 
     /*
      * Write barrier: ensure all fields above are visible to concurrent
@@ -163,8 +190,8 @@ pg_background_worker_error_exit(pg_background_fixed_data *fdata)
      */
     pg_write_barrier();
     /* unpack_sql_state() always returns 5 chars + NUL, fits in PGBG_ERROR_SQLSTATE_LEN */
-    strlcpy(fdata->error_sqlstate, unpack_sql_state(edata->sqlerrcode),
-            sizeof(fdata->error_sqlstate));
+    strlcpy(output->error_sqlstate, unpack_sql_state(edata->sqlerrcode),
+            sizeof(output->error_sqlstate));
 
     /*
      * Emit the real 'E' frame over shm_mq so the launcher's result state
@@ -186,24 +213,42 @@ pg_background_worker_error_exit(pg_background_fixed_data *fdata)
     FreeErrorData(edata);
 
     /*
-     * Two FlushErrorState calls are both required:
-     * - The PG_CATCH above flushed any secondary error raised by EmitErrorReport.
-     * - This call flushes the *original* worker error, which CopyErrorData() copied
-     *   but did not remove from the ErrorContext stack.  Without this, the caller's
-     *   PG_END_TRY would observe stale error state.
+     * v2.0 (F): match PostgreSQL's standard error-cleanup sequence
+     * (emit → abort → flush). Calling AbortCurrentTransaction BEFORE the
+     * final FlushErrorState lets any error raised by abort callbacks
+     * propagate cleanly with the original error still on the stack;
+     * flushing first leaves the abort callbacks racing against an empty
+     * error stack which is one of the suspected segfault paths.
      */
-    FlushErrorState();
-
     if (IsTransactionState())
         AbortCurrentTransaction();
+
+    /*
+     * Final FlushErrorState clears the *original* worker error that
+     * CopyErrorData() preserved but did not remove. Without this, any
+     * subsequent code path would observe stale error state.
+     */
+    FlushErrorState();
 
     /* Mark session idle, send 'Z' to flip state->complete, flush the queue. */
     pgstat_report_activity(STATE_IDLE, NULL);
     ReadyForQuery(DestRemote);
     pq_flush();
 
-    RESUME_INTERRUPTS();
-
+    /*
+     * v2.0 (F): do NOT call RESUME_INTERRUPTS() before proc_exit().
+     *
+     * If a second SIGTERM arrived mid-error_exit (e.g. from a launcher-side
+     * double-cancel or a cancel_by_label_v2 against multiple workers
+     * exiting simultaneously), handle_sigterm queued QueryCancelPending
+     * even though we're already exiting. Resuming interrupts at this point
+     * lets proc_exit's cleanup chain dispatch that pending cancel via
+     * CHECK_FOR_INTERRUPTS, which fires ereport(ERROR) with no live PG_TRY
+     * to catch it — observable as a worker SIGSEGV during multi-worker
+     * cancel patterns. Keeping interrupts held through proc_exit matches
+     * PostgreSQL's parallel-worker error pattern; the InterruptHoldoffCount
+     * is irrelevant once the process is unwinding.
+     */
     proc_exit(1);
 }
 
@@ -225,7 +270,8 @@ pg_background_worker_main(Datum main_arg)
 {
     dsm_segment *seg;
     shm_toc     *toc;
-    pg_background_fixed_data *fdata;
+    pg_background_input  *input;
+    pg_background_output *output;
     char        *sql;
     char        *gucstate;
     shm_mq      *mq;
@@ -257,12 +303,13 @@ pg_background_worker_main(Datum main_arg)
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                  errmsg("bad magic number in dynamic shared memory segment")));
 
-    fdata = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_FIXED_DATA, false);
-    sql = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_SQL, false);
-    gucstate = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_GUC, false);
-    mq = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_QUEUE, false);
+    input    = shm_toc_lookup(toc, PG_BACKGROUND_KEY_INPUT,  false);
+    output   = shm_toc_lookup(toc, PG_BACKGROUND_KEY_OUTPUT, false);
+    sql      = shm_toc_lookup(toc, PG_BACKGROUND_KEY_SQL,    false);
+    gucstate = shm_toc_lookup(toc, PG_BACKGROUND_KEY_GUC,    false);
+    mq       = shm_toc_lookup(toc, PG_BACKGROUND_KEY_QUEUE,  false);
 
-    if (fdata == NULL || sql == NULL || gucstate == NULL || mq == NULL)
+    if (input == NULL || output == NULL || sql == NULL || gucstate == NULL || mq == NULL)
         ereport(ERROR, (errmsg("failed to locate required data in shared memory")));
 
     shm_mq_set_sender(mq, MyProc);
@@ -292,12 +339,12 @@ pg_background_worker_main(Datum main_arg)
      */
     PG_TRY();
     {
-        BackgroundWorkerInitializeConnection(NameStr(fdata->database),
-                                             NameStr(fdata->authenticated_user),
+        BackgroundWorkerInitializeConnection(NameStr(input->database),
+                                             NameStr(input->authenticated_user),
                                              BGWORKER_BYPASS_ALLOWCONN);
 
-        if (fdata->database_id != MyDatabaseId ||
-            fdata->authenticated_user_id != GetAuthenticatedUserId())
+        if (input->database_id != MyDatabaseId ||
+            input->authenticated_user_id != GetAuthenticatedUserId())
             ereport(ERROR,
                     (errmsg("user or database renamed during pg_background startup")));
 
@@ -314,9 +361,9 @@ pg_background_worker_main(Datum main_arg)
          */
         {
             char appname[NAMEDATALEN];
-            if (fdata->label[0] != '\0')
+            if (input->label[0] != '\0')
                 snprintf(appname, sizeof(appname),
-                         "pg_background:%s:%d", fdata->label, (int) MyProcPid);
+                         "pg_background:%s:%d", input->label, (int) MyProcPid);
             else
                 snprintf(appname, sizeof(appname),
                          "pg_background:%d", (int) MyProcPid);
@@ -325,7 +372,7 @@ pg_background_worker_main(Datum main_arg)
         }
 
         /* If cancel was requested before we began, exit quietly */
-        if (*(volatile uint32 *)&fdata->cancel_requested != 0)
+        if (*(volatile uint32 *)&input->cancel_requested != 0)
         {
             ResourceOwnerDelete(CurrentResourceOwner);
             CurrentResourceOwner = NULL;
@@ -358,9 +405,9 @@ pg_background_worker_main(Datum main_arg)
                 disable_timeout(STATEMENT_TIMEOUT, false);
         }
 
-        SetUserIdAndSecContext(fdata->current_user_id, fdata->sec_context);
+        SetUserIdAndSecContext(input->current_user_id, input->sec_context);
 
-        execute_sql_string(sql, fdata);
+        execute_sql_string(sql, output);
 
         disable_timeout(STATEMENT_TIMEOUT, false);
     }
@@ -370,7 +417,7 @@ pg_background_worker_main(Datum main_arg)
          * Any pre-commit error — connection init, GUC restore, user/database
          * check, or SQL execution — lands here. All paths call proc_exit(1).
          */
-        pg_background_worker_error_exit(fdata);
+        pg_background_worker_error_exit(output);
     }
     PG_END_TRY();
 
@@ -400,7 +447,7 @@ pg_background_worker_main(Datum main_arg)
          * Commit-phase error: deferred constraints, AFTER triggers, or
          * statement cancel during CommitTransactionCommand.
          */
-        pg_background_worker_error_exit(fdata);
+        pg_background_worker_error_exit(output);
     }
     PG_END_TRY();
 
@@ -462,11 +509,12 @@ exists_binary_recv_fn(Oid type)
  * Supports multiple commands separated by semicolons.
  * Transaction control statements are not allowed.
  *
- * v1.9: Populates fdata->result_row_count and fdata->command_tag
- * with metadata from the final command executed.
+ * Populates output->result_row_count and output->command_tag with metadata
+ * from the final command executed, and writes started_at/finished_at
+ * timestamps around the SPI loop.
  */
 static void
-execute_sql_string(const char *sql, pg_background_fixed_data *fdata)
+execute_sql_string(const char *sql, pg_background_output *output)
 {
     List       *raw_parsetree_list;
     ListCell   *lc1;
@@ -498,6 +546,15 @@ execute_sql_string(const char *sql, pg_background_fixed_data *fdata)
     sqlerrcontext.previous = error_context_stack;
     error_context_stack = &sqlerrcontext;
 
+    /*
+     * v2.0 (B5b): record execution-start timestamp before parsing/planning
+     * so result_info_v2 can report it. finished_at is set after the loop
+     * completes (success path) or in pg_background_worker_error_exit
+     * (failure path).
+     */
+    if (output != NULL)
+        output->started_at = GetCurrentTimestamp();
+
     PG_TRY();
     {
         oldcontext = MemoryContextSwitchTo(parsecontext);
@@ -509,7 +566,7 @@ execute_sql_string(const char *sql, pg_background_fixed_data *fdata)
         foreach(lc1, raw_parsetree_list)
         {
             RawStmt    *parsetree = (RawStmt *) lfirst(lc1);
-            CommandTag_compat  commandTag;
+            CommandTag  commandTag;
             QueryCompletion qc;
             List       *querytree_list;
             List       *plantree_list;
@@ -523,10 +580,10 @@ execute_sql_string(const char *sql, pg_background_fixed_data *fdata)
                         (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                          errmsg("transaction control statements are not allowed in pg_background")));
 
-            commandTag = CreateCommandTag_compat(parsetree);
-            set_ps_display_compat(GetCommandTagName(commandTag));
+            commandTag = CreateCommandTag((Node *) parsetree);
+            set_ps_display(GetCommandTagName(commandTag));
 
-            BeginCommand_compat(commandTag, DestNone);
+            BeginCommand(commandTag, DestNone);
 
             if (analyze_requires_snapshot(parsetree))
             {
@@ -566,17 +623,24 @@ execute_sql_string(const char *sql, pg_background_fixed_data *fdata)
 
             (*receiver->rDestroy)(receiver);
 
-            EndCommand_compat(&qc, DestRemote);
+            EndCommand(&qc, DestRemote, false);
 
             /*
              * v1.9: Store result metadata from each command.
              * The final values reflect the last command executed.
+             *
+             * v1.10: Publish via a write barrier + flag so a launcher reader
+             * (pg_background_result_info_v2) cannot observe a fresh
+             * row_count paired with a stale command_tag. Mirrors the
+             * error_sqlstate publish-flag idiom.
              */
-            if (fdata != NULL)
+            if (output != NULL)
             {
-                fdata->result_row_count = qc.nprocessed;
-                strlcpy(fdata->command_tag, GetCommandTagName(commandTag),
-                        sizeof(fdata->command_tag));
+                output->result_row_count = qc.nprocessed;
+                strlcpy(output->command_tag, GetCommandTagName(commandTag),
+                        sizeof(output->command_tag));
+                pg_write_barrier();
+                output->result_published = 1;
             }
 
             PortalDrop(portal, false);
@@ -597,6 +661,10 @@ execute_sql_string(const char *sql, pg_background_fixed_data *fdata)
     /* Normal path: clean up memory context and restore error context */
     MemoryContextDelete(parsecontext);
     error_context_stack = sqlerrcontext.previous;
+
+    /* v2.0 (B5b): mark execution end on the success path. */
+    if (output != NULL)
+        output->finished_at = GetCurrentTimestamp();
 }
 
 /*

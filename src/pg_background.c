@@ -19,23 +19,15 @@
  *     communicate results back via shared memory queues.
  *
  * KEY BEHAVIORS
- *     - v1 API preserved: launch/result/detach (fire-and-forget detach is NOT cancel)
- *     - v2 API adds: cookie-validated handle, submit (fire-and-forget), cancel, wait, list
- *     - Fixes NOTIFY race: shm_mq_wait_for_attach() before returning to SQL
- *     - Avoids past crashes: never pfree() BGW handle; deterministic hash cleanup
+ *     - Cookie-validated v2 API: launch/submit, result, detach, cancel, wait, list.
+ *     - submit_v2 is fire-and-forget; detach_v2 is NOT cancel.
+ *     - NOTIFY race fix: shm_mq_wait_for_attach() before returning to SQL.
+ *     - Crash hygiene: never pfree() BGW handle; deterministic hash cleanup.
+ *     - Cryptographically secure cookies (pg_strong_random); session-local
+ *       statistics + progress reporting; bounded GUC + queue / timeout knobs.
  *
- * VERSION 1.8 IMPROVEMENTS
- *     - Cryptographically secure cookie generation using pg_strong_random()
- *     - Dedicated memory context for worker info (prevents session memory bloat)
- *     - Exponential backoff in polling loops (reduces CPU usage)
- *     - Refactored code to eliminate duplication
- *     - Enhanced documentation and error messages
- *     - GUCs: pg_background.max_workers, worker_timeout, default_queue_size
- *     - Session statistics: pg_background_stats_v2()
- *     - Progress reporting: pg_background_progress(), pg_background_get_progress_v2()
- *     - Bounds checking: queue size max, timeout max, timestamp overflow protection
- *     - UTF-8 aware string truncation
- *     - Race condition fix in list_v2() hash iteration
+ * Per-release improvements are tracked in docs/MIGRATION.md and the README's
+ * "What's new in v2.0 / earlier milestones" section, not in this file.
  *
  * -------------------------------------------------------------------------
  */
@@ -88,11 +80,13 @@
 #include "pg_background_internal.h"
 
 /*
- * Supported versions only (per your request).
- * If you want older PGs, we can re-expand the compat macros, but for 1.8:
+ * Supported PostgreSQL versions for pg_background 2.0: 14, 15, 16, 17, 18.
+ * Older versions would require resurrecting compat shims that have already
+ * been pruned; newer majors need re-validation of background-worker and
+ * shm_mq APIs.
  */
 #if PG_VERSION_NUM < 140000 || PG_VERSION_NUM >= 190000
-#error "pg_background 1.8 supports PostgreSQL 14-18 only"
+#error "pg_background 2.0 supports PostgreSQL 14-18 only"
 #endif
 
 /* ============================================================================
@@ -162,7 +156,7 @@ pgbg_stats session_stats = {0};
 
 /*
  * Worker-side: pointer to current DSM segment for progress reporting.
- * Set by pg_background_worker_main; consulted by pg_background_progress.
+ * Set by pg_background_worker_main; consulted by pg_background_report_progress_v2.
  * Non-static so pg_background_worker.c can write it. NULL in launcher.
  */
 dsm_segment *worker_dsm_seg = NULL;
@@ -186,11 +180,10 @@ static void save_worker_info(pid_t pid, uint64 cookie, dsm_segment *seg,
                              const char *full_sql);
 
 /*
- * Error context callback. Defined in this file but used by both the
- * launcher (pg_background_result) and the worker (execute_sql_string).
- * Declared extern in pg_background_internal.h.
+ * pg_background_error_context callback is defined in this file and exposed
+ * to the worker via pg_background_internal.h, so no static prototype is
+ * needed here.
  */
-/* (definition in this file; no static prototype needed) */
 
 /* Error handling helpers used only on the launcher side. */
 static void throw_untranslated_error(ErrorData translated_edata);
@@ -221,6 +214,7 @@ static uint64 pg_background_make_cookie(void);
 static void pgbg_request_cancel(pg_background_worker_info *info);
 static void pgbg_send_cancel_signals(pg_background_worker_info *info, int32 grace_ms);
 static const char *pgbg_state_from_handle(pg_background_worker_info *info);
+static void detach_worker_seg(pg_background_worker_info *info);
 
 /* ============================================================================
  * MODULE MAGIC AND FUNCTION DECLARATIONS
@@ -229,10 +223,11 @@ static const char *pgbg_state_from_handle(pg_background_worker_info *info);
 
 PG_MODULE_MAGIC;
 
-/* v1 API */
-PG_FUNCTION_INFO_V1(pg_background_launch);
-PG_FUNCTION_INFO_V1(pg_background_result);
-PG_FUNCTION_INFO_V1(pg_background_detach);
+/*
+ * v2.0: the v1 (no-suffix) API is gone. cancel_v2 / wait_v2 are now single
+ * entrypoints that take (pid, cookie, grace_ms) and (pid, cookie, timeout_ms);
+ * the separate _grace / _timeout exports were removed.
+ */
 
 /* v2 API */
 PG_FUNCTION_INFO_V1(pg_background_launch_v2);
@@ -240,9 +235,7 @@ PG_FUNCTION_INFO_V1(pg_background_submit_v2);
 PG_FUNCTION_INFO_V1(pg_background_result_v2);
 PG_FUNCTION_INFO_V1(pg_background_detach_v2);
 PG_FUNCTION_INFO_V1(pg_background_cancel_v2);
-PG_FUNCTION_INFO_V1(pg_background_cancel_v2_grace);
 PG_FUNCTION_INFO_V1(pg_background_wait_v2);
-PG_FUNCTION_INFO_V1(pg_background_wait_v2_timeout);
 PG_FUNCTION_INFO_V1(pg_background_list_v2);
 
 /* Worker entry point lives in pg_background_worker.c.
@@ -255,8 +248,8 @@ PGDLLEXPORT void _PG_init(void);
 /* Statistics retrieval function */
 PG_FUNCTION_INFO_V1(pg_background_stats_v2);
 
-/* Progress reporting function (called from worker) */
-PG_FUNCTION_INFO_V1(pg_background_progress);
+/* v2.0 (B3d): progress reporting renamed for naming coherence */
+PG_FUNCTION_INFO_V1(pg_background_report_progress_v2);
 
 /* Progress retrieval function */
 PG_FUNCTION_INFO_V1(pg_background_get_progress_v2);
@@ -269,6 +262,9 @@ PG_FUNCTION_INFO_V1(pg_background_cancel_all_v2);
 
 /* v1.10 (B3): full SQL accessor */
 PG_FUNCTION_INFO_V1(pg_background_full_sql_v2);
+
+/* v2.0 (B5a): private bumper called by run_v2 PL/pgSQL on timeout */
+PG_FUNCTION_INFO_V1(pg_background_record_timeout_v2);
 
 /* ============================================================================
  * MODULE INITIALIZATION
@@ -374,16 +370,20 @@ ensure_worker_info_memory_context(void)
  * pg_background_make_cookie
  *     Generate a cryptographically secure 64-bit cookie for worker identity.
  *
- * The cookie is used in v2 API to prevent PID reuse attacks. Even if a PID
- * is recycled by the OS, the cookie will differ, preventing operations on
- * the wrong worker.
+ * The cookie is used in the v2 API to prevent PID reuse attacks. Even if
+ * a PID is recycled by the OS, the cookie will differ, preventing
+ * operations on the wrong worker.
  *
- * SECURITY: Uses pg_strong_random() which is backed by the OS CSPRNG
- * (e.g., /dev/urandom on Unix, CryptGenRandom on Windows).
+ * SECURITY: Uses pg_strong_random(), which is backed by the OS CSPRNG
+ * (e.g., /dev/urandom on Unix, CryptGenRandom on Windows). On a configured
+ * backend pg_strong_random does not fail in any path that's been observed
+ * in the wild, so v2.0 simply raises ERROR on the impossible case rather
+ * than falling back to a weaker generator. If you ever see this error you
+ * have a fundamentally broken CSPRNG and worker cookies are the least of
+ * your problems.
  *
- * FALLBACK: If pg_strong_random() fails (extremely rare), we fall back to
- * a time-based approach with process entropy. This is less secure but
- * still provides reasonable disambiguation.
+ * The cookie is forced non-zero so that callers cannot accidentally pass
+ * the literal 0 from a stale handle and silently match.
  *
  * Returns: 64-bit random cookie (never returns 0)
  */
@@ -392,26 +392,16 @@ pg_background_make_cookie(void)
 {
     uint64 cookie;
 
-    /*
-     * Use cryptographically secure random number generator.
-     * pg_strong_random() returns true on success.
-     */
     if (!pg_strong_random(&cookie, sizeof(cookie)))
-    {
-        /*
-         * Fallback if CSPRNG fails (should be extremely rare).
-         * Use time-based entropy with process info.
-         */
-        uint64 t = (uint64) GetCurrentTimestamp();
-        elog(DEBUG1, "pg_strong_random failed, using fallback cookie generation");
-        cookie = (t << 17) ^ (t >> 13) ^ (uint64) MyProcPid ^ (uint64) (uintptr_t) MyProc;
-    }
+        ereport(ERROR,
+                (errcode(ERRCODE_INTERNAL_ERROR),
+                 errmsg("pg_background: pg_strong_random failed to generate a worker cookie"),
+                 errhint("This indicates a broken OS CSPRNG and is not normally recoverable.")));
 
     /*
-     * Ensure cookie is never zero (zero is used as "no cookie" in v1 API).
-     * Use golden ratio fractional part (2^64 / phi) as fallback.
-     * This constant (0x9e3779b97f4a7c15) is widely used in hash functions
-     * (e.g., Knuth's multiplicative hash) for good bit distribution.
+     * Ensure cookie is never zero so a stale handle initialised to 0 cannot
+     * accidentally match a live worker. 0x9e3779b97f4a7c15 is the golden-
+     * ratio constant used widely as a hash seed for good bit distribution.
      */
     if (cookie == 0)
         cookie = 0x9e3779b97f4a7c15ULL;
@@ -509,6 +499,7 @@ pgbg_wait_for_stop(pg_background_worker_info *info, int32 timeout_ms)
 {
     TimestampTz start;
     long        poll_interval_us = PGBG_POLL_INTERVAL_MIN_US;
+    bool        infinite = (timeout_ms <= 0);
 
     if (info == NULL || info->handle == NULL)
         return true;
@@ -526,11 +517,17 @@ pgbg_wait_for_stop(pg_background_worker_info *info, int32 timeout_ms)
         if (hs == BGWH_STOPPED)
             return true;
 
-        elapsed_ms = pgbg_timestamp_diff_ms(start, GetCurrentTimestamp());
-        if (elapsed_ms >= timeout_ms)
-            return false;
-
-        remaining_us = (timeout_ms - elapsed_ms) * 1000L;
+        if (!infinite)
+        {
+            elapsed_ms = pgbg_timestamp_diff_ms(start, GetCurrentTimestamp());
+            if (elapsed_ms >= timeout_ms)
+                return false;
+            remaining_us = (timeout_ms - elapsed_ms) * 1000L;
+        }
+        else
+        {
+            remaining_us = PGBG_POLL_INTERVAL_MAX_US;
+        }
         pgbg_sleep_with_backoff(&poll_interval_us, remaining_us);
         CHECK_FOR_INTERRUPTS();
     }
@@ -618,7 +615,8 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
     shm_mq      *mq;
     BackgroundWorker worker;
     BackgroundWorkerHandle *worker_handle;
-    pg_background_fixed_data *fdata;
+    pg_background_input  *input;
+    pg_background_output *output;
     pid_t        pid;
     shm_mq_handle *responseq;
     MemoryContext oldcontext;
@@ -666,9 +664,10 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
     /* Ensure worker info memory context exists */
     ensure_worker_info_memory_context();
 
-    /* Estimate / allocate DSM */
+    /* Estimate / allocate DSM (v2.0 (C1) split: input + output as separate keys) */
     shm_toc_initialize_estimator(&e);
-    shm_toc_estimate_chunk(&e, sizeof(pg_background_fixed_data));
+    shm_toc_estimate_chunk(&e, sizeof(pg_background_input));
+    shm_toc_estimate_chunk(&e, sizeof(pg_background_output));
     shm_toc_estimate_chunk(&e, sql_len + 1);
     guc_len = EstimateGUCStateSpace();
     shm_toc_estimate_chunk(&e, guc_len);
@@ -685,37 +684,28 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
 
     toc = shm_toc_create(PG_BACKGROUND_MAGIC, dsm_segment_address(seg), segsize);
 
-    /* Fixed data */
-    fdata = shm_toc_allocate(toc, sizeof(pg_background_fixed_data));
-    fdata->database_id = MyDatabaseId;
-    fdata->authenticated_user_id = GetAuthenticatedUserId();
-    GetUserIdAndSecContext(&fdata->current_user_id, &fdata->sec_context);
-    namestrcpy(&fdata->database, get_database_name(MyDatabaseId));
-    namestrcpy(&fdata->authenticated_user,
-               GetUserNameFromId(fdata->authenticated_user_id, false));
-    fdata->cookie = cookie;
-    fdata->cancel_requested = 0;
-    fdata->progress_pct = -1;           /* -1 = not reported yet */
-    fdata->progress_msg[0] = '\0';
-
-    /* v1.9: Initialize structured error fields */
-    fdata->error_sqlstate[0] = '\0';
-    fdata->error_message[0] = '\0';
-    fdata->error_detail[0] = '\0';
-    fdata->error_hint[0] = '\0';
-    fdata->error_context[0] = '\0';
-
-    /* v1.9: Initialize result metadata */
-    fdata->result_row_count = 0;
-    fdata->command_tag[0] = '\0';
-
-    /* v1.9: Set worker label */
+    /* Input (launcher → worker, immutable post-launch except cancel_requested) */
+    input = shm_toc_allocate(toc, sizeof(pg_background_input));
+    input->database_id = MyDatabaseId;
+    input->authenticated_user_id = GetAuthenticatedUserId();
+    GetUserIdAndSecContext(&input->current_user_id, &input->sec_context);
+    namestrcpy(&input->database, get_database_name(MyDatabaseId));
+    namestrcpy(&input->authenticated_user,
+               GetUserNameFromId(input->authenticated_user_id, false));
+    input->cookie = cookie;
+    input->cancel_requested = 0;
     if (label != NULL && label[0] != '\0')
-        strlcpy(fdata->label, label, sizeof(fdata->label));
+        strlcpy(input->label, label, sizeof(input->label));
     else
-        fdata->label[0] = '\0';
+        input->label[0] = '\0';
+    shm_toc_insert(toc, PG_BACKGROUND_KEY_INPUT, input);
 
-    shm_toc_insert(toc, PG_BACKGROUND_KEY_FIXED_DATA, fdata);
+    /* Output (worker → launcher) — zero-init the whole struct, then patch the
+     * one field that should not start at zero. */
+    output = shm_toc_allocate(toc, sizeof(pg_background_output));
+    memset(output, 0, sizeof(pg_background_output));
+    output->progress_pct = -1;          /* -1 = not reported yet */
+    shm_toc_insert(toc, PG_BACKGROUND_KEY_OUTPUT, output);
 
     /* SQL text */
     sqlp = shm_toc_allocate(toc, sql_len + SQL_TERMINATOR_LEN);
@@ -723,7 +713,19 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
     sqlp[sql_len] = '\0';
     shm_toc_insert(toc, PG_BACKGROUND_KEY_SQL, sqlp);
 
-    /* GUC state */
+    /*
+     * GUC state.
+     *
+     * NOTE on GUC propagation: SerializeGUCState copies the launcher's full
+     * GUC state — every variable the planner/executor cares about plus
+     * session-local knobs the worker may not honour the same way (for
+     * example, idle_in_transaction_session_timeout, lock_timeout,
+     * search_path, role-based settings). The worker calls RestoreGUCState
+     * at startup before executing the caller's SQL, so this is intentional
+     * and matches how PostgreSQL parallel workers propagate GUCs. If you
+     * need a worker to run with a tighter or different GUC profile, set the
+     * GUC in the launching session before calling launch_v2/submit_v2.
+     */
     gucstate = shm_toc_allocate(toc, guc_len);
     SerializeGUCState(guc_len, gucstate);
     shm_toc_insert(toc, PG_BACKGROUND_KEY_GUC, gucstate);
@@ -844,38 +846,6 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
     session_stats.workers_launched++;
 
     *out_pid = pid;
-}
-
-/* ============================================================================
- * V1 API FUNCTIONS
- * ============================================================================
- */
-
-/*
- * pg_background_launch
- *     Launch a background worker to execute SQL (v1 API).
- *
- * Parameters:
- *     sql        - SQL command(s) to execute (text)
- *     queue_size - Shared memory queue size in bytes (default: uses
- *                  pg_background.default_queue_size GUC, typically 64KB)
- *
- * Returns: Worker process ID (int4)
- *
- * Notes:
- *     - Results must be retrieved with pg_background_result()
- *     - Use pg_background_detach() for fire-and-forget (does NOT cancel)
- *     - v2 API is recommended for new code (provides cookie validation)
- */
-Datum
-pg_background_launch(PG_FUNCTION_ARGS)
-{
-    text   *sql = PG_GETARG_TEXT_PP(0);
-    int32   queue_size = PG_GETARG_INT32(1);
-    pid_t   pid;
-
-    launch_internal(sql, queue_size, 0 /* cookie=0 for v1 */, false, NULL, &pid);
-    PG_RETURN_INT32((int32) pid);
 }
 
 /* ============================================================================
@@ -1073,26 +1043,30 @@ store_worker_error(pg_background_worker_info *info, const char *message)
  */
 
 /*
- * pg_background_result
- *     Retrieve results from a background worker (v1 API).
+ * pg_background_result_v2
+ *     Retrieve results from a background worker (v2 API).
  *
- * This is a set-returning function that streams results from the
- * worker's shared memory queue. Results can only be consumed once.
+ * Set-returning function that streams results from the worker's shared
+ * memory queue. Results can only be consumed once. The caller's cookie
+ * is validated against the worker's identity to prevent PID-reuse hits.
  *
  * Parameters:
- *     pid - Worker process ID
+ *     pid    - Worker process ID
+ *     cookie - Worker identity cookie from launch_v2
  *
  * Returns: SETOF record (caller must provide column definition list)
  *
  * Errors:
- *     - UNDEFINED_OBJECT: PID not attached or results already consumed
+ *     - UNDEFINED_OBJECT: PID not attached, cookie mismatch, or results
+ *                         already consumed
  *     - FEATURE_NOT_SUPPORTED: Worker was launched via submit_v2
  *     - CONNECTION_FAILURE: Worker died before sending results
  */
 Datum
-pg_background_result(PG_FUNCTION_ARGS)
+pg_background_result_v2(PG_FUNCTION_ARGS)
 {
     int32        pid = PG_GETARG_INT32(0);
+    int64        cookie_in = PG_GETARG_INT64(1);
     shm_mq_result res;
     FuncCallContext *funcctx;
     TupleDesc    tupdesc;
@@ -1114,6 +1088,12 @@ pg_background_result(PG_FUNCTION_ARGS)
                     (errcode(ERRCODE_UNDEFINED_OBJECT),
                      errmsg("PID %d is not attached to this session", pid)));
         check_rights(info);
+
+        if (info->cookie != (uint64) cookie_in)
+            ereport(ERROR,
+                    (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+                     errmsg("cookie mismatch for PID %d", pid),
+                     errhint("The worker may have been restarted or the handle is stale.")));
 
         if (info->result_disabled)
             ereport(ERROR,
@@ -1182,7 +1162,7 @@ pg_background_result(PG_FUNCTION_ARGS)
 
         /*
          * I3: CHECK_FOR_INTERRUPTS in result loop
-         * 
+         *
          * Allows cancellation of long-running result retrieval (e.g., large
          * result sets streaming from worker). Without this, Ctrl-C or
          * pg_terminate_backend() won't interrupt the launcher session while
@@ -1190,7 +1170,50 @@ pg_background_result(PG_FUNCTION_ARGS)
          */
         CHECK_FOR_INTERRUPTS();
 
-        res = shm_mq_receive(state->info->responseq, &nbytes, &data, false);
+        /*
+         * v2.0 (C3): non-blocking receive + WaitLatch instead of a blocking
+         * shm_mq_receive(..., false). A worker that attaches the queue but
+         * never sends and never exits would otherwise hang the launcher
+         * session indefinitely (CHECK_FOR_INTERRUPTS lets the user Ctrl-C
+         * out, but no automatic recovery).
+         *
+         * Loop pattern:
+         *   1) try a non-blocking receive;
+         *   2) on WOULD_BLOCK, check whether the BGW has stopped — if so,
+         *      one final non-blocking receive picks up any in-flight data,
+         *      then we treat the queue as detached;
+         *   3) otherwise WaitLatch on MyLatch with a 250 ms timeout, so we
+         *      re-check liveness periodically and react to incoming data
+         *      via the latch shm_mq sets when bytes are available.
+         */
+        for (;;)
+        {
+            res = shm_mq_receive(state->info->responseq, &nbytes, &data, true);
+            if (res != SHM_MQ_WOULD_BLOCK)
+                break;
+
+            if (state->info->handle != NULL)
+            {
+                pid_t              wpid = 0;
+                BgwHandleStatus    hs   = GetBackgroundWorkerPid(state->info->handle, &wpid);
+
+                if (hs == BGWH_STOPPED || hs == BGWH_POSTMASTER_DIED)
+                {
+                    /* Drain any final byte still in the queue, then exit. */
+                    res = shm_mq_receive(state->info->responseq, &nbytes, &data, true);
+                    if (res == SHM_MQ_WOULD_BLOCK)
+                        res = SHM_MQ_DETACHED;
+                    break;
+                }
+            }
+
+            (void) WaitLatch(MyLatch,
+                             WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+                             250L,
+                             PG_WAIT_EXTENSION);
+            ResetLatch(MyLatch);
+            CHECK_FOR_INTERRUPTS();
+        }
         if (res != SHM_MQ_SUCCESS)
             break;
 
@@ -1227,6 +1250,18 @@ pg_background_result(PG_FUNCTION_ARGS)
                 break;
             }
             case 'A':
+                /*
+                 * NOTIFY ('A') frames from the worker are forwarded to the
+                 * launcher's protocol output here. This only happens while
+                 * the launcher is *parked inside* pg_background_result_v2 —
+                 * i.e., it works for launch_v2 + result_v2 callers that
+                 * actually consume the result. NOTIFY frames emitted by
+                 * workers launched via submit_v2 (fire-and-forget; results
+                 * disabled) are written into the shm_mq but never read by
+                 * anyone, so any NOTIFY they raise is effectively dropped.
+                 * Document this in the README's submit_v2 section if you
+                 * change anything here.
+                 */
                 pq_putmessage(msg.data[0], &msg.data[1], nbytes - 1);
                 break;
 
@@ -1350,56 +1385,9 @@ pg_background_result(PG_FUNCTION_ARGS)
     }
 
     /* Done: detach DSM (triggers cleanup callback) */
-    if (state->info && state->info->seg)
-    {
-        /*
-         * Clear seg before detach to avoid use-after-free.
-         * dsm_detach triggers cleanup_worker_info which removes the hash
-         * entry and may reset WorkerInfoMemoryContext, invalidating info.
-         */
-        dsm_segment *seg = state->info->seg;
-        state->info->seg = NULL;
-        dsm_detach(seg);
-    }
+    detach_worker_seg(state->info);
 
     SRF_RETURN_DONE(funcctx);
-}
-
-/*
- * pg_background_result_v2
- *     Retrieve results with cookie validation (v2 API).
- *
- * Validates the cookie before delegating to the v1 result function.
- * This prevents accessing results from a wrong worker if PID was reused.
- *
- * Parameters:
- *     pid    - Worker process ID
- *     cookie - Worker identity cookie from launch_v2
- *
- * Returns: SETOF record (same as pg_background_result)
- *
- * Errors:
- *     - UNDEFINED_OBJECT: Cookie mismatch or PID not attached
- */
-Datum
-pg_background_result_v2(PG_FUNCTION_ARGS)
-{
-    int32 pid = PG_GETARG_INT32(0);
-    int64 cookie_in = PG_GETARG_INT64(1);
-    pg_background_worker_info *info = find_worker_info(pid);
-
-    if (info == NULL)
-        ereport(ERROR,
-                (errcode(ERRCODE_UNDEFINED_OBJECT),
-                 errmsg("PID %d is not attached to this session", pid)));
-    check_rights(info);
-
-    if (info->cookie != (uint64) cookie_in)
-        ereport(ERROR,
-                (errcode(ERRCODE_UNDEFINED_OBJECT),
-                 errmsg("PID %d is not attached to this session (cookie mismatch)", pid)));
-
-    return pg_background_result(fcinfo);
 }
 
 /* -------------------------------------------------------------------------
@@ -1416,6 +1404,20 @@ form_result_tuple(pg_background_result_state *state, TupleDesc tupdesc, StringIn
 
     if (!state->has_row_description)
         elog(ERROR, "DataRow not preceded by RowDescription");
+
+    /*
+     * Bounds-check natts before any allocation. Mirrors the validation in the
+     * 'T' (RowDescription) branch and defends against a malicious or
+     * corrupted worker sending a bogus column count, even though the
+     * subsequent equality check against tupdesc->natts already excludes
+     * out-of-range values when tupdesc itself is well-formed.
+     */
+    if (natts < 0 || natts > MaxTupleAttributeNumber)
+        ereport(ERROR,
+                (errcode(ERRCODE_PROTOCOL_VIOLATION),
+                 errmsg("invalid column count in DataRow: %d", natts),
+                 errhint("Column count must be between 0 and %d.", MaxTupleAttributeNumber)));
+
     if (natts != tupdesc->natts)
         elog(ERROR, "malformed DataRow");
 
@@ -1461,46 +1463,6 @@ form_result_tuple(pg_background_result_state *state, TupleDesc tupdesc, StringIn
  */
 
 /*
- * pg_background_detach
- *     Stop tracking a background worker (v1 API).
- *
- * IMPORTANT: This is fire-and-forget, NOT cancellation. The worker
- * continues running; we just stop tracking it.
- */
-Datum
-pg_background_detach(PG_FUNCTION_ARGS)
-{
-    int32 pid = PG_GETARG_INT32(0);
-    pg_background_worker_info *info = find_worker_info(pid);
-
-    if (info == NULL)
-        ereport(ERROR,
-                (errcode(ERRCODE_UNDEFINED_OBJECT),
-                 errmsg("PID %d is not attached to this session", pid)));
-    check_rights(info);
-
-    if (info->seg)
-    {
-        /*
-         * Clear seg and unpin before detach to avoid use-after-free.
-         * dsm_detach triggers cleanup_worker_info which removes the hash
-         * entry and may reset WorkerInfoMemoryContext, invalidating info.
-         */
-        dsm_segment *seg = info->seg;
-        bool was_pinned = info->mapping_pinned;
-
-        info->seg = NULL;
-        info->mapping_pinned = false;
-
-        if (was_pinned)
-            dsm_unpin_mapping(seg);
-        dsm_detach(seg);
-    }
-
-    PG_RETURN_VOID();
-}
-
-/*
  * pg_background_detach_v2
  *     Stop tracking a background worker with cookie validation (v2 API).
  *
@@ -1526,23 +1488,7 @@ pg_background_detach_v2(PG_FUNCTION_ARGS)
                  errmsg("cookie mismatch for PID %d", pid),
                  errhint("The worker may have been restarted or the handle is stale.")));
 
-    if (info->seg)
-    {
-        /*
-         * Clear seg and unpin before detach to avoid use-after-free.
-         * dsm_detach triggers cleanup_worker_info which removes the hash
-         * entry and may reset WorkerInfoMemoryContext, invalidating info.
-         */
-        dsm_segment *seg = info->seg;
-        bool was_pinned = info->mapping_pinned;
-
-        info->seg = NULL;
-        info->mapping_pinned = false;
-
-        if (was_pinned)
-            dsm_unpin_mapping(seg);
-        dsm_detach(seg);
-    }
+    detach_worker_seg(info);
 
     PG_RETURN_VOID();
 }
@@ -1554,50 +1500,20 @@ pg_background_detach_v2(PG_FUNCTION_ARGS)
 
 /*
  * pg_background_cancel_v2
- *     Cancel a background worker immediately (v2 API).
+ *     Cancel a background worker (v2 API).
  *
- * Sets the cancel flag and sends SIGTERM to the worker.
- * The worker will exit at its next CHECK_FOR_INTERRUPTS() point.
+ * v2.0: Single entrypoint with optional grace_ms (defaulted in SQL to 0).
+ * Sets the cancel flag and sends SIGTERM. If grace_ms > 0, waits up to
+ * grace_ms milliseconds for the worker to exit cleanly before sending
+ * SIGKILL. Grace period is clamped to PGBG_GRACE_MS_MAX (1 hour).
+ *
+ * Parameters:
+ *     pid      - Worker process ID
+ *     cookie   - Worker identity cookie from launch_v2
+ *     grace_ms - Grace period before SIGKILL (0 = immediate SIGTERM only)
  */
 Datum
 pg_background_cancel_v2(PG_FUNCTION_ARGS)
-{
-    int32 pid = PG_GETARG_INT32(0);
-    int64 cookie_in = PG_GETARG_INT64(1);
-    pg_background_worker_info *info = find_worker_info(pid);
-
-    if (info == NULL)
-        ereport(ERROR,
-                (errcode(ERRCODE_UNDEFINED_OBJECT),
-                 errmsg("PID %d is not attached to this session", pid)));
-    check_rights(info);
-
-    if (info->cookie != (uint64) cookie_in)
-        ereport(ERROR,
-                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-                 errmsg("cookie mismatch for PID %d", pid),
-                 errhint("The worker may have been restarted or the handle is stale.")));
-
-    /* Mark as canceled for statistics tracking */
-    info->canceled = true;
-
-    pgbg_request_cancel(info);
-    pgbg_send_cancel_signals(info, 0);
-    PG_RETURN_VOID();
-}
-
-/*
- * pg_background_cancel_v2_grace
- *     Cancel a background worker with grace period (v2 API).
- *
- * Sends SIGTERM, waits up to grace_ms milliseconds for clean exit,
- * then sends SIGKILL if still running.
- *
- * Grace period is capped at PGBG_GRACE_MS_MAX (1 hour) to prevent
- * indefinite blocking.
- */
-Datum
-pg_background_cancel_v2_grace(PG_FUNCTION_ARGS)
 {
     int32 pid = PG_GETARG_INT32(0);
     int64 cookie_in = PG_GETARG_INT64(1);
@@ -1637,50 +1553,21 @@ pg_background_cancel_v2_grace(PG_FUNCTION_ARGS)
 
 /*
  * pg_background_wait_v2
- *     Block until a background worker exits (v2 API).
+ *     Wait for a background worker to exit (v2 API).
  *
- * Uses PostgreSQL's WaitForBackgroundWorkerShutdown which is efficient
- * (uses latches, not polling).
+ * v2.0: Single entrypoint with optional timeout_ms (defaulted in SQL to 0).
+ *
+ *   - timeout_ms <= 0  -> block until the worker exits (uses
+ *                         WaitForBackgroundWorkerShutdown — latch-based,
+ *                         no busy loop). Returns true.
+ *   - timeout_ms >  0  -> wait up to timeout_ms ms via pgbg_wait_for_stop.
+ *                         Returns true if the worker stopped, false on
+ *                         timeout. Capped at PGBG_TIMEOUT_MS_MAX (24 h).
+ *
+ * Returns: bool — true if the worker has stopped, false on timeout.
  */
 Datum
 pg_background_wait_v2(PG_FUNCTION_ARGS)
-{
-    int32 pid = PG_GETARG_INT32(0);
-    int64 cookie_in = PG_GETARG_INT64(1);
-    pg_background_worker_info *info = find_worker_info(pid);
-
-    if (info == NULL)
-        ereport(ERROR,
-                (errcode(ERRCODE_UNDEFINED_OBJECT),
-                 errmsg("PID %d is not attached to this session", pid)));
-    check_rights(info);
-
-    if (info->cookie != (uint64) cookie_in)
-        ereport(ERROR,
-                (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-                 errmsg("cookie mismatch for PID %d", pid),
-                 errhint("The worker may have been restarted or the handle is stale.")));
-
-    if (info->handle != NULL)
-        (void) WaitForBackgroundWorkerShutdown(info->handle);
-
-    PG_RETURN_VOID();
-}
-
-/*
- * pg_background_wait_v2_timeout
- *     Wait for worker exit with timeout (v2 API).
- *
- * Uses exponential backoff polling to reduce CPU usage while waiting.
- * Returns true if worker stopped, false if timeout expired.
- *
- * Parameters:
- *     timeout_ms - Maximum wait time in milliseconds
- *
- * Returns: true if worker stopped, false on timeout
- */
-Datum
-pg_background_wait_v2_timeout(PG_FUNCTION_ARGS)
 {
     int32 pid = PG_GETARG_INT32(0);
     int64 cookie_in = PG_GETARG_INT64(1);
@@ -1699,10 +1586,16 @@ pg_background_wait_v2_timeout(PG_FUNCTION_ARGS)
                  errmsg("cookie mismatch for PID %d", pid),
                  errhint("The worker may have been restarted or the handle is stale.")));
 
-    /* Clamp timeout to valid range */
-    if (timeout_ms < 0)
-        timeout_ms = 0;
-    else if (timeout_ms > PGBG_TIMEOUT_MS_MAX)
+    if (timeout_ms <= 0)
+    {
+        /* Infinite wait: latch-based, no polling. */
+        if (info->handle != NULL)
+            (void) WaitForBackgroundWorkerShutdown(info->handle);
+        PG_RETURN_BOOL(true);
+    }
+
+    /* Bounded wait: clamp and poll with backoff. */
+    if (timeout_ms > PGBG_TIMEOUT_MS_MAX)
         timeout_ms = PGBG_TIMEOUT_MS_MAX;
 
     PG_RETURN_BOOL(pgbg_wait_for_stop(info, timeout_ms));
@@ -1863,6 +1756,39 @@ pg_background_list_v2(PG_FUNCTION_ARGS)
  */
 
 /*
+ * detach_worker_seg
+ *     Detach a worker's DSM segment safely, used by every "we are done with
+ *     this worker" cleanup path.
+ *
+ * Clears info->seg and info->mapping_pinned BEFORE calling dsm_detach so
+ * the cleanup_worker_info on_dsm_detach callback (which fires from inside
+ * dsm_detach) does not see a still-mapped pointer and try to detach again.
+ * If the mapping was pinned at launch, we unpin first.
+ *
+ * Replaces three nearly-identical inline blocks in the result-streaming SRF
+ * tail, pg_background_detach_v2, and pg_background_detach_all_v2.
+ */
+static void
+detach_worker_seg(pg_background_worker_info *info)
+{
+    dsm_segment *seg;
+    bool         was_pinned;
+
+    if (info == NULL || info->seg == NULL)
+        return;
+
+    seg        = info->seg;
+    was_pinned = info->mapping_pinned;
+
+    info->seg            = NULL;
+    info->mapping_pinned = false;
+
+    if (was_pinned)
+        dsm_unpin_mapping(seg);
+    dsm_detach(seg);
+}
+
+/*
  * pgbg_request_cancel
  *     Set the cancel flag in shared memory.
  */
@@ -1870,7 +1796,7 @@ static void
 pgbg_request_cancel(pg_background_worker_info *info)
 {
     shm_toc *toc;
-    pg_background_fixed_data *fdata;
+    pg_background_input *input;
 
     if (info == NULL || info->seg == NULL)
         return;
@@ -1879,11 +1805,11 @@ pgbg_request_cancel(pg_background_worker_info *info)
     if (toc == NULL)
         return;
 
-    fdata = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_FIXED_DATA, true);
-    if (fdata == NULL)
+    input = shm_toc_lookup(toc, PG_BACKGROUND_KEY_INPUT, true);
+    if (input == NULL)
         return;
 
-    fdata->cancel_requested = 1;
+    input->cancel_requested = 1;
 }
 
 /*
@@ -1915,7 +1841,7 @@ pgbg_send_cancel_signals(pg_background_worker_info *info, int32 grace_ms)
      * events/threads for IPC instead of signals.
      *
      * WORKAROUND:
-     * Workers still check fdata->cancel_requested flag before executing SQL.
+     * Workers still check input->cancel_requested flag before executing SQL.
      * This provides limited cancellation:
      * - WORKS: Cancel before worker starts SQL execution
      * - DOES NOT WORK: Cancel during long-running query (no mid-query interrupt)
@@ -2004,9 +1930,9 @@ cleanup_worker_info(dsm_segment *seg, Datum pid_datum)
         shm_toc *toc = shm_toc_attach(PG_BACKGROUND_MAGIC, dsm_segment_address(seg));
         if (toc != NULL)
         {
-            pg_background_fixed_data *fdata =
-                shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_FIXED_DATA, true);
-            if (fdata != NULL && fdata->error_sqlstate[0] != '\0')
+            pg_background_output *output =
+                shm_toc_lookup(toc, PG_BACKGROUND_KEY_OUTPUT, true);
+            if (output != NULL && output->error_sqlstate[0] != '\0')
                 has_dsm_error = true;
         }
     }
@@ -2061,22 +1987,23 @@ cleanup_worker_info(dsm_segment *seg, Datum pid_datum)
         elog(DEBUG1, "pg_background worker_hash entry for PID %d already removed", (int) pid);
 
     /*
-     * If hash table is now empty, destroy it and reset the memory context
-     * to release memory back to the system. This prevents long-running
-     * sessions from retaining high-water-mark memory after many workers
-     * have been launched and cleaned up.
+     * v2.0 (C2): Do NOT destroy the hash table or reset the memory context
+     * from this dsm-detach callback. Public C entrypoints can be holding a
+     * pg_background_worker_info * across the dsm_detach that triggers this
+     * callback (e.g., the result-streaming SRF freeing its DSM at end of
+     * iteration). Resetting the context underneath them would invalidate
+     * those pointers — exactly the use-after-free trap we used to mitigate
+     * with "clear seg before detach".
+     *
+     * The hash and the WorkerInfoMemoryContext live for the duration of the
+     * session and are released by PostgreSQL when the backend exits. Per-
+     * worker memory inside the context is bounded by total launches *
+     * sizeof(pg_background_worker_info) (typically ~200 bytes), so the
+     * high-water mark is small even for sessions that launch thousands of
+     * workers. If a future workload demands aggressive reclamation, defer
+     * the reset to a top-level point (end of public C entrypoint, or a
+     * before_shmem_exit hook) rather than from inside this callback.
      */
-    if (hash_get_num_entries(worker_hash) == 0)
-    {
-        hash_destroy(worker_hash);
-        worker_hash = NULL;
-
-        if (WorkerInfoMemoryContext != NULL)
-        {
-            MemoryContextReset(WorkerInfoMemoryContext);
-            elog(DEBUG1, "pg_background: reset WorkerInfoMemoryContext after last worker cleanup");
-        }
-    }
 }
 
 /*
@@ -2148,42 +2075,53 @@ save_worker_info(pid_t pid, uint64 cookie, dsm_segment *seg,
 
     /*
      * C2: PID Reuse Edge Case Protection
-     * 
-     * SCENARIO: On systems with rapid process recycling (high load, small PID space),
-     * a background worker PID could theoretically be reused within the same session
-     * before the cleanup callback fires.
-     * 
+     *
+     * SCENARIO: On systems with rapid process recycling (high load, small PID
+     * space), a background worker PID could theoretically be reused within the
+     * same session before the cleanup callback fires.
+     *
      * SAFETY MECHANISMS:
      * 1. Cookie validation (v2 API): Even if PID is reused, cookie mismatch
-     *    will prevent operations on wrong worker
-     * 2. User ID check: If PID is reused by different user, we FATAL to prevent
-     *    security breach
-     * 3. Proactive cleanup: Detach stale DSM segment before creating new entry
-     * 
-     * WHY FATAL vs ERROR: A PID collision with different user indicates either:
-     *    a) Severe kernel PID space exhaustion, OR
-     *    b) Potential security attack (impersonation)
-     * Both warrant session termination rather than allowing continued operation.
-     * 
-     * OBSERVABILITY: Monitor for "background worker with PID X already exists"
-     * in logs - this indicates PID space pressure and may require system tuning.
+     *    will prevent operations on the wrong worker.
+     * 2. User ID check: If PID is reused by a different user we abort the
+     *    just-launched worker and raise an ERROR so the caller learns.
+     * 3. Proactive cleanup: Detach stale DSM segment before creating new
+     *    entry.
+     *
+     * Why ERROR (not FATAL): a stale tracking-table entry must not be a
+     * remote DoS vector. We tear down the worker we just launched (terminate
+     * its BGW and detach its DSM) and raise ERROR so the launcher session
+     * survives. The pre-existing entry's owner check still prevents the
+     * caller from operating on the unrelated worker.
+     *
+     * OBSERVABILITY: Monitor for "background worker with PID X already
+     * exists" in logs - this indicates PID space pressure and may require
+     * system tuning.
      */
     info = find_worker_info(pid);
     if (info != NULL)
     {
         if (current_user_id != info->current_user_id)
-            ereport(FATAL,
+        {
+            /*
+             * Tear down the worker we just launched before raising. The
+             * cleanup callback has not been registered yet (on_dsm_detach
+             * happens below), so PostgreSQL would otherwise leave the BGW
+             * and its DSM behind.
+             */
+            if (handle != NULL)
+                TerminateBackgroundWorker(handle);
+            if (seg != NULL)
+                dsm_detach(seg);
+
+            ereport(ERROR,
                     (errcode(ERRCODE_DUPLICATE_OBJECT),
                      errmsg("background worker with PID \"%d\" already exists",
-                            (int) pid)));
-
-        if (info->seg && info->mapping_pinned)
-        {
-            dsm_unpin_mapping(info->seg);
-            info->mapping_pinned = false;
+                            (int) pid),
+                     errhint("A stale tracking entry for this PID exists from a different user; the just-launched worker has been terminated.")));
         }
-        if (info->seg)
-            dsm_detach(info->seg);
+
+        detach_worker_seg(info);
     }
 
     on_dsm_detach(seg, cleanup_worker_info, Int32GetDatum((int32) pid));
@@ -2268,6 +2206,7 @@ pg_background_error_callback(void *arg)
  *   - workers_completed: workers that completed successfully
  *   - workers_failed: workers that failed with an error
  *   - workers_canceled: workers that were explicitly canceled
+ *   - workers_timed_out: workers that hit run_v2 timeout (subset of canceled)
  *   - workers_active: currently active workers
  *   - avg_execution_ms: average execution time in milliseconds
  *   - max_workers: current pg_background.max_workers setting
@@ -2276,8 +2215,8 @@ Datum
 pg_background_stats_v2(PG_FUNCTION_ARGS)
 {
     TupleDesc   tupdesc;
-    Datum       values[7];
-    bool        nulls[7];
+    Datum       values[8];
+    bool        nulls[8];
     HeapTuple   tuple;
     int         active_workers;
     float8      avg_execution_ms;
@@ -2307,12 +2246,34 @@ pg_background_stats_v2(PG_FUNCTION_ARGS)
     values[1] = Int64GetDatum(session_stats.workers_completed);
     values[2] = Int64GetDatum(session_stats.workers_failed);
     values[3] = Int64GetDatum(session_stats.workers_canceled);
-    values[4] = Int32GetDatum(active_workers);
-    values[5] = Float8GetDatum(avg_execution_ms);
-    values[6] = Int32GetDatum(pgbg_max_workers);
+    values[4] = Int64GetDatum(session_stats.workers_timed_out);
+    values[5] = Int32GetDatum(active_workers);
+    values[6] = Float8GetDatum(avg_execution_ms);
+    values[7] = Int32GetDatum(pgbg_max_workers);
 
     tuple = heap_form_tuple(tupdesc, values, nulls);
     PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
+}
+
+/*
+ * pg_background_record_timeout_v2 (v2.0, B5a)
+ *     Increment the session-local workers_timed_out counter.
+ *
+ * Called by pg_background_run_v2 (PL/pgSQL) when a launched worker
+ * exceeds its timeout and is canceled. We track timeouts as a separate
+ * counter from explicit user-driven cancels so the stats view is
+ * actionable. SQL declares this with VOLATILE; not granted to PUBLIC.
+ */
+Datum
+pg_background_record_timeout_v2(PG_FUNCTION_ARGS)
+{
+    /*
+     * Saturate rather than overflow: workers_timed_out is int64, but we
+     * still guard against the (essentially impossible) wrap-around.
+     */
+    if (session_stats.workers_timed_out < PG_INT64_MAX)
+        session_stats.workers_timed_out++;
+    PG_RETURN_VOID();
 }
 
 /* ============================================================================
@@ -2321,32 +2282,49 @@ pg_background_stats_v2(PG_FUNCTION_ARGS)
  */
 
 /*
- * pg_background_progress
+ * pg_background_report_progress_v2 (v2.0)
  *     Report progress from within a background worker.
  *
- * This function is meant to be called by SQL running inside a background
- * worker to report execution progress back to the launcher.
+ * Renamed from pg_background_progress in 2.0 to align with v2 naming and
+ * to avoid the function/type name collision (the type is now
+ * pg_background_progress_info).
+ *
+ * Called by SQL running inside a background worker; updates the progress
+ * fields in the launcher-visible DSM segment.
  *
  * Parameters:
  *     pct     - Progress percentage (0-100)
  *     message - Brief status message (optional, max 63 chars)
  *
  * Usage in worker SQL:
- *     SELECT pg_background_progress(50, 'Halfway done');
+ *     SELECT pg_background_report_progress_v2(50, 'Halfway done');
  */
 Datum
-pg_background_progress(PG_FUNCTION_ARGS)
+pg_background_report_progress_v2(PG_FUNCTION_ARGS)
 {
-    int32       pct = PG_GETARG_INT32(0);
-    text       *msg = PG_ARGISNULL(1) ? NULL : PG_GETARG_TEXT_PP(1);
+    int32       pct;
+    text       *msg;
     shm_toc    *toc;
-    pg_background_fixed_data *fdata;
+    pg_background_output *output;
+
+    /*
+     * SQL declaration is non-STRICT so we may receive NULL for either
+     * argument. Reject NULL pct rather than reading garbage from
+     * PG_GETARG_INT32(0) (CLAUDE.md §4 SQL/C alignment).
+     */
+    if (PG_ARGISNULL(0))
+        ereport(ERROR,
+                (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+                 errmsg("pct must not be NULL")));
+
+    pct = PG_GETARG_INT32(0);
+    msg = PG_ARGISNULL(1) ? NULL : PG_GETARG_TEXT_PP(1);
 
     /* Only valid in worker context */
     if (worker_dsm_seg == NULL)
         ereport(ERROR,
                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                 errmsg("pg_background_progress can only be called from a background worker")));
+                 errmsg("pg_background_report_progress_v2 can only be called from a background worker")));
 
     /* Clamp percentage */
     if (pct < 0) pct = 0;
@@ -2359,11 +2337,11 @@ pg_background_progress(PG_FUNCTION_ARGS)
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
                  errmsg("cannot access shared memory for progress reporting")));
 
-    fdata = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_FIXED_DATA, false);
-    if (fdata == NULL)
+    output = shm_toc_lookup(toc, PG_BACKGROUND_KEY_OUTPUT, false);
+    if (output == NULL)
         ereport(ERROR,
                 (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-                 errmsg("cannot find fixed data in shared memory")));
+                 errmsg("cannot find output data in shared memory")));
 
     /*
      * Write progress_msg first, then progress_pct with a write barrier.
@@ -2375,7 +2353,7 @@ pg_background_progress(PG_FUNCTION_ARGS)
     if (msg != NULL)
     {
         int msg_len = VARSIZE_ANY_EXHDR(msg);
-        int max_len = (int) sizeof(fdata->progress_msg) - 1;
+        int max_len = (int) sizeof(output->progress_msg) - 1;
         int copy_len;
 
         /*
@@ -2388,19 +2366,19 @@ pg_background_progress(PG_FUNCTION_ARGS)
         else
             copy_len = msg_len;
 
-        memcpy(fdata->progress_msg, VARDATA_ANY(msg), copy_len);
-        fdata->progress_msg[copy_len] = '\0';
+        memcpy(output->progress_msg, VARDATA_ANY(msg), copy_len);
+        output->progress_msg[copy_len] = '\0';
     }
     else
     {
-        fdata->progress_msg[0] = '\0';
+        output->progress_msg[0] = '\0';
     }
 
     /* Write barrier ensures msg is visible before pct update */
     pg_write_barrier();
 
     /* Update progress percentage (volatile for cross-process visibility) */
-    *(volatile int32 *)&fdata->progress_pct = pct;
+    *(volatile int32 *)&output->progress_pct = pct;
 
     PG_RETURN_VOID();
 }
@@ -2422,7 +2400,7 @@ pg_background_get_progress_v2(PG_FUNCTION_ARGS)
     int64       cookie_in = PG_GETARG_INT64(1);
     pg_background_worker_info *info;
     shm_toc    *toc;
-    pg_background_fixed_data *fdata;
+    pg_background_output *output;
     TupleDesc   tupdesc;
     Datum       values[2];
     bool        nulls[2];
@@ -2447,8 +2425,8 @@ pg_background_get_progress_v2(PG_FUNCTION_ARGS)
     if (toc == NULL)
         PG_RETURN_NULL();
 
-    fdata = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_FIXED_DATA, true);
-    if (fdata == NULL)
+    output = shm_toc_lookup(toc, PG_BACKGROUND_KEY_OUTPUT, true);
+    if (output == NULL)
         PG_RETURN_NULL();
 
     /*
@@ -2458,7 +2436,7 @@ pg_background_get_progress_v2(PG_FUNCTION_ARGS)
      * The barriers ensure we see the message that was written before
      * the percentage was updated.
      */
-    progress_pct = *(volatile int32 *)&fdata->progress_pct;
+    progress_pct = *(volatile int32 *)&output->progress_pct;
     if (progress_pct < 0)
         PG_RETURN_NULL();  /* Progress not reported yet */
 
@@ -2469,7 +2447,7 @@ pg_background_get_progress_v2(PG_FUNCTION_ARGS)
      * using memcpy to avoid volatile qualifier warnings with strlcpy.
      * The source is guaranteed to be null-terminated (max 63 chars + null).
      */
-    memcpy(progress_msg, fdata->progress_msg, sizeof(progress_msg));
+    memcpy(progress_msg, output->progress_msg, sizeof(progress_msg));
     progress_msg[sizeof(progress_msg) - 1] = '\0';  /* Ensure null termination */
 
     /* Build result tuple */
@@ -2513,15 +2491,17 @@ pg_background_result_info_v2(PG_FUNCTION_ARGS)
     int64       cookie = PG_GETARG_INT64(1);
     pg_background_worker_info *info;
     shm_toc    *toc;
-    pg_background_fixed_data *fdata;
+    pg_background_output *output;
     TupleDesc   tupdesc;
-    Datum       values[4];
-    bool        nulls[4];
+    Datum       values[6];
+    bool        nulls[6];
     HeapTuple   tuple;
     bool        completed = false;
     bool        has_error = false;
     int64       row_count = 0;
     char        command_tag[PGBG_COMMAND_TAG_LEN];
+    TimestampTz started_at = 0;
+    TimestampTz finished_at = 0;
 
     command_tag[0] = '\0';
 
@@ -2554,12 +2534,30 @@ pg_background_result_info_v2(PG_FUNCTION_ARGS)
         toc = shm_toc_attach(PG_BACKGROUND_MAGIC, dsm_segment_address(info->seg));
         if (toc != NULL)
         {
-            fdata = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_FIXED_DATA, true);
-            if (fdata != NULL)
+            output = shm_toc_lookup(toc, PG_BACKGROUND_KEY_OUTPUT, true);
+            if (output != NULL)
             {
-                row_count = fdata->result_row_count;
-                strlcpy(command_tag, fdata->command_tag, sizeof(command_tag));
-                has_error = (fdata->error_sqlstate[0] != '\0');
+                /*
+                 * Read the publish flag first; only treat the row_count /
+                 * command_tag pair as valid if the worker has fully written
+                 * them. The pg_read_barrier() pairs with the worker's
+                 * pg_write_barrier() in execute_sql_string so we cannot see
+                 * a fresh row_count paired with a stale command_tag.
+                 */
+                if (output->result_published)
+                {
+                    pg_read_barrier();
+                    row_count = output->result_row_count;
+                    strlcpy(command_tag, output->command_tag, sizeof(command_tag));
+                }
+                has_error = (output->error_sqlstate[0] != '\0');
+
+                /*
+                 * v2.0 (B5b): execution timestamps. Zero means "not set yet"
+                 * (worker hasn't reached the SPI loop / hasn't finished).
+                 */
+                started_at = output->started_at;
+                finished_at = output->finished_at;
             }
         }
     }
@@ -2577,6 +2575,16 @@ pg_background_result_info_v2(PG_FUNCTION_ARGS)
     values[2] = BoolGetDatum(completed);
     values[3] = BoolGetDatum(has_error);
 
+    if (started_at != 0)
+        values[4] = TimestampTzGetDatum(started_at);
+    else
+        nulls[4] = true;
+
+    if (finished_at != 0)
+        values[5] = TimestampTzGetDatum(finished_at);
+    else
+        nulls[5] = true;
+
     tuple = heap_form_tuple(tupdesc, values, nulls);
     PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
 }
@@ -2586,7 +2594,13 @@ pg_background_result_info_v2(PG_FUNCTION_ARGS)
  *     Get structured error information from a worker.
  *
  * Returns: pg_background_error composite type
- *     (sqlstate text, message text, detail text, hint text, context text)
+ *     (sqlstate, message, detail, hint, context, schema_name, table_name,
+ *      column_name, constraint_name) — each text, NULL if not populated.
+ *
+ * The four trailing identifiers (schema_name, table_name, column_name,
+ * constraint_name) are surfaced from PostgreSQL's edata for errors raised
+ * by the heap/access layer (constraint violations, missing relations, etc.)
+ * and are NULL for errors that don't carry source-object information.
  *
  * Returns NULL if no error occurred.
  */
@@ -2597,10 +2611,10 @@ pg_background_error_info_v2(PG_FUNCTION_ARGS)
     int64       cookie = PG_GETARG_INT64(1);
     pg_background_worker_info *info;
     shm_toc    *toc;
-    pg_background_fixed_data *fdata;
+    pg_background_output *output;
     TupleDesc   tupdesc;
-    Datum       values[5];
-    bool        nulls[5];
+    Datum       values[9];
+    bool        nulls[9];
     HeapTuple   tuple;
 
     /* Look up worker */
@@ -2626,8 +2640,8 @@ pg_background_error_info_v2(PG_FUNCTION_ARGS)
     if (toc == NULL)
         PG_RETURN_NULL();
 
-    fdata = shm_toc_lookup_compat(toc, PG_BACKGROUND_KEY_FIXED_DATA, true);
-    if (fdata == NULL || fdata->error_sqlstate[0] == '\0')
+    output = shm_toc_lookup(toc, PG_BACKGROUND_KEY_OUTPUT, true);
+    if (output == NULL || output->error_sqlstate[0] == '\0')
         PG_RETURN_NULL();  /* No error */
 
     /*
@@ -2644,23 +2658,44 @@ pg_background_error_info_v2(PG_FUNCTION_ARGS)
     tupdesc = BlessTupleDesc(tupdesc);
 
     MemSet(nulls, false, sizeof(nulls));
-    values[0] = CStringGetTextDatum(fdata->error_sqlstate);
-    values[1] = CStringGetTextDatum(fdata->error_message);
+    values[0] = CStringGetTextDatum(output->error_sqlstate);
+    values[1] = CStringGetTextDatum(output->error_message);
 
-    if (fdata->error_detail[0] != '\0')
-        values[2] = CStringGetTextDatum(fdata->error_detail);
+    if (output->error_detail[0] != '\0')
+        values[2] = CStringGetTextDatum(output->error_detail);
     else
         nulls[2] = true;
 
-    if (fdata->error_hint[0] != '\0')
-        values[3] = CStringGetTextDatum(fdata->error_hint);
+    if (output->error_hint[0] != '\0')
+        values[3] = CStringGetTextDatum(output->error_hint);
     else
         nulls[3] = true;
 
-    if (fdata->error_context[0] != '\0')
-        values[4] = CStringGetTextDatum(fdata->error_context);
+    if (output->error_context[0] != '\0')
+        values[4] = CStringGetTextDatum(output->error_context);
     else
         nulls[4] = true;
+
+    /* v2.0 (B5c): error-source identifiers — NULL when not populated */
+    if (output->error_schema_name[0] != '\0')
+        values[5] = CStringGetTextDatum(output->error_schema_name);
+    else
+        nulls[5] = true;
+
+    if (output->error_table_name[0] != '\0')
+        values[6] = CStringGetTextDatum(output->error_table_name);
+    else
+        nulls[6] = true;
+
+    if (output->error_column_name[0] != '\0')
+        values[7] = CStringGetTextDatum(output->error_column_name);
+    else
+        nulls[7] = true;
+
+    if (output->error_constraint_name[0] != '\0')
+        values[8] = CStringGetTextDatum(output->error_constraint_name);
+    else
+        nulls[8] = true;
 
     tuple = heap_form_tuple(tupdesc, values, nulls);
     PG_RETURN_DATUM(HeapTupleGetDatum(tuple));
@@ -2751,20 +2786,7 @@ pg_background_detach_all_v2(PG_FUNCTION_ARGS)
         info = find_worker_info(pids_to_detach[i]);
         if (info != NULL && info->seg != NULL)
         {
-            /*
-             * Clear seg and unpin before detach to avoid use-after-free.
-             * dsm_detach triggers cleanup_worker_info which removes the hash
-             * entry and may reset WorkerInfoMemoryContext, invalidating info.
-             */
-            dsm_segment *seg = info->seg;
-            bool was_pinned = info->mapping_pinned;
-
-            info->seg = NULL;
-            info->mapping_pinned = false;
-
-            if (was_pinned)
-                dsm_unpin_mapping(seg);
-            dsm_detach(seg);
+            detach_worker_seg(info);
             detached++;
         }
     }
