@@ -532,6 +532,10 @@ BEGIN
         RAISE EXCEPTION 'pg_background extension not found';
     END IF;
 
+    -- Exclude SECURITY DEFINER privilege helpers (grant/revoke/drop).
+    -- Granting EXECUTE on these to the executor role would let any
+    -- member re-grant pg_background access to arbitrary roles
+    -- (including PUBLIC), bypassing admin control.
     FOR _r IN
         SELECT p.oid::regprocedure AS sig
           FROM pg_depend d
@@ -540,6 +544,7 @@ BEGIN
            AND d.refclassid = 'pg_extension'::regclass
            AND d.refobjid   = _ext_oid
            AND d.deptype    = 'e'
+           AND NOT p.prosecdef
     LOOP
         _sql := format('GRANT EXECUTE ON FUNCTION %s TO %I', _r.sig, role_name);
         EXECUTE _sql;
@@ -659,3 +664,39 @@ EXCEPTION WHEN OTHERS THEN
     RETURN FALSE;
 END;
 $function$;
+
+-- ----------------------------------------------------------------------
+-- Security cleanup: revoke EXECUTE on SECURITY DEFINER privilege
+-- helpers from pgbackground_role. Prior versions of the bulk-grant
+-- helper would have granted these, allowing any member of
+-- pgbackground_role to re-grant pg_background access to arbitrary
+-- roles (including PUBLIC), bypassing admin control. Privilege
+-- helpers are admin-only.
+-- ----------------------------------------------------------------------
+
+DO $do$
+DECLARE
+    _schema text;
+BEGIN
+    SELECT n.nspname INTO _schema
+      FROM pg_extension e
+      JOIN pg_namespace n ON n.oid = e.extnamespace
+     WHERE e.extname = 'pg_background';
+
+    IF _schema IS NULL THEN
+        RETURN;
+    END IF;
+
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.grant_pg_background_privileges(pg_catalog.text, boolean) FROM pgbackground_role', _schema);
+    EXECUTE format('REVOKE ALL ON FUNCTION %I.revoke_pg_background_privileges(pg_catalog.text, boolean) FROM pgbackground_role', _schema);
+    -- pg_background_drop_executor_role() may exist in some installs.
+    IF EXISTS (
+        SELECT 1 FROM pg_proc p
+          JOIN pg_namespace n ON n.oid = p.pronamespace
+         WHERE n.nspname = _schema
+           AND p.proname = 'pg_background_drop_executor_role'
+    ) THEN
+        EXECUTE format('REVOKE ALL ON FUNCTION %I.pg_background_drop_executor_role() FROM pgbackground_role', _schema);
+    END IF;
+END
+$do$;

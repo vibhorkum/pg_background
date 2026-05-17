@@ -1040,30 +1040,36 @@ END$$;
 -- =========================================================================
 -- Refactor: metadata-driven grant/revoke helpers
 --
--- Contract: grant_pg_background_privileges() must cover EVERY
--- extension-owned function, type, and view, without an explicit list.
+-- Contract: grant_pg_background_privileges() must cover every
+-- extension-owned function, type, and view, EXCEPT the SECURITY DEFINER
+-- privilege helpers themselves (those must remain admin-only).
 -- This test pins the contract by round-tripping a temp role and asserting
 -- that EXECUTE/USAGE/SELECT privileges flip on grant and off on revoke.
+-- It also asserts that the SECURITY DEFINER helpers are NOT reachable
+-- after grant.
 -- =========================================================================
 
 DO $$
 DECLARE
     n_funcs_granted     int;
     n_funcs_total       int;
+    n_secdef_reachable  int;
     n_views_granted     int;
     n_views_total       int;
 BEGIN
     CREATE ROLE pgbg_meta_test_role NOLOGIN;
     PERFORM grant_pg_background_privileges('pgbg_meta_test_role');
 
-    -- Every extension-owned function must now be EXECUTE-able by the role.
+    -- Every non-SECURITY-DEFINER extension function must now be
+    -- EXECUTE-able by the role.
     SELECT count(*) INTO n_funcs_total
       FROM pg_depend d
       JOIN pg_proc p ON p.oid = d.objid
      WHERE d.classid = 'pg_proc'::regclass
        AND d.refclassid = 'pg_extension'::regclass
        AND d.refobjid = (SELECT oid FROM pg_extension WHERE extname='pg_background')
-       AND d.deptype = 'e';
+       AND d.deptype = 'e'
+       AND NOT p.prosecdef;
 
     SELECT count(*) INTO n_funcs_granted
       FROM pg_depend d
@@ -1072,11 +1078,29 @@ BEGIN
        AND d.refclassid = 'pg_extension'::regclass
        AND d.refobjid = (SELECT oid FROM pg_extension WHERE extname='pg_background')
        AND d.deptype = 'e'
+       AND NOT p.prosecdef
        AND has_function_privilege('pgbg_meta_test_role', p.oid, 'EXECUTE');
 
     IF n_funcs_granted <> n_funcs_total THEN
         RAISE EXCEPTION 'metadata grant: % of % functions reachable by role',
                         n_funcs_granted, n_funcs_total;
+    END IF;
+
+    -- SECURITY DEFINER privilege helpers must NOT be reachable by the role.
+    -- Otherwise any member could re-grant pg_background to arbitrary roles.
+    SELECT count(*) INTO n_secdef_reachable
+      FROM pg_depend d
+      JOIN pg_proc p ON p.oid = d.objid
+     WHERE d.classid = 'pg_proc'::regclass
+       AND d.refclassid = 'pg_extension'::regclass
+       AND d.refobjid = (SELECT oid FROM pg_extension WHERE extname='pg_background')
+       AND d.deptype = 'e'
+       AND p.prosecdef
+       AND has_function_privilege('pgbg_meta_test_role', p.oid, 'EXECUTE');
+
+    IF n_secdef_reachable <> 0 THEN
+        RAISE EXCEPTION 'metadata grant: % SECURITY DEFINER helpers reachable by role (must be admin-only)',
+                        n_secdef_reachable;
     END IF;
 
     -- Every extension-owned view must now be SELECT-able by the role.

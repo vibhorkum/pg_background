@@ -793,7 +793,12 @@ BEGIN
         RAISE EXCEPTION 'pg_background extension not found';
     END IF;
 
-    -- Functions: GRANT EXECUTE on every extension-owned procedure.
+    -- Functions: GRANT EXECUTE on every extension-owned procedure,
+    -- EXCEPT SECURITY DEFINER privilege helpers (the grant/revoke/drop
+    -- helpers themselves). Granting EXECUTE on those to the executor
+    -- role would let any member of the role re-grant pg_background to
+    -- arbitrary roles (including PUBLIC), bypassing admin control.
+    -- Privilege helpers must stay admin-only.
     FOR _r IN
         SELECT p.oid::regprocedure AS sig
           FROM pg_depend d
@@ -802,6 +807,7 @@ BEGIN
            AND d.refclassid = 'pg_extension'::regclass
            AND d.refobjid   = _ext_oid
            AND d.deptype    = 'e'
+           AND NOT p.prosecdef
     LOOP
         _sql := format('GRANT EXECUTE ON FUNCTION %s TO %I', _r.sig, role_name);
         EXECUTE _sql;
@@ -946,6 +952,16 @@ REVOKE ALL ON FUNCTION grant_pg_background_privileges(pg_catalog.text, boolean)
 REVOKE ALL ON FUNCTION revoke_pg_background_privileges(pg_catalog.text, boolean)
   FROM public;
 
+-- Belt-and-braces: even though the bulk grant helper above skips
+-- SECURITY DEFINER functions, explicitly revoke EXECUTE on the
+-- privilege helpers from pgbackground_role. This keeps the admin-only
+-- contract intact even if the bulk grant is replayed by an admin in
+-- the future, and protects against accidental grants.
+REVOKE ALL ON FUNCTION grant_pg_background_privileges(pg_catalog.text, boolean)
+  FROM pgbackground_role;
+REVOKE ALL ON FUNCTION revoke_pg_background_privileges(pg_catalog.text, boolean)
+  FROM pgbackground_role;
+
 REVOKE ALL ON FUNCTION pg_background_launch(pg_catalog.text, pg_catalog.int4) FROM public;
 REVOKE ALL ON FUNCTION pg_background_result(pg_catalog.int4) FROM public;
 REVOKE ALL ON FUNCTION pg_background_detach(pg_catalog.int4) FROM public;
@@ -1013,3 +1029,6 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION pg_background_drop_executor_role() FROM public;
+-- Admin-only: must never be exposed via pgbackground_role.
+REVOKE ALL ON FUNCTION pg_background_drop_executor_role()
+  FROM pgbackground_role;

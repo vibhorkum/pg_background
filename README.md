@@ -1000,7 +1000,9 @@ SELECT pg_background_cancel_v2(:'h.pid', :'h.cookie');
 -- Extension creates this role automatically:
 CREATE ROLE pgbackground_role NOLOGIN INHERIT;
 
--- All pg_background functions granted to this role
+-- All pg_background user-facing functions granted to this role.
+-- SECURITY DEFINER privilege helpers (grant/revoke/drop_executor_role)
+-- are admin-only and NOT granted to pgbackground_role.
 -- PUBLIC has NO access by default
 ```
 

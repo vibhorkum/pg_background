@@ -127,8 +127,11 @@ main() {
     echo "TEST RESULTS ANALYSIS"
     echo "========================================================================"
 
-    # Count PASS and FAIL results from test output
-    local PASS_COUNT=$(grep -c "PASS" "$OUTPUT_FILE" 2>/dev/null || echo "0")
+    # Count PASS and FAIL results from test output.
+    # Use "grep | wc -l" instead of "grep -c": grep -c exits non-zero on
+    # zero matches, which under `set -euo pipefail` can abort the script
+    # (the `|| echo 0` fallback is fragile when stacked with `local`).
+    local PASS_COUNT=$(grep "PASS" "$OUTPUT_FILE" 2>/dev/null | wc -l | tr -d ' ')
     # Only count actual FAIL test results, exclude instructional text
     local FAIL_COUNT=$(grep "FAIL" "$OUTPUT_FILE" 2>/dev/null | grep -v "Any FAIL" | grep -v "FAIL results" | wc -l | tr -d ' ')
 

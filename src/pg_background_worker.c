@@ -327,8 +327,15 @@ pg_background_worker_main(Datum main_arg)
         /* If cancel was requested before we began, exit quietly */
         if (*(volatile uint32 *)&fdata->cancel_requested != 0)
         {
-            ResourceOwnerDelete(CurrentResourceOwner);
+            /*
+             * Must clear CurrentResourceOwner BEFORE ResourceOwnerDelete:
+             * PG asserts owner != CurrentResourceOwner inside Delete, and on
+             * non-assert builds deleting the current owner leaves the global
+             * pointer dangling, which can SIGSEGV later during proc_exit.
+             */
+            ResourceOwner ro = CurrentResourceOwner;
             CurrentResourceOwner = NULL;
+            ResourceOwnerDelete(ro);
             proc_exit(0);
         }
 
@@ -408,20 +415,20 @@ pg_background_worker_main(Datum main_arg)
      * Explicit ResourceOwner cleanup on normal exit path.
      * While PostgreSQL will clean this up during proc_exit(), explicit
      * cleanup prevents warnings in debug builds and is cleaner practice.
+     *
+     * Must clear CurrentResourceOwner BEFORE ResourceOwnerDelete: PG asserts
+     * owner != CurrentResourceOwner inside Delete, and on non-assert builds
+     * deleting the current owner leaves the global pointer dangling, which
+     * can SIGSEGV later during proc_exit.
      */
     if (CurrentResourceOwner != NULL)
     {
-        ResourceOwnerRelease(CurrentResourceOwner,
-                             RESOURCE_RELEASE_BEFORE_LOCKS,
-                             false, true);
-        ResourceOwnerRelease(CurrentResourceOwner,
-                             RESOURCE_RELEASE_LOCKS,
-                             false, true);
-        ResourceOwnerRelease(CurrentResourceOwner,
-                             RESOURCE_RELEASE_AFTER_LOCKS,
-                             false, true);
-        ResourceOwnerDelete(CurrentResourceOwner);
+        ResourceOwner ro = CurrentResourceOwner;
+        ResourceOwnerRelease(ro, RESOURCE_RELEASE_BEFORE_LOCKS, false, true);
+        ResourceOwnerRelease(ro, RESOURCE_RELEASE_LOCKS, false, true);
+        ResourceOwnerRelease(ro, RESOURCE_RELEASE_AFTER_LOCKS, false, true);
         CurrentResourceOwner = NULL;
+        ResourceOwnerDelete(ro);
     }
 }
 
