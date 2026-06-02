@@ -490,6 +490,15 @@ execute_sql_string(const char *sql, pg_background_fixed_data *fdata)
     MemoryContext parsecontext;
     MemoryContext oldcontext;
     /*
+     * Track the most recent command's metadata in locals so we can publish
+     * the final (row_count, command_tag) pair atomically once the loop has
+     * finished. Writing fdata->result_row_count and fdata->command_tag
+     * per-command would let a concurrent pg_background_result_info_v2()
+     * reader observe a torn pair (e.g. updated row_count + stale tag).
+     */
+    int64       last_row_count = 0;
+    char        last_command_tag[PGBG_COMMAND_TAG_LEN] = {0};
+    /*
      * I4: Error context for worker
      *
      * Provides diagnostic context for errors that occur during worker execution.
@@ -584,20 +593,36 @@ execute_sql_string(const char *sql, pg_background_fixed_data *fdata)
             EndCommand_compat(&qc, DestRemote);
 
             /*
-             * v1.9: Store result metadata from each command.
-             * The final values reflect the last command executed.
+             * Track the latest command's metadata in locals; the values
+             * from the final iteration are published to fdata once below,
+             * after the loop completes successfully.
              */
-            if (fdata != NULL)
-            {
-                fdata->result_row_count = qc.nprocessed;
-                strlcpy(fdata->command_tag, GetCommandTagName(commandTag),
-                        sizeof(fdata->command_tag));
-            }
+            last_row_count = qc.nprocessed;
+            strlcpy(last_command_tag, GetCommandTagName(commandTag),
+                    sizeof(last_command_tag));
 
             PortalDrop(portal, false);
         }
 
         CommandCounterIncrement();
+
+        /*
+         * Publish the final command's metadata in a single, ordered pair.
+         * Without the barrier, a concurrent pg_background_result_info_v2()
+         * reader could see the new row_count paired with the stale tag
+         * (or vice versa). Writing row_count first, fencing, then writing
+         * the tag means readers that observe the new tag also observe the
+         * matching row_count. The reader's contract still says the values
+         * are only fully reliable once completed=true, but this prevents
+         * torn pairs during normal in-flight reads as well.
+         */
+        if (fdata != NULL)
+        {
+            fdata->result_row_count = last_row_count;
+            pg_write_barrier();
+            strlcpy(fdata->command_tag, last_command_tag,
+                    sizeof(fdata->command_tag));
+        }
     }
     PG_CATCH();
     {
