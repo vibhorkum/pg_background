@@ -328,14 +328,22 @@ pg_background_worker_main(Datum main_arg)
         if (*(volatile uint32 *)&fdata->cancel_requested != 0)
         {
             /*
-             * Must clear CurrentResourceOwner BEFORE ResourceOwnerDelete:
-             * PG asserts owner != CurrentResourceOwner inside Delete, and on
-             * non-assert builds deleting the current owner leaves the global
-             * pointer dangling, which can SIGSEGV later during proc_exit.
+             * CommitTransactionCommand() above already cleared
+             * CurrentResourceOwner (CommitTransaction sets it to NULL after
+             * releasing the transaction's RO).  The "pg_background" top-level
+             * RO created at worker entry has no remaining global reference
+             * and will be reclaimed by proc_exit's shmem-exit callbacks.
+             * Guard the explicit Delete so we don't pass NULL into
+             * ResourceOwnerDelete -- it asserts owner != CurrentResourceOwner
+             * (NULL != NULL fails) on assert builds and dereferences owner
+             * on release builds (SIGSEGV).
              */
-            ResourceOwner ro = CurrentResourceOwner;
-            CurrentResourceOwner = NULL;
-            ResourceOwnerDelete(ro);
+            if (CurrentResourceOwner != NULL)
+            {
+                ResourceOwner ro = CurrentResourceOwner;
+                CurrentResourceOwner = NULL;
+                ResourceOwnerDelete(ro);
+            }
             proc_exit(0);
         }
 
