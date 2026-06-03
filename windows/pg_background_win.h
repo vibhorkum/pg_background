@@ -45,6 +45,9 @@ PGDLLEXPORT Datum pg_background_error_info_v2(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum pg_background_detach_all_v2(PG_FUNCTION_ARGS);
 PGDLLEXPORT Datum pg_background_cancel_all_v2(PG_FUNCTION_ARGS);
 
+/* v1.10: full SQL accessor */
+PGDLLEXPORT Datum pg_background_full_sql_v2(PG_FUNCTION_ARGS);
+
 /* Worker entry point */
 PGDLLEXPORT void pg_background_worker_main(Datum);
 
