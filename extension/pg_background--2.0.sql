@@ -803,6 +803,12 @@ BEGIN
            AND d.refclassid = 'pg_extension'::regclass
            AND d.refobjid   = _ext_oid
            AND d.deptype    = 'e'
+           -- v2.0 security: never grant EXECUTE on the SECURITY DEFINER
+           -- privilege helpers (grant/revoke/drop) to the executor role.
+           -- They run as the extension owner, so granting them would let
+           -- any pgbackground_role member re-grant the role's capabilities
+           -- to arbitrary roles (privilege escalation).
+           AND NOT p.prosecdef
     LOOP
         _sql := format('GRANT EXECUTE ON FUNCTION %s TO %I', _r.sig, role_name);
         EXECUTE _sql;
@@ -931,6 +937,15 @@ $function$;
 -- so the helper does not end up in pgbackground_role's grant set
 -- (matches 1.10 behavior; drop is admin-only).
 SELECT pg_background_grant_privileges_v2('pgbackground_role', false);
+
+-- Belt-and-braces: the grant loop above already skips SECURITY DEFINER
+-- functions, but explicitly revoke EXECUTE on the privilege helpers from
+-- pgbackground_role so the admin-only contract holds even if an admin
+-- replays the bulk grant later, or grants are added by accident.
+REVOKE ALL ON FUNCTION pg_background_grant_privileges_v2(text, boolean)
+  FROM pgbackground_role;
+REVOKE ALL ON FUNCTION pg_background_revoke_privileges_v2(text, boolean)
+  FROM pgbackground_role;
 
 -- ----------------------------------------------------------------------
 -- Optional: helper to drop role explicitly (DROP EXTENSION won't).

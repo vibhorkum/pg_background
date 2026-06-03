@@ -613,6 +613,12 @@ BEGIN
            AND d.refclassid = 'pg_extension'::regclass
            AND d.refobjid   = _ext_oid
            AND d.deptype    = 'e'
+           -- v2.0 security: never grant EXECUTE on the SECURITY DEFINER
+           -- privilege helpers (grant/revoke/drop) to the executor role.
+           -- They run as the extension owner, so granting them would let
+           -- any pgbackground_role member re-grant the role's capabilities
+           -- to arbitrary roles (privilege escalation).
+           AND NOT p.prosecdef
     LOOP
         _sql := format('GRANT EXECUTE ON FUNCTION %s TO %I', _r.sig, role_name);
         EXECUTE _sql;
@@ -740,6 +746,12 @@ SELECT pg_background_grant_privileges_v2('pgbackground_role', false);
 
 REVOKE ALL ON FUNCTION pg_background_grant_privileges_v2(pg_catalog.text, boolean) FROM public;
 REVOKE ALL ON FUNCTION pg_background_revoke_privileges_v2(pg_catalog.text, boolean) FROM public;
+
+-- Belt-and-braces: also revoke from pgbackground_role so the admin-only
+-- contract on the SECURITY DEFINER privilege helpers holds even if the bulk
+-- grant is replayed later (privilege-escalation guard).
+REVOKE ALL ON FUNCTION pg_background_grant_privileges_v2(pg_catalog.text, boolean) FROM pgbackground_role;
+REVOKE ALL ON FUNCTION pg_background_revoke_privileges_v2(pg_catalog.text, boolean) FROM pgbackground_role;
 
 REVOKE ALL ON FUNCTION pg_background_cancel_v2(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4) FROM public;
 REVOKE ALL ON FUNCTION pg_background_wait_v2(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4) FROM public;
