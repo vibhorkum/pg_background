@@ -264,7 +264,7 @@ jobs:
   upgrade-test:
     name: Upgrade Test 1.8→2.0 (PG ${{ matrix.pg }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
 
     strategy:
       fail-fast: false
@@ -272,8 +272,14 @@ jobs:
         pg: [14, 15, 16, 17, 18]
 
     steps:
+      # fetch-depth: 0 + tags so the upgrade test can check out the v1.10 tag
+      # to build the prior-version (v1-capable) binary. 2.0 dropped the v1 C
+      # symbols, so the pre-2.0 install must be done with a pre-2.0 binary.
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Run upgrade test
         run: ./scripts/test-upgrade.sh ${{ matrix.pg }}

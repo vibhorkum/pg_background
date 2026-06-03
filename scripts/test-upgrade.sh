@@ -2,30 +2,41 @@
 #
 # test-upgrade.sh - Test pg_background extension upgrade paths using Docker
 #
-# This script validates that extension upgrades work correctly:
-#   - Install older version
-#   - Verify functionality on older version
-#   - Upgrade to newer version
-#   - Verify new features work after upgrade
+# Validates the real-world upgrade story for a binary-incompatible major
+# release. 2.0 dropped the v1 C functions and changed v2 C signatures, so a
+# 2.0 .so cannot run pre-2.0 SQL. A faithful test therefore uses TWO binaries:
+#
+#   Phase 1 - build the prior (1.10) binary, install 1.8 against it, and walk
+#             the pre-2.0 DDL chain 1.8 -> 1.9 -> 1.10 with that matching
+#             binary (so old-version runtime actually works).
+#   Phase 2 - build the 2.0 binary, swap the .so in place (as a package
+#             upgrade would), and run ALTER EXTENSION ... UPDATE TO '2.0'.
+#
+# Verifies seeded data survives, and that the resulting 2.0 install works.
+#
+# The prior binary is built from the v1.10 tag by default; override with
+# PRIOR_REF=<git ref>. The repo's .git is copied into the container, so the
+# ref must be reachable there (CI must fetch tags / full history).
 #
 # Usage (run from the repository root):
 #   ./scripts/test-upgrade.sh [PG_VERSION]
 #
 # Examples:
-#   ./scripts/test-upgrade.sh        # Test with PostgreSQL 17 (default)
-#   ./scripts/test-upgrade.sh 16     # Test with PostgreSQL 16
+#   ./scripts/test-upgrade.sh        # PostgreSQL 17 (default)
+#   ./scripts/test-upgrade.sh 16     # PostgreSQL 16
+#   PRIOR_REF=v1.10 ./scripts/test-upgrade.sh 17
 #
 
 set -euo pipefail
 
-# Default PostgreSQL version
 DEFAULT_PG_VERSION="17"
 PG_VERSION="${1:-$DEFAULT_PG_VERSION}"
 
-# Container name
+# Git ref whose code provides the prior-version (v1-capable) binary.
+PRIOR_REF="${PRIOR_REF:-v1.10}"
+
 CONTAINER_NAME="pg_background_upgrade_test"
 
-# Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -45,8 +56,35 @@ cleanup() {
     docker rm "$CONTAINER_NAME" 2>/dev/null || true
 }
 
+# Run psql in the container with strict error handling.
+psql_c() {
+    docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres "$@"
+}
+
+# Build + install whatever source is currently checked out in /build.
+build_and_install() {
+    docker exec -w /build "$CONTAINER_NAME" bash -c "
+        export PATH=/usr/lib/postgresql/${PG_VERSION}/bin:\$PATH
+        make clean >/dev/null 2>&1 || true
+        make PG_CONFIG=/usr/lib/postgresql/${PG_VERSION}/bin/pg_config >/dev/null
+        make install PG_CONFIG=/usr/lib/postgresql/${PG_VERSION}/bin/pg_config >/dev/null
+    "
+}
+
+# Assert the installed extension version equals the expected one.
+assert_version() {
+    local expected="$1" got
+    got=$(docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres -tAc \
+        "SELECT extversion FROM pg_extension WHERE extname = 'pg_background';")
+    if [ "$got" = "$expected" ]; then
+        log_info "Confirmed version: $got"
+    else
+        log_error "Expected version $expected, got: $got"
+        exit 1
+    fi
+}
+
 main() {
-    # Ensure cleanup runs on all exit paths
     trap 'cleanup' EXIT
 
     echo ""
@@ -54,18 +92,16 @@ main() {
     echo "pg_background UPGRADE PATH TEST (1.8 -> 1.9 -> 1.10 -> 2.0)"
     echo "========================================================================"
     echo "PostgreSQL Version: $PG_VERSION"
+    echo "Prior-version ref:  $PRIOR_REF"
     echo "========================================================================"
 
-    # Check Docker
     if ! docker info >/dev/null 2>&1; then
         log_error "Docker daemon is not running"
         exit 1
     fi
 
-    # Cleanup any existing container (trap handles final cleanup)
     cleanup 2>/dev/null || true
 
-    # Start PostgreSQL container
     log_step "Starting PostgreSQL $PG_VERSION container..."
     docker run --name "$CONTAINER_NAME" -d \
         -e POSTGRES_PASSWORD=postgres \
@@ -73,7 +109,6 @@ main() {
         -e POSTGRES_DB=postgres \
         postgres:"$PG_VERSION"
 
-    # Wait for PostgreSQL to be ready
     log_step "Waiting for PostgreSQL to start..."
     for i in {1..30}; do
         if docker exec "$CONTAINER_NAME" pg_isready -U postgres >/dev/null 2>&1; then
@@ -87,10 +122,9 @@ main() {
         sleep 2
     done
 
-    # Show PostgreSQL version
     docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres -t -c "SELECT version();" 2>/dev/null
 
-    # Install build dependencies (keep stderr visible for debugging failures)
+    # git is needed to check out the prior-version source inside the container.
     log_step "Installing build dependencies..."
     docker exec "$CONTAINER_NAME" bash -c "
         apt-get update -qq && \
@@ -98,323 +132,176 @@ main() {
             build-essential \
             postgresql-server-dev-${PG_VERSION} \
             libkrb5-dev \
-            make gcc
+            make gcc git
     " >/dev/null
 
-    # Copy source files
-    log_step "Copying source files..."
+    log_step "Copying source files (including .git)..."
     docker exec "$CONTAINER_NAME" mkdir -p /build
     docker cp . "$CONTAINER_NAME:/build/"
 
-    # Build extension
-    log_step "Building extension..."
-    docker exec -w /build "$CONTAINER_NAME" bash -c "
-        export PATH=/usr/lib/postgresql/${PG_VERSION}/bin:\$PATH
-        make clean 2>/dev/null || true
-        make PG_CONFIG=/usr/lib/postgresql/${PG_VERSION}/bin/pg_config
-    " >/dev/null
+    # docker cp leaves /build owned by root; git refuses to operate on a repo
+    # owned by another user ("dubious ownership") unless it is marked safe.
+    docker exec "$CONTAINER_NAME" git config --global --add safe.directory /build
 
-    # Install extension files
-    log_step "Installing extension files..."
-    docker exec -w /build "$CONTAINER_NAME" bash -c "
-        export PATH=/usr/lib/postgresql/${PG_VERSION}/bin:\$PATH
-        make install PG_CONFIG=/usr/lib/postgresql/${PG_VERSION}/bin/pg_config
-    " >/dev/null
+    # Capture the current (2.0) commit so we can return to it for phase 2.
+    local NEW_REF
+    NEW_REF=$(docker exec -w /build "$CONTAINER_NAME" git rev-parse HEAD)
+    log_info "Current (2.0) ref: $NEW_REF"
+
+    # Verify the prior ref is reachable inside the container.
+    if ! docker exec -w /build "$CONTAINER_NAME" git rev-parse --verify --quiet "$PRIOR_REF^{commit}" >/dev/null; then
+        log_error "Prior-version ref '$PRIOR_REF' not found in the copied repository."
+        log_error "Ensure the tag/branch exists and CI fetches it (fetch-depth: 0, fetch-tags: true)."
+        exit 1
+    fi
 
     echo ""
     echo "========================================================================"
-    log_test "UPGRADE PATH TEST: 1.8 -> 1.9 -> 1.10"
+    log_test "PHASE 1: build prior ($PRIOR_REF) binary, install 1.8, chain to 1.10"
     echo "========================================================================"
 
     local TEST_RESULT=0
 
-    # Test 1: Install version 1.8
+    log_step "Checking out prior source ($PRIOR_REF) and building its binary..."
+    docker exec -w /build "$CONTAINER_NAME" git checkout -f "$PRIOR_REF" >/dev/null 2>&1
+    build_and_install
+    log_info "Prior-version binary installed"
+
+    # Step 1: install 1.8 against the prior binary (v1 symbols resolve here)
     log_test "Step 1: Installing pg_background version 1.8..."
-    if docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres -c "CREATE EXTENSION pg_background VERSION '1.8';" 2>&1; then
+    if psql_c -c "CREATE EXTENSION pg_background VERSION '1.8';" 2>&1; then
         log_info "Version 1.8 installed successfully"
     else
         log_error "Failed to install version 1.8"
         exit 1
     fi
+    assert_version "1.8"
 
-    # Verify 1.8 is installed
-    local INSTALLED_VERSION
-    INSTALLED_VERSION=$(docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres -tAc \
-        "SELECT extversion FROM pg_extension WHERE extname = 'pg_background';")
-
-    if [ "$INSTALLED_VERSION" = "1.8" ]; then
-        log_info "Confirmed version: $INSTALLED_VERSION"
-    else
-        log_error "Expected version 1.8, got: $INSTALLED_VERSION"
-        exit 1
-    fi
-
-    # Test 2: Verify 1.8 functionality
-    log_test "Step 2: Verifying 1.8 functionality..."
-    if ! docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres <<'EOF'
--- Create test table
+    # Step 2: exercise 1.8 runtime (binary matches) and seed data
+    log_test "Step 2: Verifying 1.8 runtime and seeding data..."
+    if ! psql_c <<'EOF'
 DROP TABLE IF EXISTS t_upgrade_test;
 CREATE TABLE t_upgrade_test(id int, version text);
-
--- Test launch_v2 (1.8 signature without label parameter)
 DO $$
-DECLARE
-    h pg_background_handle;
+DECLARE h pg_background_handle;
 BEGIN
-    SELECT * INTO h FROM pg_background_launch_v2('INSERT INTO t_upgrade_test VALUES (1, ''v1.8'')', 65536);
+    SELECT * INTO h FROM pg_background_launch_v2(
+        'INSERT INTO t_upgrade_test VALUES (1, ''v1.8'')', 65536);
     PERFORM pg_background_wait_v2(h.pid, h.cookie);
     PERFORM pg_background_detach_v2(h.pid, h.cookie);
 END;
 $$;
-
--- Verify data
-SELECT CASE WHEN count(*) = 1 THEN 'PASS: v1.8 functionality works'
-            ELSE 'FAIL: v1.8 functionality broken' END AS test_1_8
+SELECT CASE WHEN count(*) = 1 THEN 'PASS: v1.8 runtime works'
+            ELSE 'FAIL: v1.8 runtime broken' END AS test_1_8
 FROM t_upgrade_test WHERE version = 'v1.8';
 EOF
     then
-        log_error "Version 1.8 functionality test failed"
+        log_error "Version 1.8 runtime test failed"
         TEST_RESULT=1
     else
-        log_info "Version 1.8 functionality verified"
+        log_info "Version 1.8 runtime verified"
     fi
 
-    # Test 3: Upgrade to 1.9
-    log_test "Step 3: Upgrading from 1.8 to 1.9..."
-    if docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres -c "ALTER EXTENSION pg_background UPDATE TO '1.9';" 2>&1; then
-        log_info "Upgrade to 1.9 completed"
-    else
-        log_error "Upgrade to 1.9 failed"
-        exit 1
-    fi
+    # Step 3: upgrade 1.8 -> 1.9 (prior binary)
+    log_test "Step 3: Upgrading 1.8 -> 1.9..."
+    psql_c -c "ALTER EXTENSION pg_background UPDATE TO '1.9';" 2>&1
+    assert_version "1.9"
 
-    # Verify 1.9 is installed
-    INSTALLED_VERSION=$(docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres -tAc \
-        "SELECT extversion FROM pg_extension WHERE extname = 'pg_background';")
-
-    if [ "$INSTALLED_VERSION" = "1.9" ]; then
-        log_info "Confirmed version after upgrade: $INSTALLED_VERSION"
-    else
-        log_error "Expected version 1.9 after upgrade, got: $INSTALLED_VERSION"
-        exit 1
-    fi
-
-    # Test 4: Verify 1.9 new features work
-    log_test "Step 4: Verifying 1.9 new features..."
-    if ! docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres <<'EOF'
--- Test launch_v2 with label parameter (1.9 feature)
+    # Step 4: 1.9 feature (label parameter) against the prior binary
+    log_test "Step 4: Verifying 1.9 feature (label parameter)..."
+    if ! psql_c <<'EOF'
 DO $$
-DECLARE
-    h pg_background_handle;
+DECLARE h pg_background_handle;
 BEGIN
     SELECT * INTO h FROM pg_background_launch_v2(
-        'INSERT INTO t_upgrade_test VALUES (2, ''v1.9'')',
-        65536,
-        'upgrade-test-label'  -- New 1.9 label parameter
-    );
+        'INSERT INTO t_upgrade_test VALUES (2, ''v1.9'')', 65536, 'upgrade-test-label');
     PERFORM pg_background_wait_v2(h.pid, h.cookie);
     PERFORM pg_background_detach_v2(h.pid, h.cookie);
 END;
 $$;
-
--- Verify v1.9 insert worked
 SELECT CASE WHEN count(*) = 1 THEN 'PASS: v1.9 label parameter works'
-            ELSE 'FAIL: v1.9 label parameter broken' END AS test_1_9_label
+            ELSE 'FAIL: v1.9 label parameter broken' END AS test_1_9
 FROM t_upgrade_test WHERE version = 'v1.9';
-
--- Test result_info_v2 (new 1.9 function)
-DO $$
-DECLARE
-    h pg_background_handle;
-    ri pg_background_result_info;
-BEGIN
-    SELECT * INTO h FROM pg_background_launch_v2('SELECT 1', 65536);
-    PERFORM pg_background_wait_v2(h.pid, h.cookie);
-
-    SELECT * INTO ri FROM pg_background_result_info_v2(h.pid, h.cookie);
-
-    IF ri.completed THEN
-        RAISE NOTICE 'PASS: result_info_v2 works';
-    ELSE
-        RAISE NOTICE 'FAIL: result_info_v2 broken';
-    END IF;
-
-    PERFORM pg_background_detach_v2(h.pid, h.cookie);
-END;
-$$;
-
--- Test error_info_v2 (new 1.9 function)
-DO $$
-DECLARE
-    h pg_background_handle;
-    ei pg_background_error;
-BEGIN
-    SELECT * INTO h FROM pg_background_launch_v2('SELECT 1/0', 65536);
-    PERFORM pg_sleep(0.3);
-
-    SELECT * INTO ei FROM pg_background_error_info_v2(h.pid, h.cookie);
-
-    IF ei.sqlstate IS NOT NULL THEN
-        RAISE NOTICE 'PASS: error_info_v2 works (sqlstate: %)', ei.sqlstate;
-    ELSE
-        RAISE NOTICE 'FAIL: error_info_v2 broken';
-    END IF;
-
-    PERFORM pg_background_detach_v2(h.pid, h.cookie);
-END;
-$$;
-
--- Test batch operations (new 1.9 functions)
-DO $$
-DECLARE
-    h pg_background_handle;
-    detach_count int;
-BEGIN
-    SELECT * INTO h FROM pg_background_submit_v2('SELECT 1', 0, 'batch-test');
-    PERFORM pg_sleep(0.2);
-
-    SELECT pg_background_detach_all_v2() INTO detach_count;
-
-    IF detach_count >= 1 THEN
-        RAISE NOTICE 'PASS: detach_all_v2 works (detached: %)', detach_count;
-    ELSE
-        RAISE NOTICE 'FAIL: detach_all_v2 broken';
-    END IF;
-END;
-$$;
-
--- Final verification: both v1.8 and v1.9 data present
-SELECT CASE WHEN count(*) = 2 THEN 'PASS: All data preserved through upgrade'
-            ELSE 'FAIL: Data lost during upgrade' END AS upgrade_data_check
-FROM t_upgrade_test;
 EOF
     then
-        log_error "Version 1.9 feature tests failed"
+        log_error "Version 1.9 feature test failed"
         TEST_RESULT=1
     else
-        log_info "Version 1.9 new features verified"
+        log_info "Version 1.9 feature verified"
     fi
 
-    # Test 5: Verify old functionality still works after upgrade
-    log_test "Step 5: Verifying old functionality after upgrade..."
-    if ! docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres <<'EOF'
--- stats_v2 should still work (1.8 feature)
-SELECT
-    CASE WHEN workers_launched > 0 THEN 'PASS: stats_v2 works after upgrade'
-         ELSE 'FAIL: stats_v2 broken after upgrade' END AS stats_check
-FROM pg_background_stats_v2();
+    # Step 5: upgrade 1.9 -> 1.10 (prior binary)
+    log_test "Step 5: Upgrading 1.9 -> 1.10..."
+    psql_c -c "ALTER EXTENSION pg_background UPDATE TO '1.10';" 2>&1
+    assert_version "1.10"
 
--- progress functions should still work (1.8 feature)
+    # Step 6: 1.10 feature (run_v2 one-shot) against the prior binary
+    log_test "Step 6: Verifying 1.10 feature (run_v2)..."
+    if ! psql_c <<'EOF'
 DO $$
-DECLARE
-    h pg_background_handle;
-BEGIN
-    /*
-     * 1.10 still has the old pg_background_progress(...) function name; it
-     * is renamed to pg_background_report_progress_v2 only in 2.0.
-     */
-    SELECT * INTO h FROM pg_background_launch_v2($$
-        SELECT pg_background_progress(50, 'test progress');
-    $$, 65536);
-
-    PERFORM pg_sleep(0.2);
-    PERFORM pg_background_detach_v2(h.pid, h.cookie);
-    RAISE NOTICE 'PASS: progress functions work after upgrade';
-END;
-$$;
-EOF
-    then
-        log_error "Old functionality verification failed"
-        TEST_RESULT=1
-    else
-        log_info "Old functionality verified after upgrade"
-    fi
-
-    # Test 6: Upgrade to 1.10
-    log_test "Step 6: Upgrading from 1.9 to 1.10..."
-    if docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres -c "ALTER EXTENSION pg_background UPDATE TO '1.10';" 2>&1; then
-        log_info "Upgrade to 1.10 completed"
-    else
-        log_error "Upgrade to 1.10 failed"
-        TEST_RESULT=1
-    fi
-
-    INSTALLED_VERSION=$(docker exec "$CONTAINER_NAME" psql -X -t -A -U postgres -c "SELECT extversion FROM pg_extension WHERE extname = 'pg_background';")
-    if [ "$INSTALLED_VERSION" = "1.10" ]; then
-        log_info "Verified version 1.10 is installed"
-    else
-        log_error "Expected version 1.10 after upgrade, got: $INSTALLED_VERSION"
-        TEST_RESULT=1
-    fi
-
-    # Test 7: Verify 1.10 new features work
-    log_test "Step 7: Verifying 1.10 new features..."
-    if ! docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres <<'EOF'
--- pg_background_list view should be queryable without column-defs
-SELECT CASE WHEN count(*) >= 0 THEN 'PASS: pg_background_list view works'
-            ELSE 'FAIL: pg_background_list view broken' END AS test_1_10_list_view
-FROM pg_background_list;
-
--- pg_background_activity view (joined with pg_stat_activity)
-SELECT CASE WHEN count(*) >= 0 THEN 'PASS: pg_background_activity view works'
-            ELSE 'FAIL: pg_background_activity view broken' END AS test_1_10_activity_view
-FROM pg_background_activity;
-
--- pg_background_outcome_v2: never raises on missing handle
-DO $$
-DECLARE
-    o pg_background_outcome;
-BEGIN
-    o := pg_background_outcome_v2(0, 0);
-    IF o.pid = 0 AND o.state IS NULL THEN
-        RAISE NOTICE 'PASS: outcome_v2 never-raises works';
-    ELSE
-        RAISE NOTICE 'FAIL: outcome_v2 returned unexpected fields';
-    END IF;
-END;
-$$;
-
--- pg_background_run_v2: synchronous one-shot
-DO $$
-DECLARE
-    r pg_background_run_result;
+DECLARE r pg_background_run_result;
 BEGIN
     r := pg_background_run_v2('SELECT 1', 65536, 0, 'upgrade-1_10');
     IF r.completed AND NOT r.has_error THEN
-        RAISE NOTICE 'PASS: run_v2 synchronous helper works';
+        RAISE NOTICE 'PASS: run_v2 works at 1.10';
     ELSE
-        RAISE NOTICE 'FAIL: run_v2 broken (completed=%, has_error=%)', r.completed, r.has_error;
+        RAISE EXCEPTION 'FAIL: run_v2 broken at 1.10';
     END IF;
 END;
 $$;
 EOF
     then
-        log_error "Version 1.10 feature tests failed"
+        log_error "Version 1.10 feature test failed"
         TEST_RESULT=1
     else
-        log_info "Version 1.10 new features verified"
+        log_info "Version 1.10 feature verified"
     fi
 
-    # Test 8: Upgrade to 2.0 (major release)
-    log_test "Step 8: Upgrading from 1.10 to 2.0..."
-    if docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres -c "ALTER EXTENSION pg_background UPDATE TO '2.0';" 2>&1; then
+    echo ""
+    echo "========================================================================"
+    log_test "PHASE 2: swap in the 2.0 binary and upgrade 1.10 -> 2.0"
+    echo "========================================================================"
+
+    log_step "Checking out 2.0 source ($NEW_REF) and building/installing its binary..."
+    docker exec -w /build "$CONTAINER_NAME" git checkout -f "$NEW_REF" >/dev/null 2>&1
+    build_and_install
+    log_info "2.0 binary installed (replaces the prior .so in place)"
+
+    # Step 7: the major upgrade
+    log_test "Step 7: Upgrading 1.10 -> 2.0..."
+    if psql_c -c "ALTER EXTENSION pg_background UPDATE TO '2.0';" 2>&1; then
         log_info "Upgrade to 2.0 completed"
     else
         log_error "Upgrade to 2.0 failed"
-        TEST_RESULT=1
+        exit 1
     fi
+    assert_version "2.0"
 
-    INSTALLED_VERSION=$(docker exec "$CONTAINER_NAME" psql -X -t -A -U postgres -c "SELECT extversion FROM pg_extension WHERE extname = 'pg_background';")
-    if [ "$INSTALLED_VERSION" = "2.0" ]; then
-        log_info "Verified version 2.0 is installed"
+    # Step 8: data preserved through the entire chain
+    log_test "Step 8: Verifying data preserved through all upgrades..."
+    if ! psql_c <<'EOF'
+DO $$
+DECLARE n int;
+BEGIN
+    SELECT count(*) INTO n FROM t_upgrade_test;
+    IF n = 2 THEN
+        RAISE NOTICE 'PASS: all data preserved (% rows)', n;
+    ELSE
+        RAISE EXCEPTION 'FAIL: data lost during upgrade (% rows)', n;
+    END IF;
+END;
+$$;
+EOF
+    then
+        log_error "Data preservation check failed"
+        TEST_RESULT=1
     else
-        log_error "Expected version 2.0 after upgrade, got: $INSTALLED_VERSION"
-        TEST_RESULT=1
+        log_info "Data preserved through the upgrade chain"
     fi
 
-    # Test 9: Verify 2.0 reshape works
-    log_test "Step 9: Verifying 2.0 reshape..."
-    if ! docker exec "$CONTAINER_NAME" psql -X -v ON_ERROR_STOP=1 -U postgres <<'EOF'
+    # Step 9: 2.0 reshape + runtime (binary now matches the 2.0 catalog)
+    log_test "Step 9: Verifying 2.0 reshape and runtime..."
+    if ! psql_c <<'EOF'
 -- v1 functions are gone
 SELECT CASE
     WHEN NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'pg_background_launch')
@@ -422,7 +309,7 @@ SELECT CASE
     ELSE 'FAIL: v1 pg_background_launch still present'
 END AS test_2_0_v1_dropped;
 
--- collapsed cancel_v2 takes 3 args with default 0
+-- collapsed cancel_v2 takes 3 args with default 0 (single overload)
 SELECT CASE
     WHEN (SELECT count(*) FROM pg_proc WHERE proname = 'pg_background_cancel_v2') = 1
     THEN 'PASS: cancel_v2 single overload'
@@ -436,35 +323,46 @@ SELECT CASE
     ELSE 'FAIL: wait_v2 has wrong return type'
 END AS test_2_0_wait_v2;
 
+-- 2.0 runtime: launch_v2 + wait_v2 + result_v2 round-trip
+DO $$
+DECLARE h pg_background_handle; n int;
+BEGIN
+    SELECT * INTO h FROM pg_background_launch_v2(
+        'INSERT INTO t_upgrade_test VALUES (3, ''post-2.0'')', 65536, 'upgrade-2_0');
+    PERFORM pg_background_wait_v2(h.pid, h.cookie);
+    /* result_v2 consumes and auto-detaches; no manual detach */
+    PERFORM * FROM pg_background_result_v2(h.pid, h.cookie) AS r(c text);
+    SELECT count(*) INTO n FROM t_upgrade_test WHERE version = 'post-2.0';
+    IF n = 1 THEN RAISE NOTICE 'PASS: 2.0 worker runtime works';
+    ELSE RAISE EXCEPTION 'FAIL: 2.0 worker runtime broken'; END IF;
+END;
+$$;
+
 -- renamed progress function
 DO $$
-DECLARE
-    h pg_background_handle;
+DECLARE h pg_background_handle;
 BEGIN
     SELECT * INTO h FROM pg_background_launch_v2($$
         SELECT pg_background_report_progress_v2(50, 'renamed');
     $$, 65536);
-    PERFORM pg_sleep(0.2);
+    PERFORM pg_background_wait_v2(h.pid, h.cookie);
     PERFORM pg_background_detach_v2(h.pid, h.cookie);
-    RAISE NOTICE 'PASS: pg_background_report_progress_v2 works after 2.0 upgrade';
+    RAISE NOTICE 'PASS: pg_background_report_progress_v2 works after upgrade';
 END;
 $$;
 
--- new run_result columns are present
+-- extended run_result columns
 DO $$
-DECLARE
-    r pg_background_run_result;
+DECLARE r pg_background_run_result;
 BEGIN
     r := pg_background_run_v2('SELECT 1', 65536, 0, 'upgrade-2_0');
     IF r.completed AND NOT r.has_error AND r.cookie IS NOT NULL THEN
         RAISE NOTICE 'PASS: 2.0 run_result extended (cookie=%)', r.cookie;
-    ELSE
-        RAISE NOTICE 'FAIL: 2.0 run_result missing fields';
-    END IF;
+    ELSE RAISE EXCEPTION 'FAIL: 2.0 run_result missing fields'; END IF;
 END;
 $$;
 
--- workers_timed_out is now part of pg_background_stats
+-- workers_timed_out stats counter
 SELECT CASE
     WHEN workers_timed_out IS NOT NULL THEN 'PASS: workers_timed_out exists'
     ELSE 'FAIL: workers_timed_out missing'
@@ -477,63 +375,54 @@ SELECT CASE
     THEN 'PASS: pg_background_grant_privileges_v2 exists'
     ELSE 'FAIL: pg_background_grant_privileges_v2 missing'
 END AS test_2_0_grant_renamed;
+
+-- privilege-escalation guard: SECURITY DEFINER helpers not reachable by role
+SELECT CASE
+    WHEN NOT has_function_privilege('pgbackground_role',
+             'pg_background_grant_privileges_v2(text, boolean)', 'EXECUTE')
+    THEN 'PASS: grant helper not reachable by pgbackground_role'
+    ELSE 'FAIL: privilege escalation -- grant helper reachable by role'
+END AS test_2_0_no_escalation;
 EOF
     then
-        log_error "Version 2.0 reshape tests failed"
+        log_error "Version 2.0 reshape/runtime tests failed"
         TEST_RESULT=1
     else
-        log_info "Version 2.0 reshape verified"
+        log_info "Version 2.0 reshape and runtime verified"
     fi
 
-    # Summary
     echo ""
     echo "========================================================================"
     if [ $TEST_RESULT -eq 0 ]; then
         log_info "ALL UPGRADE TESTS PASSED!"
         echo "========================================================================"
         echo "Verified:"
-        echo "  - Version 1.8 installs correctly"
-        echo "  - Version 1.8 functionality works"
-        echo "  - Upgrade from 1.8 to 1.9 succeeds"
-        echo "  - Version 1.9 new features work:"
-        echo "    - launch_v2 with label parameter"
-        echo "    - result_info_v2()"
-        echo "    - error_info_v2()"
-        echo "    - detach_all_v2()"
-        echo "  - Old functionality preserved after upgrade"
-        echo "  - Upgrade from 1.9 to 1.10 succeeds"
-        echo "  - Version 1.10 new features work:"
-        echo "    - pg_background_list / pg_background_activity views"
-        echo "    - pg_background_outcome_v2() never-raises helper"
-        echo "    - pg_background_run_v2() synchronous one-shot"
-        echo "  - Upgrade from 1.10 to 2.0 succeeds"
-        echo "  - Version 2.0 reshape verified:"
-        echo "    - v1 API removed"
-        echo "    - cancel_v2 / wait_v2 collapsed (single overload)"
-        echo "    - pg_background_report_progress_v2 rename"
-        echo "    - pg_background_run_result extended (cookie/state/...)"
-        echo "    - workers_timed_out stats counter"
-        echo "    - pg_background_grant_privileges_v2 rename"
+        echo "  - Prior ($PRIOR_REF) binary installs 1.8 and runs its runtime"
+        echo "  - DDL + runtime chain 1.8 -> 1.9 -> 1.10 on the prior binary"
+        echo "  - Binary swapped to 2.0, then ALTER UPDATE 1.10 -> 2.0 succeeds"
+        echo "  - Seeded data preserved through every upgrade"
+        echo "  - 2.0 reshape: v1 dropped, cancel_v2/wait_v2 collapsed,"
+        echo "    report_progress_v2 rename, run_result extended, workers_timed_out,"
+        echo "    grant helper rename, privilege-escalation guard intact"
+        echo "  - 2.0 worker runtime works (launch/wait/result/run)"
         echo "========================================================================"
     else
         log_error "SOME UPGRADE TESTS FAILED"
         echo "========================================================================"
     fi
 
-    # Exit with test result (cleanup runs via trap)
     exit $TEST_RESULT
 }
 
-# Handle script arguments
 case "${1:-}" in
     -h|--help)
         echo "Usage: $0 [PG_VERSION]"
         echo ""
-        echo "Test pg_background extension upgrade paths using Docker."
-        echo "Validates upgrade from version 1.8 -> 1.9 -> 1.10 -> 2.0."
+        echo "Test the pg_background upgrade path 1.8 -> 1.9 -> 1.10 -> 2.0 using"
+        echo "Docker and two binaries (prior + 2.0). Override the prior-version"
+        echo "source with PRIOR_REF=<git ref> (default: v1.10)."
         echo ""
-        echo "PG_VERSION can be: 14, 15, 16, 17, 18"
-        echo "Default: $DEFAULT_PG_VERSION"
+        echo "PG_VERSION can be: 14, 15, 16, 17, 18 (default: $DEFAULT_PG_VERSION)"
         exit 0
         ;;
     *)
