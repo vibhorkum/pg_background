@@ -60,7 +60,6 @@ or [Cookbook recipe 2](#cookbook).
   - [PID Reuse Protection](#pid-reuse-protection)
   - [NOTIFY and Autonomous Commits](#notify-and-autonomous-commits)
 - [Security Model](#security-model)
-- [Use Cases with Examples](#use-cases-with-examples)
 - [Operational Guidance](#operational-guidance)
   - [Resource Management](#resource-management)
   - [Performance Tuning](#performance-tuning)
@@ -203,6 +202,14 @@ sequenceDiagram
 - `pg_background_list` and `pg_background_activity` **views** — query the worker registry without repeating a 10-column definition list; the activity view joins `pg_stat_activity` for combined worker + backend visibility.
 - `pg_background_outcome_v2(pid, cookie)` — combined `list_v2 + result_info_v2 + error_info_v2` snapshot that **never raises**; returns NULL fields when the handle is gone or results are already consumed.
 - `pg_background_run_v2(sql, queue_size, timeout_ms, label)` — **synchronous one-shot**: launch + wait + outcome + detach in one call, with 1 s cancel-grace on timeout. Returns metadata only.
+- **Convenience helpers** that replace common hand-rolled PL/pgSQL loops:
+  - `pg_background_run_query_v2(...)` — synchronous one-shot that returns **result rows** (the `run_v2` companion).
+  - `pg_background_drain_v2(handles[], timeout_ms)` — wait for many handles, collect one outcome each, detach.
+  - `pg_background_wait_any_v2(handles[], timeout_ms)` — return the first handle to finish.
+  - `pg_background_cancel_by_label_v2(pattern, grace_ms)` — cancel every worker whose label matches a `LIKE` pattern.
+  - `pg_background_purge_v2()` — detach only workers that have already stopped.
+  - `pg_background_status_v2(pid, cookie)` — `jsonb`-shaped outcome for driver-side consumption.
+  - `pg_background_full_sql_v2(pid, cookie)` — the worker's full SQL (beyond the 120-char `list_v2` preview).
 
 Older milestones (v1.6 cookies, v1.8 stats/GUCs/progress, v1.9 labels/structured errors/batch ops) are listed in the [Migration Guide](#migration-guide).
 
@@ -590,6 +597,13 @@ SELECT pg_background_detach(:pid);
 | `pg_background_get_progress_v2(pid, cookie)` | `pg_background_progress` | Get worker progress (v1.8+) | Monitor long-running tasks |
 | `pg_background_outcome_v2(pid, cookie)` | `pg_background_outcome` | Combined status snapshot — never raises (v1.10) | Safe status retrieval |
 | `pg_background_run_v2(sql, queue_size, timeout_ms, label)` | `pg_background_run_result` | Synchronous one-shot: launch + wait + outcome + detach (v1.10) | Autonomous-transaction-style runs |
+| `pg_background_run_query_v2(sql, queue_size, timeout_ms, label, col_def)` | `SETOF record` | Synchronous one-shot that returns result rows; raises on worker error (v1.10) | Run-and-fetch in one call |
+| `pg_background_drain_v2(handles[], timeout_ms)` | `SETOF pg_background_outcome` | Wait for every handle (shared wall-clock timeout), one outcome per handle, then detach (v1.10) | Gather many results |
+| `pg_background_wait_any_v2(handles[], timeout_ms)` | `pg_background_handle` | Return the first handle to finish; NULL on timeout (v1.10) | Race several workers |
+| `pg_background_cancel_by_label_v2(pattern, grace_ms)` | `int4` | Cancel every worker whose label matches a SQL `LIKE` pattern; returns count (v1.10) | Bulk cancel by label |
+| `pg_background_purge_v2()` | `int4` | Detach only already-stopped workers; returns count purged (v1.10) | Selective cleanup |
+| `pg_background_status_v2(pid, cookie)` | `jsonb` | `jsonb`-shaped `outcome_v2` snapshot (v1.10) | Driver-friendly status |
+| `pg_background_full_sql_v2(pid, cookie)` | `text` | Full worker SQL, capped at 64 KiB (v1.10) | Debugging beyond `sql_preview` |
 | `pg_background_list` (view, v1.10) | rows of `list_v2()` | Convenience view; no column-definition list required | Day-to-day observation |
 | `pg_background_activity` (view, v1.10) | join with `pg_stat_activity` | Worker registry + backend state in one query | Combined monitoring |
 
@@ -601,6 +615,9 @@ SELECT pg_background_detach(:pid);
 - `label`: Optional worker label for identification (v1.9, default: NULL)
 - `grace_ms`: Milliseconds to wait before forceful termination (capped at 1 hour)
 - `timeout_ms`: Milliseconds to wait for completion
+- `col_def`: Column-definition list for `run_query_v2`, matching the `AS` clause at the call site (e.g. `'x int, y text'`)
+- `handles`: Array of `pg_background_handle` for `drain_v2` / `wait_any_v2`
+- `pattern`: SQL `LIKE` pattern matched against worker labels in `cancel_by_label_v2`
 
 **Handle Type**:
 ```sql
@@ -753,54 +770,18 @@ END$$;
 > Under normal operation, any SQL-level error inside the worker surfaces as
 > the concrete SQLSTATE shown in the table above.
 
-### Deployment Order
+### Reloading the library after an upgrade
 
-The fix for end-to-end SQLSTATE propagation lives in the compiled
-`pg_background.so`. Whether a server restart is required depends on how the
-library is loaded (see [Library Loading](#library-loading)):
+The compiled `pg_background.so` is reloaded differently depending on how it is
+loaded (see [Library Loading](#library-loading)):
 
-- **With `shared_preload_libraries`**: the postmaster dlopens the library
-  once at startup and every forked background worker inherits the cached
-  handle. After replacing the `.so` on disk you must restart PostgreSQL —
-  a plain `pg_reload_conf()` is not sufficient.
-- **Without SPL** (the default): each background worker dlopens the library
-  in its own process, so a fresh `pg_background_launch_v2(...)` call picks
-  up the new binary automatically. No server restart is needed; at most,
-  reconnect long-lived client sessions.
-
-1. Build and install: `make clean && make && sudo make install`.
-2. **Reload the library:**
-   - SPL setup → `pg_ctl restart` / systemd / platform equivalent.
-   - On-demand setup → no action required (optionally reconnect clients).
-3. Verify on staging that real SQLSTATEs propagate:
-   ```sql
-   DO $$
-   DECLARE h pg_background_handle; s text;
-   BEGIN
-       h := pg_background_launch_v2('SELECT 1/0');
-       PERFORM pg_background_wait_v2(h.pid, h.cookie);
-       SELECT sqlstate INTO s FROM pg_background_error_info_v2(h.pid, h.cookie);
-       ASSERT s = '22012', 'expected 22012, got ' || s;
-       PERFORM pg_background_detach_v2(h.pid, h.cookie);
-   END$$;
-   ```
-4. **Only after step 3 succeeds**, remove any PL/pgSQL workarounds that read
-   `error_info_v2` as a fallback after catching `08006`. Before the fix ships
-   they were the only way to get a usable SQLSTATE; after the fix they become
-   dead code, but keeping them in place during the rollout is harmless.
-
-### Rollback Order
-
-To roll back to a pre-fix `.so` (for example if another extension in the same
-image regresses):
-
-1. **First** restore the PL/pgSQL workarounds in user code (they expect
-   `SQLERRM` to degrade to `08006` and then read `error_info_v2` out of band).
-2. **Only after step 1**, install the old `.so` and restart PostgreSQL.
-
-Doing rollback in the reverse order (old `.so` first) causes user functions to
-see raw `08006` errors without the fallback path, which can manifest as
-`WHEN others` branches swallowing what used to be diagnosable SQLSTATEs.
+- **With `shared_preload_libraries`**: the postmaster dlopens the library once
+  at startup and every worker inherits it. After replacing the `.so` you must
+  **restart PostgreSQL** — `pg_reload_conf()` is not sufficient.
+- **Without SPL** (the default): each worker dlopens the library in its own
+  process, so the next `pg_background_launch_v2(...)` call picks up the new
+  binary automatically. No restart needed; at most, reconnect long-lived
+  client sessions.
 
 ### V1 Functions (Deprecated)
 
@@ -1118,266 +1099,6 @@ GRANT SELECT ON safe_worker_list TO app_users;
 6. **Monitor `list_v2()`** for suspicious activity
 7. **Audit `pg_stat_activity`** for background worker usage
 8. **Test disaster recovery** with active workers
-
----
-
-## Use Cases with Examples
-
-### 1. Background Maintenance Operations
-
-**Problem**: VACUUM blocks client connections and consumes resources.
-
-**Solution**: Run maintenance asynchronously.
-
-```sql
--- Launch background VACUUM
-SELECT * FROM pg_background_launch_v2(
-  'VACUUM (VERBOSE, ANALYZE) large_table'
-) AS h \gset
-
--- Check progress periodically
-SELECT state, sql_preview
-FROM pg_background_list_v2() AS (
-  pid int4, cookie int8, launched_at timestamptz, user_id oid,
-  queue_size int4, state text, sql_preview text, last_error text, consumed bool
-)
-WHERE pid = :'h.pid' AND cookie = :'h.cookie';
-
--- Wait for completion (optional)
-SELECT pg_background_wait_v2(:'h.pid', :'h.cookie');
-
--- Cleanup tracking
-SELECT pg_background_detach_v2(:'h.pid', :'h.cookie');
-```
-
-### 2. Autonomous Audit Logging
-
-**Problem**: Audit logs must persist even if main transaction rolls back.
-
-**Solution**: Use background worker for independent commit.
-
-> **⚠️ Critical Warning**: If `max_worker_processes` is exhausted, `pg_background_launch_v2()` will throw `INSUFFICIENT_RESOURCES`. For audit logging, this means:
-> - The audit message will be **lost**
-> - The calling transaction may **fail unexpectedly**
-> - Failures occur **unpredictably** under load
->
-> See the robust implementation below and [Known Limitation #4](#4-worker-exhaustion-insufficient_resources) for details.
-
-**Basic Example** (not fault-tolerant):
-
-```sql
-CREATE FUNCTION log_audit_simple(event_type text, details jsonb)
-RETURNS void AS $$
-DECLARE
-  h pg_background_handle;
-BEGIN
-  -- Launch audit insert (commits independently)
-  SELECT * INTO h FROM pg_background_submit_v2(
-    format(
-      'INSERT INTO audit_log (ts, event_type, details) VALUES (now(), %L, %L)',
-      event_type,
-      details::text
-    )
-  );
-
-  -- Detach immediately (fire-and-forget)
-  PERFORM pg_background_detach_v2(h.pid, h.cookie);
-END;
-$$ LANGUAGE plpgsql;
-```
-
-**Robust Example** (handles worker exhaustion):
-
-```sql
-CREATE FUNCTION log_audit(event_type text, details jsonb)
-RETURNS void AS $$
-DECLARE
-  h pg_background_handle;
-  retries int := 3;
-  backoff_ms int := 100;
-BEGIN
-  FOR i IN 1..retries LOOP
-    BEGIN
-      SELECT * INTO h FROM pg_background_submit_v2(
-        format(
-          'INSERT INTO audit_log (ts, event_type, details) VALUES (now(), %L, %L)',
-          event_type,
-          details::text
-        )
-      );
-      PERFORM pg_background_detach_v2(h.pid, h.cookie);
-      RETURN;  -- Success
-    EXCEPTION
-      WHEN insufficient_resources THEN
-        IF i = retries THEN
-          -- Final fallback: log synchronously (blocks but doesn't lose data)
-          INSERT INTO audit_log (ts, event_type, details)
-          VALUES (now(), event_type, details);
-          RAISE WARNING 'pg_background exhausted, audit logged synchronously';
-          RETURN;
-        END IF;
-        -- Exponential backoff before retry
-        PERFORM pg_sleep(backoff_ms / 1000.0);
-        backoff_ms := backoff_ms * 2;
-    END;
-  END LOOP;
-END;
-$$ LANGUAGE plpgsql;
-```
-
-**Usage in transaction**:
-
-```sql
-BEGIN;
-  UPDATE accounts SET balance = balance - 100 WHERE id = 123;
-
-  -- Audit log commits even if UPDATE rolls back
-  PERFORM log_audit('withdrawal', '{"account": 123, "amount": 100}');
-
-  -- Simulate error
-  ROLLBACK;
-
--- Audit log entry exists!
-SELECT * FROM audit_log ORDER BY ts DESC LIMIT 1;
-```
-
-### 3. Asynchronous Notification Delivery
-
-**Problem**: `pg_notify()` in main transaction delays commit.
-
-**Solution**: Offload notifications to background worker.
-
-```sql
-CREATE FUNCTION notify_async(channel text, payload text)
-RETURNS void AS $$
-DECLARE
-  h pg_background_handle;
-BEGIN
-  SELECT * INTO h FROM pg_background_submit_v2(
-    format('SELECT pg_notify(%L, %L)', channel, payload)
-  );
-  
-  PERFORM pg_background_detach_v2(h.pid, h.cookie);
-END;
-$$ LANGUAGE plpgsql;
-
--- Usage
-SELECT notify_async('order_updates', '{"order_id": 456, "status": "shipped"}');
-```
-
-### 4. Long-Running ETL Pipeline
-
-**Problem**: ETL blocks client connection for hours.
-
-**Solution**: Launch in background, poll for completion.
-
-```sql
--- Launch ETL
-SELECT * FROM pg_background_launch_v2($$
-  INSERT INTO fact_sales
-  SELECT * FROM staging_sales
-  WHERE processed = false;
-  
-  UPDATE staging_sales SET processed = true;
-$$) AS h \gset
-
--- Store handle for later retrieval
-INSERT INTO job_tracker (job_id, pid, cookie, started_at)
-VALUES ('etl-001', :'h.pid', :'h.cookie', now());
-
--- Later: check status
-SELECT
-  j.job_id,
-  w.state,
-  w.launched_at,
-  (now() - w.launched_at) AS duration
-FROM job_tracker j
-CROSS JOIN LATERAL (
-  SELECT *
-  FROM pg_background_list_v2() AS (
-    pid int4, cookie int8, launched_at timestamptz, user_id oid,
-    queue_size int4, state text, sql_preview text, last_error text, consumed bool
-  )
-  WHERE pid = j.pid AND cookie = j.cookie
-) w
-WHERE j.job_id = 'etl-001';
-```
-
-### 5. Parallel Query Simulation
-
-**Problem**: PostgreSQL doesn't parallelize queries across tables.
-
-**Solution**: Launch concurrent workers for each table.
-
-```sql
-DO $$
-DECLARE
-  h1 pg_background_handle;
-  h2 pg_background_handle;
-  h3 pg_background_handle;
-  total_rows bigint;
-BEGIN
-  -- Launch parallel workers
-  SELECT * INTO h1 FROM pg_background_launch_v2('SELECT count(*) FROM sales');
-  SELECT * INTO h2 FROM pg_background_launch_v2('SELECT count(*) FROM orders');
-  SELECT * INTO h3 FROM pg_background_launch_v2('SELECT count(*) FROM customers');
-  
-  -- Wait for all to complete
-  PERFORM pg_background_wait_v2(h1.pid, h1.cookie);
-  PERFORM pg_background_wait_v2(h2.pid, h2.cookie);
-  PERFORM pg_background_wait_v2(h3.pid, h3.cookie);
-  
-  -- Aggregate results
-  SELECT sum(cnt) INTO total_rows FROM (
-    SELECT * FROM pg_background_result_v2(h1.pid, h1.cookie) AS (cnt bigint)
-    UNION ALL
-    SELECT * FROM pg_background_result_v2(h2.pid, h2.cookie) AS (cnt bigint)
-    UNION ALL
-    SELECT * FROM pg_background_result_v2(h3.pid, h3.cookie) AS (cnt bigint)
-  ) t;
-  
-  RAISE NOTICE 'Total rows: %', total_rows;
-END;
-$$;
-```
-
-### 6. Timeout Enforcement
-
-**Problem**: Need to cancel queries that exceed time budget.
-
-**Solution**: Use `wait_v2_timeout()` with `cancel_v2_grace()`.
-
-```sql
-CREATE FUNCTION run_with_timeout(sql text, timeout_sec int)
-RETURNS text AS $$
-DECLARE
-  h pg_background_handle;
-  done bool;
-  result_text text;
-BEGIN
-  -- Launch worker
-  SELECT * INTO h FROM pg_background_launch_v2(sql);
-  
-  -- Wait with timeout
-  done := pg_background_wait_v2_timeout(h.pid, h.cookie, timeout_sec * 1000);
-  
-  IF NOT done THEN
-    -- Timeout exceeded
-    RAISE WARNING 'Query timed out after % seconds, cancelling...', timeout_sec;
-    PERFORM pg_background_cancel_v2_grace(h.pid, h.cookie, 1000);
-    PERFORM pg_background_detach_v2(h.pid, h.cookie);
-    RETURN 'TIMEOUT';
-  END IF;
-  
-  -- Retrieve result
-  SELECT * INTO result_text FROM pg_background_result_v2(h.pid, h.cookie) AS (res text);
-  RETURN result_text;
-END;
-$$ LANGUAGE plpgsql;
-
--- Usage
-SELECT run_with_timeout('SELECT pg_sleep(10)', 5);  -- Returns 'TIMEOUT'
-```
 
 ---
 
@@ -2237,130 +1958,16 @@ normal path and appear as their real SQLSTATE, not `08006`.
 
 ## Best Practices
 
-### 1. Always Use v2 API in Production
+A quick checklist; the linked sections cover each in depth.
 
-✅ **Correct**:
-```sql
-SELECT * FROM pg_background_launch_v2('...') AS h \gset
-SELECT pg_background_result_v2(:'h.pid', :'h.cookie');
-```
-
-❌ **Avoid**:
-```sql
-SELECT pg_background_launch('...') AS pid \gset  -- No PID reuse protection
-SELECT pg_background_result(:pid);
-```
-
-### 2. Set Timeouts for All Workers
-
-```sql
--- Database-wide default
-ALTER DATABASE production SET statement_timeout = '10min';
-
--- Or per-worker
-SELECT pg_background_launch_v2($$
-  SET statement_timeout = '5min';
-  SELECT slow_query();
-$$);
-```
-
-### 3. Use submit_v2() for Fire-and-Forget
-
-```sql
--- ✅ Idiomatic: submit + detach
-SELECT * FROM pg_background_submit_v2('INSERT INTO log ...') AS h \gset;
-SELECT pg_background_detach_v2(:'h.pid', :'h.cookie');
-
--- ❌ Verbose: launch + detach without result retrieval
-SELECT * FROM pg_background_launch_v2('INSERT INTO log ...') AS h \gset;
-SELECT pg_background_detach_v2(:'h.pid', :'h.cookie');
-```
-
-### 4. Monitor Worker State Regularly
-
-```sql
--- Scheduled cleanup of stale workers
-CREATE OR REPLACE FUNCTION cleanup_stale_workers()
-RETURNS void AS $$
-DECLARE r record;
-BEGIN
-  FOR r IN
-    SELECT *
-    FROM pg_background_list_v2() AS (
-      pid int4, cookie int8, launched_at timestamptz, user_id oid,
-      queue_size int4, state text, sql_preview text, last_error text, consumed bool
-    )
-    WHERE state IN ('stopped', 'error')
-      AND (now() - launched_at) > interval '1 hour'
-  LOOP
-    PERFORM pg_background_detach_v2(r.pid, r.cookie);
-  END LOOP;
-END;
-$$ LANGUAGE plpgsql;
-
--- Run periodically
-SELECT cleanup_stale_workers();
-```
-
-### 5. Sanitize All Dynamic SQL
-
-```sql
--- ✅ Safe: Use format() with %L
-CREATE FUNCTION safe_worker(table_name text) RETURNS void AS $$
-BEGIN
-  PERFORM pg_background_launch_v2(
-    format('VACUUM %I', table_name)  -- %I for identifiers
-  );
-END;
-$$ LANGUAGE plpgsql;
-```
-
-### 6. Handle Errors Gracefully
-
-```sql
-DO $$
-DECLARE
-  h pg_background_handle;
-  result_val text;
-BEGIN
-  SELECT * INTO h FROM pg_background_launch_v2('SELECT 1/0');
-  
-  BEGIN
-    SELECT * INTO result_val FROM pg_background_result_v2(h.pid, h.cookie) AS (r text);
-  EXCEPTION WHEN OTHERS THEN
-    RAISE NOTICE 'Worker failed: %', SQLERRM;
-    -- Cleanup
-    PERFORM pg_background_detach_v2(h.pid, h.cookie);
-  END;
-END;
-$$;
-```
-
-### 7. Document Worker Purpose
-
-```sql
--- ✅ Good: Clear intent
-SELECT * FROM pg_background_launch_v2($$
-  /* Background VACUUM for nightly maintenance */
-  VACUUM (VERBOSE, ANALYZE) user_activity;
-$$) AS h \gset;
-
--- Comment visible in list_v2() sql_preview
-```
-
-### 8. Test Disaster Recovery
-
-Ensure application handles:
-- PostgreSQL restart (all workers lost)
-- Worker crashes (orphaned handles)
-- Launcher session termination (workers detached)
-
-```sql
--- Simulate crash: check handle invalidation
-SELECT * FROM pg_background_launch_v2('SELECT pg_sleep(100)') AS h \gset;
--- Restart PostgreSQL
-SELECT pg_background_wait_v2(:'h.pid', :'h.cookie');  -- Should error gracefully
-```
+1. **Use the v2 API in production.** The `(pid, cookie)` handle protects against PID reuse; the v1 trio does not (see [V1 vs V2 API](#v1-vs-v2-api)).
+2. **Bound every worker with a timeout** — a database/role `statement_timeout`, an inline `SET statement_timeout` in the SQL, or `run_v2`'s `timeout_ms` (see [Recipe 1](#cookbook)).
+3. **Use `submit_v2()` for fire-and-forget** rather than `launch_v2 + detach_v2`.
+4. **Clean up finished workers** with `pg_background_purge_v2()` (detaches only stopped/errored/canceled handles) instead of hand-rolled `list_v2` cleanup loops (see [Monitoring](#monitoring)).
+5. **Sanitize all dynamic SQL** with `format()` — `%I` for identifiers, `%L` for literals (see [Security Best Practices](#security-best-practices)).
+6. **On the error path, read `error_info_v2()` — never `result_v2()`.** `result_v2()` re-raises and aborts the transaction before you can inspect the error (see [Recipe 2](#cookbook) and the footgun note in the [API reference](#structured-error-returns--sqlstate-semantics)).
+7. **Label workers** (`label` parameter) and/or lead the SQL with a comment so `list_v2.sql_preview` is self-documenting.
+8. **Test disaster recovery**: a server restart loses all workers, and stale handles must fail gracefully — `wait_v2()` on a handle from a crashed worker raises rather than hanging.
 
 ---
 
@@ -2456,6 +2063,46 @@ SELECT w.pid,
 SELECT pg_background_detach_all_v2();
 ```
 
+### Recipe 4: Autonomous audit logging that survives worker exhaustion
+
+Workers commit independently of the caller, which makes them ideal for audit
+rows that must persist even when the calling transaction rolls back. But if
+`max_worker_processes` is exhausted, `submit_v2()` raises
+`INSUFFICIENT_RESOURCES` (see [Known Limitation #4](#4-worker-exhaustion-insufficient_resources))
+— so a robust logger retries with backoff and falls back to a synchronous
+insert rather than losing the record.
+
+```sql
+CREATE FUNCTION log_audit(event_type text, details jsonb)
+RETURNS void AS $$
+DECLARE
+  h          pg_background_handle;
+  backoff_ms int := 100;
+BEGIN
+  FOR i IN 1..3 LOOP
+    BEGIN
+      SELECT * INTO h FROM pg_background_submit_v2(
+        format('INSERT INTO audit_log (ts, event_type, details) '
+               'VALUES (now(), %L, %L)', event_type, details::text),
+        0, 'audit');
+      PERFORM pg_background_detach_v2(h.pid, h.cookie);
+      RETURN;
+    EXCEPTION WHEN insufficient_resources THEN
+      IF i = 3 THEN
+        -- Last resort: log synchronously (blocks, but never loses data).
+        INSERT INTO audit_log (ts, event_type, details)
+        VALUES (now(), event_type, details);
+        RAISE WARNING 'pg_background exhausted; audit logged synchronously';
+        RETURN;
+      END IF;
+      PERFORM pg_sleep(backoff_ms / 1000.0);
+      backoff_ms := backoff_ms * 2;
+    END;
+  END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+```
+
 ---
 
 ## Migration Guide
@@ -2489,94 +2136,20 @@ ALTER EXTENSION pg_background UPDATE TO '1.9';
 - `pg_background_result_info_v2()` for row count / command tag / completion flags.
 - Batch helpers: `pg_background_detach_all_v2()`, `pg_background_cancel_all_v2()`.
 
-<details>
-<summary><b>Older upgrade paths (v1.0 → v1.8)</b> — click to expand</summary>
+**Upgrading from a pre-1.8 release?** The chained upgrade scripts live in
+[`extension/legacy/`](extension/legacy/); step up to 1.8 with repeated
+`ALTER EXTENSION pg_background UPDATE TO '<next>'`, then follow the 1.8→1.9→1.10
+path above. Notable milestones along the way: **v1.6** revoked PUBLIC access
+(grant `pgbackground_role` to users afterward), **v1.7** added custom-schema
+support, **v1.8** added stats/GUCs/progress.
 
-### Upgrading from v1.7 to v1.8
-
-```sql
-ALTER EXTENSION pg_background UPDATE TO '1.8';
-```
-
-**New Features**:
-- ✅ `pg_background_stats_v2()` - Session statistics
-- ✅ `pg_background_progress()` - Worker progress reporting
-- ✅ `pg_background_get_progress_v2()` - Get worker progress
-- ✅ GUCs: `max_workers`, `worker_timeout`, `default_queue_size`
-- ✅ Built-in max workers enforcement
-- ✅ Enhanced robustness (overflow protection, UTF-8 truncation)
-
-**Action Items**:
-1. Review new GUC settings and configure as needed
-2. Consider using progress reporting for long-running workers
-3. Use `stats_v2()` for monitoring
-
-### Upgrading from v1.6 to v1.7
-
-```sql
-ALTER EXTENSION pg_background UPDATE TO '1.7';
-```
-
-**Changes**:
-- ✅ Cryptographically secure cookie generation
-- ✅ Dedicated memory context (prevents session bloat)
-- ✅ Exponential backoff polling (reduces CPU usage)
-- ✅ **FIX: Custom schema installation support** (`CREATE EXTENSION ... WITH SCHEMA`)
-- ⚠️ No breaking changes
-
-**Custom Schema Support**: Prior to v1.7, installing the extension in a custom schema would fail with `function public.grant_pg_background_privileges does not exist`. This has been fixed by removing hardcoded schema prefixes (PostgreSQL automatically places objects in the target schema for relocatable extensions) and using dynamic schema lookup in privilege helper functions.
-
-> **⚠️ Important Upgrade Note**: Custom schema support is only available for **fresh installs** of v1.7+. If you have an existing installation of v1.4, v1.5, or v1.6, the extension was installed in the `public` schema (older versions did not support custom schemas). Upgrading from these versions will keep the extension in the `public` schema because the upgrade scripts contain hardcoded `public.` references.
->
-> **To move an existing installation to a custom schema:**
+> **Moving an existing install into a custom schema** is only possible on a
+> fresh `CREATE EXTENSION` (upgrade scripts keep objects where they are). To
+> relocate, drop and reinstall — your data tables are unaffected:
 > ```sql
-> -- 1. Drop the existing extension (preserves your data tables)
 > DROP EXTENSION pg_background;
->
-> -- 2. Create target schema if needed
-> CREATE SCHEMA IF NOT EXISTS myschema;
->
-> -- 3. Reinstall in custom schema
 > CREATE EXTENSION pg_background WITH SCHEMA myschema;
 > ```
-
-### Upgrading from v1.5 to v1.6
-
-```sql
-ALTER EXTENSION pg_background UPDATE TO '1.6';
-```
-
-**Changes**:
-- ✅ v1 API unchanged (fully backward compatible)
-- ✅ New v2 API functions added
-- ✅ `pgbackground_role` created automatically
-- ✅ Hardened privilege helpers added
-- ⚠️ No breaking changes
-
-**Action Items**:
-1. Review privilege grants (v1.6 revokes PUBLIC access)
-2. Grant `pgbackground_role` to application users
-3. Migrate v1 API calls to v2 in new code
-
-### Upgrading from v1.0-v1.4
-
-```sql
--- Multi-hop upgrade path
-ALTER EXTENSION pg_background UPDATE TO '1.4';
-ALTER EXTENSION pg_background UPDATE TO '1.6';
-```
-
-**Breaking Changes**:
-- v1.4: Removed PostgreSQL 9.x support
-- v1.5: Changed DSM lifecycle (no functional API changes)
-- v1.6: Revoked PUBLIC access (requires explicit grants)
-
-**Action Items**:
-1. Test on non-production first
-2. Audit existing privilege grants
-3. Update application code to use v2 API
-
-</details>
 
 ### Migrating from v1 to v2 API
 
