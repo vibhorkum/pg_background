@@ -261,6 +261,14 @@ When suggesting code changes:
 - Result metadata: `pg_background_result_info_v2()` returns row_count, command_tag, completed, has_error
 - Batch operations: `pg_background_detach_all_v2()`, `pg_background_cancel_all_v2()`
 
+### v1.10 Features
+- Convenience views: `pg_background_list`, `pg_background_activity` (joins `pg_stat_activity`)
+- Never-raises snapshot: `pg_background_outcome_v2()` (combines list + result_info + error_info)
+- Synchronous one-shots: `pg_background_run_v2()` (metadata), `pg_background_run_query_v2()` (rows)
+- Multi-handle helpers: `pg_background_drain_v2()`, `pg_background_wait_any_v2()`
+- Bulk/selective cleanup: `pg_background_cancel_by_label_v2()`, `pg_background_purge_v2()`
+- Driver-friendly status: `pg_background_status_v2()` (jsonb); full SQL: `pg_background_full_sql_v2()`
+
 ### Known Limitations (Do Not "Fix")
 - Windows: `cancel_v2()` cannot interrupt running statements (OS limitation)
 - Cross-database: Workers connect to launcher's database only (PostgreSQL limitation)
