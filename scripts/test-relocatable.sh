@@ -145,13 +145,17 @@ main() {
     # broken-pipe case. Instead, capture the count via `wc -l` after grep,
     # which always returns 0 even with no matches. (CLAUDE.md §7
     # anti-pattern.)
+    # NOTE: trailing `|| true` is required. Under `set -o pipefail`, a `grep`
+    # that matches nothing returns 1 and would abort the whole script via
+    # `set -e` -- which happens on the SUCCESS path here, because the
+    # `grep -v` chain below empties out when there are zero real FAILs.
     local PASS_COUNT
-    PASS_COUNT=$(grep -c "PASS" "$OUTPUT_FILE" 2>/dev/null | tr -d ' ')
+    PASS_COUNT=$(grep -c "PASS" "$OUTPUT_FILE" 2>/dev/null || true)
     PASS_COUNT=${PASS_COUNT:-0}
 
     # Only count actual FAIL test results, exclude instructional text.
     local FAIL_COUNT
-    FAIL_COUNT=$(grep "FAIL" "$OUTPUT_FILE" 2>/dev/null | grep -v "Any FAIL" | grep -v "FAIL results" | wc -l | tr -d ' ')
+    FAIL_COUNT=$(grep "FAIL" "$OUTPUT_FILE" 2>/dev/null | grep -v "Any FAIL" | grep -v "FAIL results" | wc -l | tr -d ' ' || true)
     FAIL_COUNT=${FAIL_COUNT:-0}
 
     # Hard-fail if we recorded any FAILs at all — relying on the

@@ -117,9 +117,12 @@ FROM (SELECT custom_ext.pg_background_launch_v2('SELECT 42 AS answer', 65536) AS
 SELECT custom_ext.pg_background_wait_v2(:v2r_pid, :v2r_cookie);
 SELECT * FROM custom_ext.pg_background_result_v2(:v2r_pid, :v2r_cookie) AS (answer int);
 
--- v2: detach_v2 with schema qualification
+-- v2: detach_v2 with schema qualification.
+-- Note: result_v2() consumes the worker's output AND auto-detaches the
+-- segment on completion, so v2r_pid is already untracked here. Detaching it
+-- again would raise "PID is not attached to this session". Only v2_pid
+-- (waited but never consumed via result_v2) is still tracked.
 SELECT custom_ext.pg_background_detach_v2(:v2_pid, :v2_cookie);
-SELECT custom_ext.pg_background_detach_v2(:v2r_pid, :v2r_cookie);
 SELECT 'PASS' AS test_4b_v2_detach, 'v2 detach completed' AS description;
 
 -- Verify data
@@ -289,19 +292,19 @@ SELECT custom_ext.pg_background_detach_v2(:prg_pid, :prg_cookie);
 -- Create test role
 CREATE ROLE test_relocate_user NOLOGIN;
 
--- grant_pg_background_privileges with schema qualification
+-- pg_background_grant_privileges_v2 with schema qualification (renamed in 2.0)
 -- This tests that the helper correctly detects the extension schema
 SELECT
-    CASE WHEN custom_ext.grant_pg_background_privileges('test_relocate_user', false) THEN 'PASS' ELSE 'FAIL' END AS test_11a_grant_privileges;
+    CASE WHEN custom_ext.pg_background_grant_privileges_v2('test_relocate_user', false) THEN 'PASS' ELSE 'FAIL' END AS test_11a_grant_privileges;
 
 -- Verify grants were applied (check one function as sample)
 SELECT
     CASE WHEN has_function_privilege('test_relocate_user', 'custom_ext.pg_background_launch_v2(text, int4)', 'EXECUTE') THEN 'PASS' ELSE 'FAIL' END AS test_11b_verify_grant,
     'Function privilege granted' AS description;
 
--- revoke_pg_background_privileges with schema qualification
+-- pg_background_revoke_privileges_v2 with schema qualification (renamed in 2.0)
 SELECT
-    CASE WHEN custom_ext.revoke_pg_background_privileges('test_relocate_user', false) THEN 'PASS' ELSE 'FAIL' END AS test_11c_revoke_privileges;
+    CASE WHEN custom_ext.pg_background_revoke_privileges_v2('test_relocate_user', false) THEN 'PASS' ELSE 'FAIL' END AS test_11c_revoke_privileges;
 
 -- Verify revoke was applied
 SELECT
