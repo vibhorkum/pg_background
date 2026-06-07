@@ -20,7 +20,7 @@
  *
  * KEY BEHAVIORS
  *     - Cookie-validated v2 API: launch/submit, result, detach, cancel, wait, list.
- *     - submit_v2 is fire-and-forget; detach_v2 is NOT cancel.
+ *     - submit is fire-and-forget; detach is NOT cancel.
  *     - NOTIFY race fix: shm_mq_wait_for_attach() before returning to SQL.
  *     - Crash hygiene: never pfree() BGW handle; deterministic hash cleanup.
  *     - Cryptographically secure cookies (pg_strong_random); session-local
@@ -156,7 +156,7 @@ pgbg_stats session_stats = {0};
 
 /*
  * Worker-side: pointer to current DSM segment for progress reporting.
- * Set by pg_background_worker_main; consulted by pg_background_report_progress_v2.
+ * Set by pg_background_worker_main; consulted by pg_background_report_progress.
  * Non-static so pg_background_worker.c can write it. NULL in launcher.
  */
 dsm_segment *worker_dsm_seg = NULL;
@@ -224,19 +224,19 @@ static void detach_worker_seg(pg_background_worker_info *info);
 PG_MODULE_MAGIC;
 
 /*
- * v2.0: the v1 (no-suffix) API is gone. cancel_v2 / wait_v2 are now single
+ * v2.0: the v1 (no-suffix) API is gone. cancel / wait are now single
  * entrypoints that take (pid, cookie, grace_ms) and (pid, cookie, timeout_ms);
  * the separate _grace / _timeout exports were removed.
  */
 
 /* v2 API */
-PG_FUNCTION_INFO_V1(pg_background_launch_v2);
-PG_FUNCTION_INFO_V1(pg_background_submit_v2);
-PG_FUNCTION_INFO_V1(pg_background_result_v2);
-PG_FUNCTION_INFO_V1(pg_background_detach_v2);
-PG_FUNCTION_INFO_V1(pg_background_cancel_v2);
-PG_FUNCTION_INFO_V1(pg_background_wait_v2);
-PG_FUNCTION_INFO_V1(pg_background_list_v2);
+PG_FUNCTION_INFO_V1(pg_background_launch);
+PG_FUNCTION_INFO_V1(pg_background_submit);
+PG_FUNCTION_INFO_V1(pg_background_result);
+PG_FUNCTION_INFO_V1(pg_background_detach);
+PG_FUNCTION_INFO_V1(pg_background_cancel);
+PG_FUNCTION_INFO_V1(pg_background_wait);
+PG_FUNCTION_INFO_V1(pg_background_list);
 
 /* Worker entry point lives in pg_background_worker.c.
  * Declaration is in pg_background_internal.h.
@@ -246,25 +246,25 @@ PG_FUNCTION_INFO_V1(pg_background_list_v2);
 PGDLLEXPORT void _PG_init(void);
 
 /* Statistics retrieval function */
-PG_FUNCTION_INFO_V1(pg_background_stats_v2);
+PG_FUNCTION_INFO_V1(pg_background_stats);
 
 /* v2.0 (B3d): progress reporting renamed for naming coherence */
-PG_FUNCTION_INFO_V1(pg_background_report_progress_v2);
+PG_FUNCTION_INFO_V1(pg_background_report_progress);
 
 /* Progress retrieval function */
-PG_FUNCTION_INFO_V1(pg_background_get_progress_v2);
+PG_FUNCTION_INFO_V1(pg_background_get_progress);
 
 /* v1.9: New observability functions */
-PG_FUNCTION_INFO_V1(pg_background_result_info_v2);
-PG_FUNCTION_INFO_V1(pg_background_error_info_v2);
-PG_FUNCTION_INFO_V1(pg_background_detach_all_v2);
-PG_FUNCTION_INFO_V1(pg_background_cancel_all_v2);
+PG_FUNCTION_INFO_V1(pg_background_result_info);
+PG_FUNCTION_INFO_V1(pg_background_error_info);
+PG_FUNCTION_INFO_V1(pg_background_detach_all);
+PG_FUNCTION_INFO_V1(pg_background_cancel_all);
 
 /* v1.10 (B3): full SQL accessor */
-PG_FUNCTION_INFO_V1(pg_background_full_sql_v2);
+PG_FUNCTION_INFO_V1(pg_background_full_sql);
 
-/* v2.0 (B5a): private bumper called by run_v2 PL/pgSQL on timeout */
-PG_FUNCTION_INFO_V1(pg_background_record_timeout_v2);
+/* v2.0 (B5a): private bumper called by run PL/pgSQL on timeout */
+PG_FUNCTION_INFO_V1(pg_background_record_timeout);
 
 /* ============================================================================
  * MODULE INITIALIZATION
@@ -490,7 +490,7 @@ pgbg_sleep_with_backoff(long *interval_us, long remaining_us)
  *   true  - worker is BGWH_STOPPED (or info/handle was NULL: nothing to wait for)
  *   false - timeout expired and the worker is still running
  *
- * Shared by pg_background_wait_v2_timeout and pgbg_send_cancel_signals'
+ * Shared by pg_background_wait and pgbg_send_cancel_signals'
  * grace period; keeping the loop in one place makes the
  * CHECK_FOR_INTERRUPTS / backoff / remaining-time accounting consistent.
  */
@@ -542,7 +542,7 @@ pgbg_wait_for_stop(pg_background_worker_info *info, int32 timeout_ms)
  * build_handle_tuple
  *     Construct a pg_background_handle composite type value.
  *
- * Used by pg_background_launch_v2 and pg_background_submit_v2 to build
+ * Used by pg_background_launch and pg_background_submit to build
  * the return value. Eliminates code duplication between these functions.
  *
  * Parameters:
@@ -595,7 +595,7 @@ build_handle_tuple(FunctionCallInfo fcinfo, pid_t pid, uint64 cookie)
  *     sql             - SQL command(s) to execute
  *     queue_size      - Shared memory queue size in bytes
  *     cookie          - Worker identity cookie (0 for v1 API)
- *     result_disabled - True if results should be discarded (submit_v2)
+ *     result_disabled - True if results should be discarded (submit)
  *     out_pid         - Output: worker process ID
  */
 static void
@@ -724,7 +724,7 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
      * at startup before executing the caller's SQL, so this is intentional
      * and matches how PostgreSQL parallel workers propagate GUCs. If you
      * need a worker to run with a tighter or different GUC profile, set the
-     * GUC in the launching session before calling launch_v2/submit_v2.
+     * GUC in the launching session before calling launch/submit.
      */
     gucstate = shm_toc_allocate(toc, guc_len);
     SerializeGUCState(guc_len, gucstate);
@@ -854,7 +854,7 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
  */
 
 /*
- * pg_background_launch_v2
+ * pg_background_launch
  *     Launch a background worker with cookie validation (v2 API).
  *
  * Parameters:
@@ -867,11 +867,11 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
  *
  * Notes:
  *     - Cookie provides protection against PID reuse attacks
- *     - Results retrieved with pg_background_result_v2(pid, cookie)
- *     - Use pg_background_cancel_v2() to cancel (unlike v1 detach)
+ *     - Results retrieved with pg_background_result(pid, cookie)
+ *     - Use pg_background_cancel() to cancel (unlike v1 detach)
  */
 Datum
-pg_background_launch_v2(PG_FUNCTION_ARGS)
+pg_background_launch(PG_FUNCTION_ARGS)
 {
     text   *sql;
     int32   queue_size;
@@ -901,10 +901,10 @@ pg_background_launch_v2(PG_FUNCTION_ARGS)
 }
 
 /*
- * pg_background_submit_v2
+ * pg_background_submit
  *     Launch a fire-and-forget background worker (v2 API).
  *
- * Similar to launch_v2 but results are discarded. The worker runs
+ * Similar to launch but results are discarded. The worker runs
  * autonomously and cannot be queried for results.
  *
  * Parameters:
@@ -916,12 +916,12 @@ pg_background_launch_v2(PG_FUNCTION_ARGS)
  * Returns: pg_background_handle composite (pid int4, cookie int8)
  *
  * Notes:
- *     - Calling result_v2() on a submitted worker raises an error
- *     - Worker can still be canceled with cancel_v2()
+ *     - Calling result() on a submitted worker raises an error
+ *     - Worker can still be canceled with cancel()
  *     - Use for side-effect-only operations (logging, notifications)
  */
 Datum
-pg_background_submit_v2(PG_FUNCTION_ARGS)
+pg_background_submit(PG_FUNCTION_ARGS)
 {
     text   *sql;
     int32   queue_size;
@@ -986,7 +986,7 @@ throw_untranslated_error(ErrorData translated_edata)
 
 /*
  * store_worker_error
- *     Store an error message in the worker info for list_v2() visibility.
+ *     Store an error message in the worker info for list() visibility.
  *
  * Error messages are truncated to PGBG_MAX_ERROR_MSG_LEN to prevent
  * memory bloat from malicious or buggy workers sending huge errors.
@@ -1043,7 +1043,7 @@ store_worker_error(pg_background_worker_info *info, const char *message)
  */
 
 /*
- * pg_background_result_v2
+ * pg_background_result
  *     Retrieve results from a background worker (v2 API).
  *
  * Set-returning function that streams results from the worker's shared
@@ -1052,18 +1052,18 @@ store_worker_error(pg_background_worker_info *info, const char *message)
  *
  * Parameters:
  *     pid    - Worker process ID
- *     cookie - Worker identity cookie from launch_v2
+ *     cookie - Worker identity cookie from launch
  *
  * Returns: SETOF record (caller must provide column definition list)
  *
  * Errors:
  *     - UNDEFINED_OBJECT: PID not attached, cookie mismatch, or results
  *                         already consumed
- *     - FEATURE_NOT_SUPPORTED: Worker was launched via submit_v2
+ *     - FEATURE_NOT_SUPPORTED: Worker was launched via submit
  *     - CONNECTION_FAILURE: Worker died before sending results
  */
 Datum
-pg_background_result_v2(PG_FUNCTION_ARGS)
+pg_background_result(PG_FUNCTION_ARGS)
 {
     int32        pid = PG_GETARG_INT32(0);
     int64        cookie_in = PG_GETARG_INT64(1);
@@ -1098,7 +1098,7 @@ pg_background_result_v2(PG_FUNCTION_ARGS)
         if (info->result_disabled)
             ereport(ERROR,
                     (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                     errmsg("results are disabled for PID %d (submitted via submit_v2)", pid)));
+                     errmsg("results are disabled for PID %d (submitted via pg_background_submit)", pid)));
 
         if (info->consumed)
             ereport(ERROR,
@@ -1235,7 +1235,7 @@ pg_background_result_v2(PG_FUNCTION_ARGS)
 
                 pq_parse_errornotice(&msg, &edata);
 
-                /* Store error for list_v2() visibility */
+                /* Store error for list() visibility */
                 store_worker_error(state->info, edata.message);
 
                 if (edata.elevel > ERROR)
@@ -1253,13 +1253,13 @@ pg_background_result_v2(PG_FUNCTION_ARGS)
                 /*
                  * NOTIFY ('A') frames from the worker are forwarded to the
                  * launcher's protocol output here. This only happens while
-                 * the launcher is *parked inside* pg_background_result_v2 —
-                 * i.e., it works for launch_v2 + result_v2 callers that
+                 * the launcher is *parked inside* pg_background_result —
+                 * i.e., it works for launch + result callers that
                  * actually consume the result. NOTIFY frames emitted by
-                 * workers launched via submit_v2 (fire-and-forget; results
+                 * workers launched via submit (fire-and-forget; results
                  * disabled) are written into the shm_mq but never read by
                  * anyone, so any NOTIFY they raise is effectively dropped.
-                 * Document this in the README's submit_v2 section if you
+                 * Document this in the README's submit section if you
                  * change anything here.
                  */
                 pq_putmessage(msg.data[0], &msg.data[1], nbytes - 1);
@@ -1463,14 +1463,14 @@ form_result_tuple(pg_background_result_state *state, TupleDesc tupdesc, StringIn
  */
 
 /*
- * pg_background_detach_v2
+ * pg_background_detach
  *     Stop tracking a background worker with cookie validation (v2 API).
  *
  * Same as v1 detach but validates the cookie first.
- * Use cancel_v2 if you want to actually stop the worker.
+ * Use cancel if you want to actually stop the worker.
  */
 Datum
-pg_background_detach_v2(PG_FUNCTION_ARGS)
+pg_background_detach(PG_FUNCTION_ARGS)
 {
     int32 pid = PG_GETARG_INT32(0);
     int64 cookie_in = PG_GETARG_INT64(1);
@@ -1499,7 +1499,7 @@ pg_background_detach_v2(PG_FUNCTION_ARGS)
  */
 
 /*
- * pg_background_cancel_v2
+ * pg_background_cancel
  *     Cancel a background worker (v2 API).
  *
  * v2.0: Single entrypoint with optional grace_ms (defaulted in SQL to 0).
@@ -1509,11 +1509,11 @@ pg_background_detach_v2(PG_FUNCTION_ARGS)
  *
  * Parameters:
  *     pid      - Worker process ID
- *     cookie   - Worker identity cookie from launch_v2
+ *     cookie   - Worker identity cookie from launch
  *     grace_ms - Grace period before SIGKILL (0 = immediate SIGTERM only)
  */
 Datum
-pg_background_cancel_v2(PG_FUNCTION_ARGS)
+pg_background_cancel(PG_FUNCTION_ARGS)
 {
     int32 pid = PG_GETARG_INT32(0);
     int64 cookie_in = PG_GETARG_INT64(1);
@@ -1552,7 +1552,7 @@ pg_background_cancel_v2(PG_FUNCTION_ARGS)
  */
 
 /*
- * pg_background_wait_v2
+ * pg_background_wait
  *     Wait for a background worker to exit (v2 API).
  *
  * v2.0: Single entrypoint with optional timeout_ms (defaulted in SQL to 0).
@@ -1567,7 +1567,7 @@ pg_background_cancel_v2(PG_FUNCTION_ARGS)
  * Returns: bool — true if the worker has stopped, false on timeout.
  */
 Datum
-pg_background_wait_v2(PG_FUNCTION_ARGS)
+pg_background_wait(PG_FUNCTION_ARGS)
 {
     int32 pid = PG_GETARG_INT32(0);
     int64 cookie_in = PG_GETARG_INT64(1);
@@ -1608,7 +1608,7 @@ pg_background_wait_v2(PG_FUNCTION_ARGS)
 
 /*
  * pg_background_list_state
- *     State for list_v2 SRF iteration.
+ *     State for list SRF iteration.
  *
  * We snapshot PIDs at first call to avoid race conditions where
  * cleanup callbacks could modify the hash during iteration.
@@ -1621,7 +1621,7 @@ typedef struct pg_background_list_state
 } pg_background_list_state;
 
 /*
- * pg_background_list_v2
+ * pg_background_list
  *     List all background workers for the current session (v2 API).
  *
  * Returns information about tracked workers including state, SQL preview,
@@ -1636,7 +1636,7 @@ typedef struct pg_background_list_state
  *          sql_preview, last_error, consumed, label
  */
 Datum
-pg_background_list_v2(PG_FUNCTION_ARGS)
+pg_background_list(PG_FUNCTION_ARGS)
 {
     FuncCallContext *funcctx;
     pg_background_list_state *state;
@@ -1766,7 +1766,7 @@ pg_background_list_v2(PG_FUNCTION_ARGS)
  * If the mapping was pinned at launch, we unpin first.
  *
  * Replaces three nearly-identical inline blocks in the result-streaming SRF
- * tail, pg_background_detach_v2, and pg_background_detach_all_v2.
+ * tail, pg_background_detach, and pg_background_detach_all.
  */
 static void
 detach_worker_seg(pg_background_worker_info *info)
@@ -1847,7 +1847,7 @@ pgbg_send_cancel_signals(pg_background_worker_info *info, int32 grace_ms)
      * - DOES NOT WORK: Cancel during long-running query (no mid-query interrupt)
      *
      * PRODUCTION IMPACT:
-     * On Windows, cancel_v2() may not interrupt long-running SQL. Use:
+     * On Windows, cancel() may not interrupt long-running SQL. Use:
      * 1. statement_timeout to bound query execution time
      * 2. Application-level timeouts
      * 3. Connection pooler limits
@@ -2198,7 +2198,7 @@ pg_background_error_callback(void *arg)
  */
 
 /*
- * pg_background_stats_v2
+ * pg_background_stats
  *     Return session-local statistics about background workers.
  *
  * Returns a single row with:
@@ -2206,13 +2206,13 @@ pg_background_error_callback(void *arg)
  *   - workers_completed: workers that completed successfully
  *   - workers_failed: workers that failed with an error
  *   - workers_canceled: workers that were explicitly canceled
- *   - workers_timed_out: workers that hit run_v2 timeout (subset of canceled)
+ *   - workers_timed_out: workers that hit run timeout (subset of canceled)
  *   - workers_active: currently active workers
  *   - avg_execution_ms: average execution time in milliseconds
  *   - max_workers: current pg_background.max_workers setting
  */
 Datum
-pg_background_stats_v2(PG_FUNCTION_ARGS)
+pg_background_stats(PG_FUNCTION_ARGS)
 {
     TupleDesc   tupdesc;
     Datum       values[8];
@@ -2256,16 +2256,16 @@ pg_background_stats_v2(PG_FUNCTION_ARGS)
 }
 
 /*
- * pg_background_record_timeout_v2 (v2.0, B5a)
+ * pg_background_record_timeout (v2.0, B5a)
  *     Increment the session-local workers_timed_out counter.
  *
- * Called by pg_background_run_v2 (PL/pgSQL) when a launched worker
+ * Called by pg_background_run (PL/pgSQL) when a launched worker
  * exceeds its timeout and is canceled. We track timeouts as a separate
  * counter from explicit user-driven cancels so the stats view is
  * actionable. SQL declares this with VOLATILE; not granted to PUBLIC.
  */
 Datum
-pg_background_record_timeout_v2(PG_FUNCTION_ARGS)
+pg_background_record_timeout(PG_FUNCTION_ARGS)
 {
     /*
      * Saturate rather than overflow: workers_timed_out is int64, but we
@@ -2282,7 +2282,7 @@ pg_background_record_timeout_v2(PG_FUNCTION_ARGS)
  */
 
 /*
- * pg_background_report_progress_v2 (v2.0)
+ * pg_background_report_progress (v2.0)
  *     Report progress from within a background worker.
  *
  * Renamed from pg_background_progress in 2.0 to align with v2 naming and
@@ -2297,10 +2297,10 @@ pg_background_record_timeout_v2(PG_FUNCTION_ARGS)
  *     message - Brief status message (optional, max 63 chars)
  *
  * Usage in worker SQL:
- *     SELECT pg_background_report_progress_v2(50, 'Halfway done');
+ *     SELECT pg_background_report_progress(50, 'Halfway done');
  */
 Datum
-pg_background_report_progress_v2(PG_FUNCTION_ARGS)
+pg_background_report_progress(PG_FUNCTION_ARGS)
 {
     int32       pct;
     text       *msg;
@@ -2324,7 +2324,7 @@ pg_background_report_progress_v2(PG_FUNCTION_ARGS)
     if (worker_dsm_seg == NULL)
         ereport(ERROR,
                 (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-                 errmsg("pg_background_report_progress_v2 can only be called from a background worker")));
+                 errmsg("pg_background_report_progress can only be called from a background worker")));
 
     /* Clamp percentage */
     if (pct < 0) pct = 0;
@@ -2384,7 +2384,7 @@ pg_background_report_progress_v2(PG_FUNCTION_ARGS)
 }
 
 /*
- * pg_background_get_progress_v2
+ * pg_background_get_progress
  *     Get progress of a specific background worker.
  *
  * Parameters:
@@ -2394,7 +2394,7 @@ pg_background_report_progress_v2(PG_FUNCTION_ARGS)
  * Returns: (progress_pct int, progress_msg text) or NULL if not available
  */
 Datum
-pg_background_get_progress_v2(PG_FUNCTION_ARGS)
+pg_background_get_progress(PG_FUNCTION_ARGS)
 {
     int32       pid = PG_GETARG_INT32(0);
     int64       cookie_in = PG_GETARG_INT64(1);
@@ -2471,7 +2471,7 @@ pg_background_get_progress_v2(PG_FUNCTION_ARGS)
  */
 
 /*
- * pg_background_result_info_v2
+ * pg_background_result_info
  *     Get result metadata without consuming results.
  *
  * Returns: pg_background_result_info composite type
@@ -2485,7 +2485,7 @@ pg_background_get_progress_v2(PG_FUNCTION_ARGS)
  * before relying on the other fields.
  */
 Datum
-pg_background_result_info_v2(PG_FUNCTION_ARGS)
+pg_background_result_info(PG_FUNCTION_ARGS)
 {
     int32       pid = PG_GETARG_INT32(0);
     int64       cookie = PG_GETARG_INT64(1);
@@ -2590,7 +2590,7 @@ pg_background_result_info_v2(PG_FUNCTION_ARGS)
 }
 
 /*
- * pg_background_error_info_v2
+ * pg_background_error_info
  *     Get structured error information from a worker.
  *
  * Returns: pg_background_error composite type
@@ -2605,7 +2605,7 @@ pg_background_result_info_v2(PG_FUNCTION_ARGS)
  * Returns NULL if no error occurred.
  */
 Datum
-pg_background_error_info_v2(PG_FUNCTION_ARGS)
+pg_background_error_info(PG_FUNCTION_ARGS)
 {
     int32       pid = PG_GETARG_INT32(0);
     int64       cookie = PG_GETARG_INT64(1);
@@ -2702,7 +2702,7 @@ pg_background_error_info_v2(PG_FUNCTION_ARGS)
 }
 
 /*
- * pg_background_full_sql_v2
+ * pg_background_full_sql
  *     Return the full SQL the worker is/was running.
  *
  * The 120-char preview shown by pg_background_list is good for monitoring;
@@ -2711,11 +2711,11 @@ pg_background_error_info_v2(PG_FUNCTION_ARGS)
  * at PGBG_FULL_SQL_MAX_LEN with a "[...]" sentinel; longer queries should
  * be debugged from the application's own logs.
  *
- * Subject to the same per-row authorization check as list_v2: only the
+ * Subject to the same per-row authorization check as list: only the
  * owner (or a role with the worker's role privileges) can read the SQL.
  */
 Datum
-pg_background_full_sql_v2(PG_FUNCTION_ARGS)
+pg_background_full_sql(PG_FUNCTION_ARGS)
 {
     int32 pid = PG_GETARG_INT32(0);
     int64 cookie_in = PG_GETARG_INT64(1);
@@ -2740,13 +2740,13 @@ pg_background_full_sql_v2(PG_FUNCTION_ARGS)
 }
 
 /*
- * pg_background_detach_all_v2
+ * pg_background_detach_all
  *     Detach all tracked workers in the current session.
  *
  * Returns: int4 - number of workers actually detached
  */
 Datum
-pg_background_detach_all_v2(PG_FUNCTION_ARGS)
+pg_background_detach_all(PG_FUNCTION_ARGS)
 {
     HASH_SEQ_STATUS hstat;
     pg_background_worker_info *info;
@@ -2796,17 +2796,17 @@ pg_background_detach_all_v2(PG_FUNCTION_ARGS)
 }
 
 /*
- * pg_background_cancel_all_v2
+ * pg_background_cancel_all
  *     Cancel all tracked workers in the current session.
  *
- * Consistent with cancel_v2(): sets the cancel flag in shared memory for all
+ * Consistent with cancel(): sets the cancel flag in shared memory for all
  * workers (including not-yet-started), so they will see it when they start.
  * Signals are only sent to workers that have actually started.
  *
  * Returns: int4 - number of workers for which cancel was requested
  */
 Datum
-pg_background_cancel_all_v2(PG_FUNCTION_ARGS)
+pg_background_cancel_all(PG_FUNCTION_ARGS)
 {
     HASH_SEQ_STATUS hstat;
     pg_background_worker_info *info;
@@ -2837,7 +2837,7 @@ pg_background_cancel_all_v2(PG_FUNCTION_ARGS)
         {
             /*
              * Include all non-canceled workers, regardless of started state.
-             * This matches cancel_v2() semantics: set the cancel flag for
+             * This matches cancel() semantics: set the cancel flag for
              * not-yet-started workers (they'll see it on startup), and send
              * signals only to started workers (handled by pgbg_send_cancel_signals).
              */
@@ -2859,7 +2859,7 @@ pg_background_cancel_all_v2(PG_FUNCTION_ARGS)
             pgbg_send_cancel_signals(info, 0);
             info->canceled = true;
             /* Note: stats increment happens in cleanup_worker_info(), not here,
-             * to maintain consistency with pg_background_cancel_v2() */
+             * to maintain consistency with pg_background_cancel() */
             canceled++;
         }
     }

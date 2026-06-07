@@ -126,7 +126,7 @@ static void handle_sigterm(SIGNAL_ARGS);
  *
  * HOLD_INTERRUPTS keeps signals deferred through the body so that a
  * second SIGTERM (e.g. from a launcher-side double-cancel or a
- * cancel_by_label_v2 against multiple workers) cannot interrupt
+ * cancel_by_label against multiple workers) cannot interrupt
  * pq_flush / EmitErrorReport mid-frame. We deliberately do NOT call
  * RESUME_INTERRUPTS before proc_exit — see the comment near the
  * proc_exit(1) call at the bottom of this function for why.
@@ -239,7 +239,7 @@ pg_background_worker_error_exit(pg_background_output *output)
      * v2.0 (F): do NOT call RESUME_INTERRUPTS() before proc_exit().
      *
      * If a second SIGTERM arrived mid-error_exit (e.g. from a launcher-side
-     * double-cancel or a cancel_by_label_v2 against multiple workers
+     * double-cancel or a cancel_by_label against multiple workers
      * exiting simultaneously), handle_sigterm queued QueryCancelPending
      * even though we're already exiting. Resuming interrupts at this point
      * lets proc_exit's cleanup chain dispatch that pending cancel via
@@ -548,7 +548,7 @@ execute_sql_string(const char *sql, pg_background_output *output)
 
     /*
      * v2.0 (B5b): record execution-start timestamp before parsing/planning
-     * so result_info_v2 can report it. finished_at is set after the loop
+     * so result_info can report it. finished_at is set after the loop
      * completes (success path) or in pg_background_worker_error_exit
      * (failure path).
      */
@@ -630,7 +630,7 @@ execute_sql_string(const char *sql, pg_background_output *output)
              * The final values reflect the last command executed.
              *
              * v1.10: Publish via a write barrier + flag so a launcher reader
-             * (pg_background_result_info_v2) cannot observe a fresh
+             * (pg_background_result_info) cannot observe a fresh
              * row_count paired with a stale command_tag. Mirrors the
              * error_sqlstate publish-flag idiom.
              */

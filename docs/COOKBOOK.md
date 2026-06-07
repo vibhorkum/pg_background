@@ -19,7 +19,7 @@ failure. Returns metadata only — for result rows use the next recipe.
 ```sql
 SELECT pid, completed, timed_out, has_error, row_count, command_tag,
        sqlstate, error_message, elapsed_ms
-  FROM pg_background_run_v2(
+  FROM pg_background_run(
          'INSERT INTO audit_log SELECT now(), current_user, ''login''',
          queue_size  := 0,
          timeout_ms  := 30000,    -- 30s cap; cancels with 1s grace on overrun
@@ -29,8 +29,8 @@ SELECT pid, completed, timed_out, has_error, row_count, command_tag,
 
 ### Wait-with-timeout, then capture result rows or error
 
-When you need the actual result rows. Uses `outcome_v2` to inspect
-state without raising; only calls `result_v2` on the success path.
+When you need the actual result rows. Uses `outcome` to inspect
+state without raising; only calls `result` on the success path.
 
 ```sql
 DO $$
@@ -39,27 +39,27 @@ DECLARE
     o pg_background_outcome;
     finished bool;
 BEGIN
-    h := pg_background_launch_v2('SELECT id, name FROM big_table WHERE active', 65536, 'lookup');
+    h := pg_background_launch('SELECT id, name FROM big_table WHERE active', 65536, 'lookup');
 
-    finished := pg_background_wait_v2(h.pid, h.cookie, 5000);
+    finished := pg_background_wait(h.pid, h.cookie, 5000);
     IF NOT finished THEN
-        PERFORM pg_background_cancel_v2(h.pid, h.cookie, 1000);
-        PERFORM pg_background_detach_v2(h.pid, h.cookie);
+        PERFORM pg_background_cancel(h.pid, h.cookie, 1000);
+        PERFORM pg_background_detach(h.pid, h.cookie);
         RAISE EXCEPTION 'lookup did not complete within 5s';
     END IF;
 
-    o := pg_background_outcome_v2(h.pid, h.cookie);
+    o := pg_background_outcome(h.pid, h.cookie);
     IF o.has_error THEN
-        PERFORM pg_background_detach_v2(h.pid, h.cookie);
+        PERFORM pg_background_detach(h.pid, h.cookie);
         RAISE EXCEPTION 'lookup failed: % (sqlstate %)', o.error_message, o.sqlstate;
     END IF;
 
     -- Safe: only consume result rows on the success path.
     INSERT INTO lookup_cache (id, name)
     SELECT id, name
-      FROM pg_background_result_v2(h.pid, h.cookie) AS r(id int, name text);
+      FROM pg_background_result(h.pid, h.cookie) AS r(id int, name text);
 
-    PERFORM pg_background_detach_v2(h.pid, h.cookie);
+    PERFORM pg_background_detach(h.pid, h.cookie);
 END
 $$;
 ```
@@ -70,7 +70,7 @@ When you fan out N independent jobs and want a per-worker outcome row.
 
 ```sql
 WITH launched AS (
-    SELECT (pg_background_launch_v2(
+    SELECT (pg_background_launch(
               format('VACUUM (ANALYZE) %I', tablename),
               0,
               'nightly-vacuum-' || tablename)).*
@@ -79,29 +79,29 @@ WITH launched AS (
 waited AS (
     SELECT l.pid,
            l.cookie,
-           pg_background_wait_v2(l.pid, l.cookie, 60000) AS finished
+           pg_background_wait(l.pid, l.cookie, 60000) AS finished
       FROM launched l
 )
 SELECT w.pid, w.finished, o.completed, o.has_error,
        o.row_count, o.command_tag, o.sqlstate, o.error_message, o.label
   FROM waited w,
-       LATERAL pg_background_outcome_v2(w.pid, w.cookie) AS o;
+       LATERAL pg_background_outcome(w.pid, w.cookie) AS o;
 
 -- Per-handle detach is preferred (CLAUDE.md §7), but for one-shot scripts
 -- the batch helper is fine.
-SELECT pg_background_detach_all_v2();
+SELECT pg_background_detach_all();
 ```
 
 ### Drain a fan-out with a shared deadline
 
-`drain_v2` waits on every handle in an array against a shared wall-clock
+`drain` waits on every handle in an array against a shared wall-clock
 budget, returns one outcome row per input handle in input order, and
 detaches each one.
 
 ```sql
 SELECT pid, completed, has_error, row_count, label
-  FROM pg_background_drain_v2(
-         ARRAY(SELECT pg_background_launch_v2(
+  FROM pg_background_drain(
+         ARRAY(SELECT pg_background_launch(
                         format('SELECT count(*) FROM %I', t),
                         0,
                         'count-' || t)
@@ -110,7 +110,7 @@ SELECT pid, completed, has_error, row_count, label
        );
 ```
 
-### "Did any of these finish?" — wait_any_v2
+### "Did any of these finish?" — wait_any
 
 Polls a set of handles, returns the first one whose worker has stopped,
 or `NULL` on timeout. Useful for racing tasks.
@@ -122,15 +122,15 @@ DECLARE
     winner  pg_background_handle;
 BEGIN
     hs := ARRAY[
-        pg_background_launch_v2('SELECT pg_sleep(2);  SELECT 1', 0, 'race-1'),
-        pg_background_launch_v2('SELECT pg_sleep(0.5); SELECT 2', 0, 'race-2'),
-        pg_background_launch_v2('SELECT pg_sleep(5);  SELECT 3', 0, 'race-3')
+        pg_background_launch('SELECT pg_sleep(2);  SELECT 1', 0, 'race-1'),
+        pg_background_launch('SELECT pg_sleep(0.5); SELECT 2', 0, 'race-2'),
+        pg_background_launch('SELECT pg_sleep(5);  SELECT 3', 0, 'race-3')
     ];
 
-    winner := pg_background_wait_any_v2(hs, 10000);
+    winner := pg_background_wait_any(hs, 10000);
     RAISE NOTICE 'first finisher: pid=% (cookie=%)', winner.pid, winner.cookie;
 
-    PERFORM count(*) FROM pg_background_drain_v2(hs, 5000);  -- cleanup the rest
+    PERFORM count(*) FROM pg_background_drain(hs, 5000);  -- cleanup the rest
 END$$;
 ```
 
@@ -141,7 +141,7 @@ pattern. Useful for bulk-cancelling a logical workload identified by a
 label prefix.
 
 ```sql
-SELECT pg_background_cancel_by_label_v2('nightly-vacuum-%');
+SELECT pg_background_cancel_by_label('nightly-vacuum-%');
 ```
 
 ---
@@ -155,7 +155,7 @@ asynchronously instead:
 
 ```sql
 -- Use the pg_background_list view (no column-definition list required).
-SELECT (pg_background_launch_v2(
+SELECT (pg_background_launch(
           'VACUUM (VERBOSE, ANALYZE) large_table',
           0,
           'maintenance-vacuum')).*
@@ -167,8 +167,8 @@ SELECT state, sql_preview, launched_at
  WHERE pid = :h_pid AND cookie = :h_cookie;
 
 -- Wait for completion (optional).
-SELECT pg_background_wait_v2(:h_pid, :h_cookie);
-SELECT pg_background_detach_v2(:h_pid, :h_cookie);
+SELECT pg_background_wait(:h_pid, :h_cookie);
+SELECT pg_background_detach(:h_pid, :h_cookie);
 ```
 
 ### Autonomous audit logging
@@ -177,7 +177,7 @@ Audit logs must persist even if the main transaction rolls back. Use
 the worker for an independent commit.
 
 > **⚠️ Worker exhaustion**: if `max_worker_processes` is exhausted,
-> `pg_background_launch_v2()` raises `ERRCODE_INSUFFICIENT_RESOURCES`.
+> `pg_background_launch()` raises `ERRCODE_INSUFFICIENT_RESOURCES`.
 > For audit logging, that means the message is **lost** unless your
 > caller handles the error. The robust template below retries with
 > exponential backoff and falls back to a synchronous insert.
@@ -191,11 +191,11 @@ LANGUAGE plpgsql AS $$
 DECLARE
   h pg_background_handle;
 BEGIN
-  h := pg_background_submit_v2(
+  h := pg_background_submit(
          format(
            'INSERT INTO audit_log (ts, event_type, details) VALUES (now(), %L, %L)',
            event_type, details::text));
-  PERFORM pg_background_detach_v2(h.pid, h.cookie);
+  PERFORM pg_background_detach(h.pid, h.cookie);
 END;
 $$;
 ```
@@ -213,11 +213,11 @@ DECLARE
 BEGIN
   FOR i IN 1..retries LOOP
     BEGIN
-      h := pg_background_submit_v2(
+      h := pg_background_submit(
              format(
                'INSERT INTO audit_log (ts, event_type, details) VALUES (now(), %L, %L)',
                event_type, details::text));
-      PERFORM pg_background_detach_v2(h.pid, h.cookie);
+      PERFORM pg_background_detach(h.pid, h.cookie);
       RETURN;
     EXCEPTION WHEN insufficient_resources THEN
       IF i = retries THEN
@@ -258,9 +258,9 @@ LANGUAGE plpgsql AS $$
 DECLARE
   h pg_background_handle;
 BEGIN
-  h := pg_background_submit_v2(
+  h := pg_background_submit(
          format('SELECT pg_notify(%L, %L)', channel, payload));
-  PERFORM pg_background_detach_v2(h.pid, h.cookie);
+  PERFORM pg_background_detach(h.pid, h.cookie);
 END;
 $$;
 
@@ -268,7 +268,7 @@ $$;
 SELECT notify_async('order_updates', '{"order_id": 456, "status": "shipped"}');
 ```
 
-> **NOTIFY caveat**: NOTIFY frames raised inside a `submit_v2` worker
+> **NOTIFY caveat**: NOTIFY frames raised inside a `submit` worker
 > are *not* relayed back to the launcher's session. The notify row hits
 > `pg_listener` / the notify queue in the worker's own commit, so any
 > session that called `LISTEN <channel>` separately *will* receive it —
@@ -280,7 +280,7 @@ ETL blocks a client connection for hours. Launch in the background and
 poll for completion via the `pg_background_list` view.
 
 ```sql
-SELECT (pg_background_launch_v2($$
+SELECT (pg_background_launch($$
   INSERT INTO fact_sales
   SELECT * FROM staging_sales WHERE processed = false;
   UPDATE staging_sales SET processed = true;
@@ -312,20 +312,20 @@ DECLARE
     total_rows bigint;
 BEGIN
     hs := ARRAY[
-        pg_background_launch_v2('SELECT count(*) FROM sales',     0, 'pq-sales'),
-        pg_background_launch_v2('SELECT count(*) FROM orders',    0, 'pq-orders'),
-        pg_background_launch_v2('SELECT count(*) FROM customers', 0, 'pq-customers')
+        pg_background_launch('SELECT count(*) FROM sales',     0, 'pq-sales'),
+        pg_background_launch('SELECT count(*) FROM orders',    0, 'pq-orders'),
+        pg_background_launch('SELECT count(*) FROM customers', 0, 'pq-customers')
     ];
 
-    PERFORM pg_background_wait_v2(h.pid, h.cookie)
+    PERFORM pg_background_wait(h.pid, h.cookie)
       FROM unnest(hs) h;
 
     SELECT sum(cnt) INTO total_rows FROM (
-        SELECT * FROM pg_background_result_v2((hs[1]).pid, (hs[1]).cookie) AS (cnt bigint)
+        SELECT * FROM pg_background_result((hs[1]).pid, (hs[1]).cookie) AS (cnt bigint)
         UNION ALL
-        SELECT * FROM pg_background_result_v2((hs[2]).pid, (hs[2]).cookie) AS (cnt bigint)
+        SELECT * FROM pg_background_result((hs[2]).pid, (hs[2]).cookie) AS (cnt bigint)
         UNION ALL
-        SELECT * FROM pg_background_result_v2((hs[3]).pid, (hs[3]).cookie) AS (cnt bigint)
+        SELECT * FROM pg_background_result((hs[3]).pid, (hs[3]).cookie) AS (cnt bigint)
     ) t;
 
     RAISE NOTICE 'Total rows: %', total_rows;
@@ -345,18 +345,18 @@ DECLARE
   done        bool;
   result_text text;
 BEGIN
-  h := pg_background_launch_v2(sql);
-  done := pg_background_wait_v2(h.pid, h.cookie, timeout_sec * 1000);
+  h := pg_background_launch(sql);
+  done := pg_background_wait(h.pid, h.cookie, timeout_sec * 1000);
 
   IF NOT done THEN
     RAISE WARNING 'Query timed out after % seconds, cancelling', timeout_sec;
-    PERFORM pg_background_cancel_v2(h.pid, h.cookie, 1000);
-    PERFORM pg_background_detach_v2(h.pid, h.cookie);
+    PERFORM pg_background_cancel(h.pid, h.cookie, 1000);
+    PERFORM pg_background_detach(h.pid, h.cookie);
     RETURN 'TIMEOUT';
   END IF;
 
   SELECT * INTO result_text
-    FROM pg_background_result_v2(h.pid, h.cookie) AS (res text);
+    FROM pg_background_result(h.pid, h.cookie) AS (res text);
   RETURN result_text;
 END;
 $$;
@@ -366,6 +366,6 @@ SELECT run_with_timeout('SELECT pg_sleep(10)', 5);  -- returns 'TIMEOUT'
 ```
 
 For one-shot uses where you only need metadata, prefer
-`pg_background_run_v2(sql, queue_size, timeout_ms, label)` — it does
+`pg_background_run(sql, queue_size, timeout_ms, label)` — it does
 launch + wait-with-timeout + outcome + detach in a single call and
-records the timeout in `pg_background_stats_v2().workers_timed_out`.
+records the timeout in `pg_background_stats().workers_timed_out`.

@@ -145,8 +145,8 @@ All code changes must include regression tests in `sql/pg_background.sql`:
 
 ```sql
 -- Test your new feature
-SELECT * FROM pg_background_launch_v2('SELECT 1') AS h \gset
-SELECT * FROM pg_background_result_v2(:h_pid, :h_cookie) AS (result int);
+SELECT * FROM pg_background_launch('SELECT 1') AS h \gset
+SELECT * FROM pg_background_result(:h_pid, :h_cookie) AS (result int);
 ```
 
 Update expected output in `expected/pg_background.out` if needed.
@@ -323,7 +323,7 @@ PRs require:
 SET client_min_messages = DEBUG1;
 
 -- Check active workers
-SELECT * FROM pg_background_list_v2() AS (...);
+SELECT * FROM pg_background_list() AS (...);
 
 -- Check DSM usage
 SELECT * FROM pg_shmem_allocations WHERE name LIKE '%pg_background%';

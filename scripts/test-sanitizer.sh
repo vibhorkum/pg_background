@@ -47,6 +47,12 @@ cleanup   # in case a previous run left the container behind
 # warnings into hard errors so CI catches them. detect_leaks=0 because
 # postmaster's small known leaks would otherwise drown out real issues
 # (PG core has its own leak-checking story).
+#
+# SAN_RUNTIME_OPTS must be applied to EVERY invocation of a sanitizer-built
+# binary, not just the server and the regression run. initdb shells out to
+# `postgres -V`, and `make`/`make install` shell out to `pg_config`; with
+# LeakSanitizer enabled those benign exit-time leaks make the tool exit
+# non-zero and abort the step (initdb then reports "postgres not found").
 SAN_CFLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all -O1 -g3"
 SAN_LDFLAGS="-fsanitize=address,undefined"
 SAN_RUNTIME_OPTS="ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1"
@@ -94,7 +100,7 @@ docker exec "${CONTAINER_NAME}" bash -c "
     useradd -m postgres || true
     mkdir -p /usr/local/pgsql/data
     chown postgres:postgres /usr/local/pgsql/data
-    sudo -u postgres /usr/local/pgsql/bin/initdb -D /usr/local/pgsql/data > /dev/null
+    sudo -u postgres env ${SAN_RUNTIME_OPTS} /usr/local/pgsql/bin/initdb -D /usr/local/pgsql/data > /dev/null
     {
         echo \"shared_preload_libraries = ''\"
         echo \"max_worker_processes = 16\"
@@ -107,7 +113,7 @@ docker exec "${CONTAINER_NAME}" bash -c "
     sudo -u postgres env ${SAN_RUNTIME_OPTS} \
         /usr/local/pgsql/bin/pg_ctl -D /usr/local/pgsql/data -l /tmp/pg.log start
     sleep 2
-    sudo -u postgres /usr/local/pgsql/bin/createdb regression || true
+    sudo -u postgres env ${SAN_RUNTIME_OPTS} /usr/local/pgsql/bin/createdb regression || true
 "
 
 step "Copying pg_background source into container..."
@@ -117,11 +123,11 @@ step "Building pg_background with matching sanitizer flags..."
 docker exec "${CONTAINER_NAME}" bash -c "
     cd /tmp/pg_background
     chown -R postgres:postgres .
-    sudo -u postgres env PATH=/usr/local/pgsql/bin:\$PATH \
+    sudo -u postgres env ${SAN_RUNTIME_OPTS} PATH=/usr/local/pgsql/bin:\$PATH \
         make CFLAGS='${SAN_CFLAGS}' LDFLAGS='${SAN_LDFLAGS}' clean
-    sudo -u postgres env PATH=/usr/local/pgsql/bin:\$PATH \
+    sudo -u postgres env ${SAN_RUNTIME_OPTS} PATH=/usr/local/pgsql/bin:\$PATH \
         make CFLAGS='${SAN_CFLAGS}' LDFLAGS='${SAN_LDFLAGS}'
-    sudo -u postgres env PATH=/usr/local/pgsql/bin:\$PATH \
+    sudo -u postgres env ${SAN_RUNTIME_OPTS} PATH=/usr/local/pgsql/bin:\$PATH \
         make install
 "
 

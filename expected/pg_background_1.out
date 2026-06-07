@@ -432,11 +432,11 @@ CREATE TABLE t_progress(id int);
 -- Launch worker that reports progress
 SELECT (h).pid AS p_pid, (h).cookie AS p_cookie
 FROM (SELECT pg_background_launch_v2($$
-  SELECT pg_background_report_progress_v2(0, 'Starting');
+  SELECT pg_background_report_progress(0, 'Starting');
   SELECT pg_sleep(0.1);
-  SELECT pg_background_report_progress_v2(50, 'Halfway');
+  SELECT pg_background_report_progress(50, 'Halfway');
   SELECT pg_sleep(0.1);
-  SELECT pg_background_report_progress_v2(100, 'Done');
+  SELECT pg_background_report_progress(100, 'Done');
   INSERT INTO t_progress VALUES (1);
 $$, 65536) AS h) s
 \gset
@@ -1133,7 +1133,7 @@ SELECT
 (1 row)
 
 -- Grant privileges
-SELECT pg_background_grant_privileges_v2('test_priv_user', false) AS grant_result;
+SELECT pg_background_grant_privileges('test_priv_user', false) AS grant_result;
  grant_result 
 --------------
  t
@@ -1149,7 +1149,7 @@ SELECT
 (1 row)
 
 -- Revoke privileges
-SELECT pg_background_revoke_privileges_v2('test_priv_user', false) AS revoke_result;
+SELECT pg_background_revoke_privileges('test_priv_user', false) AS revoke_result;
  revoke_result 
 ---------------
  t
@@ -1723,7 +1723,7 @@ NOTICE:  v1.10 run timeout (timed_out + elapsed_ms + stats counter) OK
 -- =========================================================================
 -- Refactor: metadata-driven grant/revoke helpers
 --
--- Contract: pg_background_grant_privileges_v2() must cover every
+-- Contract: pg_background_grant_privileges() must cover every
 -- extension-owned function (EXCEPT the SECURITY DEFINER privilege helpers,
 -- which must NOT be granted to the executor role -- privilege-escalation
 -- guard), type, and view, without an explicit list. This test pins the
@@ -1739,7 +1739,7 @@ DECLARE
     n_views_total       int;
 BEGIN
     CREATE ROLE pgbg_meta_test_role NOLOGIN;
-    PERFORM pg_background_grant_privileges_v2('pgbg_meta_test_role');
+    PERFORM pg_background_grant_privileges('pgbg_meta_test_role');
 
     -- Every extension-owned function EXCEPT the SECURITY DEFINER privilege
     -- helpers must now be EXECUTE-able by the role.
@@ -1770,9 +1770,9 @@ BEGIN
     -- Privilege-escalation guard: the SECURITY DEFINER helpers must NOT be
     -- reachable by the executor role.
     IF has_function_privilege('pgbg_meta_test_role',
-           'pg_background_grant_privileges_v2(text, boolean)', 'EXECUTE')
+           'pg_background_grant_privileges(text, boolean)', 'EXECUTE')
        OR has_function_privilege('pgbg_meta_test_role',
-           'pg_background_revoke_privileges_v2(text, boolean)', 'EXECUTE') THEN
+           'pg_background_revoke_privileges(text, boolean)', 'EXECUTE') THEN
         RAISE EXCEPTION 'security: SECURITY DEFINER privilege helpers reachable by role';
     END IF;
 
@@ -1802,7 +1802,7 @@ BEGIN
     END IF;
 
     -- Symmetric revoke: nothing should remain reachable.
-    PERFORM pg_background_revoke_privileges_v2('pgbg_meta_test_role');
+    PERFORM pg_background_revoke_privileges('pgbg_meta_test_role');
 
     SELECT count(*) INTO n_funcs_granted
       FROM pg_depend d
@@ -1822,7 +1822,7 @@ BEGIN
     RAISE NOTICE 'metadata-driven grant/revoke OK (% funcs, % views round-tripped)',
                  n_funcs_total, n_views_total;
 END$$;
-NOTICE:  metadata-driven grant/revoke OK (25 funcs, 2 views round-tripped)
+NOTICE:  metadata-driven grant/revoke OK (48 funcs, 2 views round-tripped)
 -- =========================================================================
 -- v1.10 Tier A: loop-killer helpers
 -- =========================================================================
@@ -2047,3 +2047,92 @@ BEGIN
     RAISE NOTICE 'Tier B application_name OK';
 END$$;
 NOTICE:  Tier B application_name OK
+-- =========================================================================
+-- 2.0: canonical (unsuffixed) API + deprecated _v2 alias parity
+--
+-- 2.0 retires the _v2 suffix: the unsuffixed names are canonical and every
+-- v2 API name that shipped through 1.10 is kept as a thin deprecated alias.
+-- This section exercises the canonical names directly and confirms the
+-- aliases still resolve to identical behavior (handles are interchangeable
+-- across the two name sets).
+-- =========================================================================
+-- Full lifecycle through the canonical names only. Fully consuming the
+-- result of a stopped worker is terminal and auto-removes the tracking
+-- entry, so no detach is needed here (detach() is exercised below).
+DO $$
+DECLARE
+    h pg_background_handle;
+    n int;
+BEGIN
+    h := pg_background_launch('SELECT 7 AS v', 65536, 'canon-lifecycle');
+    PERFORM pg_background_wait(h.pid, h.cookie);
+    SELECT v INTO n FROM pg_background_result(h.pid, h.cookie) AS r(v int);
+    IF n <> 7 THEN
+        RAISE EXCEPTION 'canonical lifecycle: expected 7, got %', n;
+    END IF;
+    RAISE NOTICE 'canonical launch/wait/result OK';
+END$$;
+NOTICE:  canonical launch/wait/result OK
+-- run() and run_query() canonical helpers.
+SELECT (pg_background_run('SELECT 1', timeout_ms => 5000)).completed AS run_completed;
+ run_completed 
+---------------
+ t
+(1 row)
+
+SELECT * FROM pg_background_run_query('SELECT 42 AS n', timeout_ms => 5000, col_def => 'n int') AS r(n int);
+ n  
+----
+ 42
+(1 row)
+
+-- Alias parity: a handle from the canonical launch is operable via the _v2
+-- alias, and vice versa (same C symbol, same session hash).
+DO $$
+DECLARE
+    h pg_background_handle;
+    ok bool;
+BEGIN
+    -- launch canonical, wait/detach via aliases
+    h := pg_background_launch('SELECT pg_sleep(0)');
+    ok := pg_background_wait_v2(h.pid, h.cookie, 5000);
+    IF NOT ok THEN RAISE EXCEPTION 'alias wait did not observe completion'; END IF;
+    PERFORM pg_background_detach_v2(h.pid, h.cookie);
+
+    -- launch via alias, wait/detach canonical
+    h := pg_background_launch_v2('SELECT pg_sleep(0)');
+    ok := pg_background_wait(h.pid, h.cookie, 5000);
+    IF NOT ok THEN RAISE EXCEPTION 'canonical wait did not observe alias-launched worker'; END IF;
+    PERFORM pg_background_detach(h.pid, h.cookie);
+
+    RAISE NOTICE 'canonical/alias handle parity OK';
+END$$;
+NOTICE:  canonical/alias handle parity OK
+-- The list view reads the canonical pg_background_list() SRF; the deprecated
+-- list_v2() returns the same shape. Both should agree on the (now empty) set.
+SELECT (SELECT count(*) FROM pg_background_list)
+     = (SELECT count(*) FROM pg_background_list_v2()
+          AS l(pid int4, cookie int8, launched_at timestamptz, user_id oid,
+               queue_size int4, state text, sql_preview text, last_error text,
+               consumed bool, label text)) AS list_view_matches_srf;
+ list_view_matches_srf 
+-----------------------
+ t
+(1 row)
+
+-- The canonical SECURITY DEFINER privilege helpers must not be reachable by
+-- a freshly-created role (privilege-escalation guard), mirroring the
+-- metadata contract test above.
+DO $$
+BEGIN
+    CREATE ROLE pgbg_canon_priv_role NOLOGIN;
+    IF has_function_privilege('pgbg_canon_priv_role',
+           'pg_background_grant_privileges(text, boolean)', 'EXECUTE')
+       OR has_function_privilege('pgbg_canon_priv_role',
+           'pg_background_revoke_privileges(text, boolean)', 'EXECUTE') THEN
+        RAISE EXCEPTION 'security: canonical privilege helpers reachable by PUBLIC/role';
+    END IF;
+    DROP ROLE pgbg_canon_priv_role;
+    RAISE NOTICE 'canonical privilege-helper lockdown OK';
+END$$;
+NOTICE:  canonical privilege-helper lockdown OK

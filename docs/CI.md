@@ -124,11 +124,11 @@ The workflow automatically cancels in-progress runs when new commits are pushed 
 
 The regression tests verify all pg_background v1.8 functionality:
 
-- **v1 API**: `pg_background_launch()`, `pg_background_result()`, `pg_background_detach()`
-- **v2 API**: `pg_background_launch_v2()`, `pg_background_detach_v2()`, `pg_background_cancel_v2()`
-- **Wait Functions**: `pg_background_wait_v2()`, `pg_background_wait_v2_timeout()`
-- **Progress Reporting**: `pg_background_progress()`, `pg_background_get_progress_v2()`
-- **Statistics**: `pg_background_stats_v2()`, `pg_background_list_v2()`
+- **Core API** (canonical, unsuffixed in 2.0): `pg_background_launch()`, `pg_background_result()`, `pg_background_detach()`, `pg_background_cancel()`
+- **Deprecated `_v2` aliases**: `pg_background_launch_v2()`, … (kept through 2.x, removed in 3.0)
+- **Wait Functions**: `pg_background_wait()` (single entrypoint; `timeout_ms` arg replaces the old `_timeout` variant)
+- **Progress Reporting**: `pg_background_report_progress()`, `pg_background_get_progress()`
+- **Statistics**: `pg_background_stats()`, `pg_background_list` (view) / `pg_background_list()`
 - **GUC Settings**: `pg_background.max_workers`, `pg_background.default_queue_size`, `pg_background.worker_timeout`
 
 ## Manual Local Testing

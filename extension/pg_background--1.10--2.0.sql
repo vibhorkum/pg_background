@@ -4,80 +4,212 @@
 -- ----------------------------------------------------------------------
 -- pg_background 1.10 -> 2.0 upgrade.
 --
--- This is a major release. The script:
+-- This is a major release. To guarantee that an upgraded 2.0 install is
+-- byte-for-byte identical to a fresh `CREATE EXTENSION pg_background`
+-- (same function set, same bodies, same grants), this script drops the
+-- entire 1.10 SQL surface (everything except the unchanged
+-- pg_background_handle type and the pgbackground_role role) and then
+-- recreates the full 2.0 surface using the exact definitions from
+-- extension/pg_background--2.0.sql.
 --
---   1. drops the v1 entrypoints (pg_background_launch / _result / _detach);
---   2. collapses pg_background_cancel_v2 + cancel_v2_grace into one
---      function with grace_ms DEFAULT 0;
---   3. collapses pg_background_wait_v2 + wait_v2_timeout into one
---      function returning bool, with timeout_ms DEFAULT 0 = block forever;
---   4. drops pg_background_status_v2 (drivers can call
---      to_jsonb(pg_background_outcome_v2(...)) themselves);
---   5. renames pg_background_progress to pg_background_report_progress_v2
---      and pg_background_progress (type) to pg_background_progress_info;
---   6. renames the privilege helpers to pg_background_grant_privileges_v2
---      and pg_background_revoke_privileges_v2;
---   7. extends pg_background_stats / result_info / error / run_result
---      composite types with forward-compatibility columns;
---   8. adds pg_background_record_timeout_v2 (internal counter bumper).
+-- 2.0 highlights (see docs/MIGRATION.md for the full list):
+--   * v1 API (pg_background_launch / _result / _detach) removed.
+--   * cancel/wait _grace / _timeout variants collapsed into a single
+--     function each, with grace_ms / timeout_ms DEFAULT 0.
+--   * pg_background_status_v2 removed.
+--   * pg_background_progress (function/type) renamed.
+--   * privilege helpers renamed.
+--   * composite types widened with forward-compatibility columns.
+--   * the _v2 suffix is retired: unsuffixed names are now canonical and
+--     every _v2 name is kept as a DEPRECATED alias (removed in 3.0).
 --
--- Anything an existing user-written script references that this upgrade
--- removes (v1 functions, the _grace / _timeout suffixed variants,
--- status_v2, the unprefixed grant helpers) needs to be ported. See
--- docs/MIGRATION.md.
+-- Re-creating member functions changes their OIDs, but every grant is
+-- reapplied at the end via pg_background_grant_privileges('pgbackground_role'),
+-- so the privilege model is preserved. Explicit grants you made to other
+-- roles for renamed objects must be reissued (see docs/MIGRATION.md).
 -- ----------------------------------------------------------------------
 
 -- ----------------------------------------------------------------------
--- Step 1: drop dependent SQL/PL helpers so we can reshape the types.
+-- Step 1: drop the views (they depend on the list function).
+-- ----------------------------------------------------------------------
+DROP VIEW IF EXISTS pg_background_activity;
+DROP VIEW IF EXISTS pg_background_list;
+
+-- ----------------------------------------------------------------------
+-- Step 2: drop every 1.10 function (and any 2.0 name, for idempotency).
+-- Functions are dropped before types so the changing composite types have
+-- no dependents left.
 -- ----------------------------------------------------------------------
 
+-- v1 API
+DROP FUNCTION IF EXISTS pg_background_launch(pg_catalog.text, pg_catalog.int4);
+DROP FUNCTION IF EXISTS pg_background_result(pg_catalog.int4);
+DROP FUNCTION IF EXISTS pg_background_detach(pg_catalog.int4);
+
+-- core primitives (v2 names that survive 1.10)
+DROP FUNCTION IF EXISTS pg_background_launch_v2(pg_catalog.text, pg_catalog.int4);
+DROP FUNCTION IF EXISTS pg_background_launch_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.text);
+DROP FUNCTION IF EXISTS pg_background_submit_v2(pg_catalog.text, pg_catalog.int4);
+DROP FUNCTION IF EXISTS pg_background_submit_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.text);
+DROP FUNCTION IF EXISTS pg_background_result_v2(pg_catalog.int4, pg_catalog.int8);
+DROP FUNCTION IF EXISTS pg_background_detach_v2(pg_catalog.int4, pg_catalog.int8);
+DROP FUNCTION IF EXISTS pg_background_list_v2();
+DROP FUNCTION IF EXISTS pg_background_detach_all_v2();
+DROP FUNCTION IF EXISTS pg_background_cancel_all_v2();
+DROP FUNCTION IF EXISTS pg_background_full_sql_v2(pg_catalog.int4, pg_catalog.int8);
+
+-- collapsed cancel / wait (all historical signatures)
+DROP FUNCTION IF EXISTS pg_background_cancel_v2(pg_catalog.int4, pg_catalog.int8);
+DROP FUNCTION IF EXISTS pg_background_cancel_v2(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4);
+DROP FUNCTION IF EXISTS pg_background_cancel_v2_grace(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4);
+DROP FUNCTION IF EXISTS pg_background_wait_v2(pg_catalog.int4, pg_catalog.int8);
+DROP FUNCTION IF EXISTS pg_background_wait_v2(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4);
+DROP FUNCTION IF EXISTS pg_background_wait_v2_timeout(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4);
+
+-- stats / progress
+DROP FUNCTION IF EXISTS pg_background_stats_v2();
+DROP FUNCTION IF EXISTS pg_background_record_timeout_v2();
+DROP FUNCTION IF EXISTS pg_background_progress(pg_catalog.int4, pg_catalog.text);
+DROP FUNCTION IF EXISTS pg_background_report_progress_v2(pg_catalog.int4, pg_catalog.text);
+DROP FUNCTION IF EXISTS pg_background_get_progress_v2(pg_catalog.int4, pg_catalog.int8);
+
+-- readers
+DROP FUNCTION IF EXISTS pg_background_result_info_v2(pg_catalog.int4, pg_catalog.int8);
+DROP FUNCTION IF EXISTS pg_background_error_info_v2(pg_catalog.int4, pg_catalog.int8);
+
+-- combined outcome / run / status
+DROP FUNCTION IF EXISTS pg_background_outcome_v2(pg_catalog.int4, pg_catalog.int8);
 DROP FUNCTION IF EXISTS pg_background_status_v2(pg_catalog.int4, pg_catalog.int8);
+DROP FUNCTION IF EXISTS pg_background_run_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.int4, pg_catalog.text);
+
+-- Tier A helpers
 DROP FUNCTION IF EXISTS pg_background_run_query_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.int4, pg_catalog.text, pg_catalog.text);
 DROP FUNCTION IF EXISTS pg_background_drain_v2(pg_background_handle[], pg_catalog.int4);
 DROP FUNCTION IF EXISTS pg_background_wait_any_v2(pg_background_handle[], pg_catalog.int4);
 DROP FUNCTION IF EXISTS pg_background_cancel_by_label_v2(pg_catalog.text, pg_catalog.int4);
 DROP FUNCTION IF EXISTS pg_background_purge_v2();
-DROP FUNCTION IF EXISTS pg_background_run_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.int4, pg_catalog.text);
-DROP FUNCTION IF EXISTS pg_background_outcome_v2(pg_catalog.int4, pg_catalog.int8);
 
--- ----------------------------------------------------------------------
--- Step 2: drop readers whose return types are about to change.
--- ----------------------------------------------------------------------
-
-DROP FUNCTION IF EXISTS pg_background_stats_v2();
-DROP FUNCTION IF EXISTS pg_background_result_info_v2(pg_catalog.int4, pg_catalog.int8);
-DROP FUNCTION IF EXISTS pg_background_error_info_v2(pg_catalog.int4, pg_catalog.int8);
-DROP FUNCTION IF EXISTS pg_background_get_progress_v2(pg_catalog.int4, pg_catalog.int8);
-
--- ----------------------------------------------------------------------
--- Step 3: drop the changing composite types.
--- ----------------------------------------------------------------------
-
-DROP TYPE IF EXISTS pg_background_stats;
-DROP TYPE IF EXISTS pg_background_progress;
-DROP TYPE IF EXISTS pg_background_result_info;
-DROP TYPE IF EXISTS pg_background_error;
-DROP TYPE IF EXISTS pg_background_run_result;
-
--- ----------------------------------------------------------------------
--- Step 4: drop the v1 API and the collapsed/renamed primitives.
--- ----------------------------------------------------------------------
-
-DROP FUNCTION IF EXISTS pg_background_launch(pg_catalog.text, pg_catalog.int4);
-DROP FUNCTION IF EXISTS pg_background_result(pg_catalog.int4);
-DROP FUNCTION IF EXISTS pg_background_detach(pg_catalog.int4);
-
-DROP FUNCTION IF EXISTS pg_background_cancel_v2(pg_catalog.int4, pg_catalog.int8);
-DROP FUNCTION IF EXISTS pg_background_cancel_v2_grace(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4);
-DROP FUNCTION IF EXISTS pg_background_wait_v2(pg_catalog.int4, pg_catalog.int8);
-DROP FUNCTION IF EXISTS pg_background_wait_v2_timeout(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4);
-DROP FUNCTION IF EXISTS pg_background_progress(pg_catalog.int4, pg_catalog.text);
-
+-- privilege helpers (old unprefixed + any prior 2.0 names)
 DROP FUNCTION IF EXISTS grant_pg_background_privileges(pg_catalog.text, pg_catalog.bool);
 DROP FUNCTION IF EXISTS revoke_pg_background_privileges(pg_catalog.text, pg_catalog.bool);
+DROP FUNCTION IF EXISTS pg_background_grant_privileges_v2(pg_catalog.text, pg_catalog.bool);
+DROP FUNCTION IF EXISTS pg_background_revoke_privileges_v2(pg_catalog.text, pg_catalog.bool);
+DROP FUNCTION IF EXISTS pg_background_drop_executor_role();
 
 -- ----------------------------------------------------------------------
--- Step 5: recreate types with the new shape.
+-- Step 3: drop the changing composite types (handle is unchanged, kept).
+-- ----------------------------------------------------------------------
+DROP TYPE IF EXISTS pg_background_stats;
+DROP TYPE IF EXISTS pg_background_progress;
+DROP TYPE IF EXISTS pg_background_progress_info;
+DROP TYPE IF EXISTS pg_background_result_info;
+DROP TYPE IF EXISTS pg_background_error;
+DROP TYPE IF EXISTS pg_background_outcome;
+DROP TYPE IF EXISTS pg_background_run_result;
+
+-- ======================================================================
+-- Step 4: recreate the full 2.0 surface. The remainder of this file is
+-- identical to extension/pg_background--2.0.sql from the handle type
+-- onward (minus the CREATE TYPE pg_background_handle, which is unchanged
+-- and survives the upgrade). Keep the two in sync.
+-- ======================================================================
+
+-- ======================================================================
+-- Canonical API (unsuffixed). The _v2 aliases live in a dedicated block
+-- near the end of this file.
+-- ======================================================================
+
+-- 2-arg overload (STRICT for NULL safety)
+CREATE FUNCTION pg_background_launch(
+    sql pg_catalog.text,
+    queue_size pg_catalog.int4 DEFAULT 0
+)
+RETURNS pg_background_handle
+AS 'MODULE_PATHNAME', 'pg_background_launch'
+LANGUAGE C STRICT;
+
+-- 3-arg overload with label parameter (not STRICT to allow NULL label)
+CREATE FUNCTION pg_background_launch(
+    sql pg_catalog.text,
+    queue_size pg_catalog.int4,
+    label pg_catalog.text
+)
+RETURNS pg_background_handle
+AS 'MODULE_PATHNAME', 'pg_background_launch'
+LANGUAGE C;
+
+-- 2-arg submit
+CREATE FUNCTION pg_background_submit(
+    sql pg_catalog.text,
+    queue_size pg_catalog.int4 DEFAULT 0
+)
+RETURNS pg_background_handle
+AS 'MODULE_PATHNAME', 'pg_background_submit'
+LANGUAGE C STRICT;
+
+-- 3-arg submit with label
+CREATE FUNCTION pg_background_submit(
+    sql pg_catalog.text,
+    queue_size pg_catalog.int4,
+    label pg_catalog.text
+)
+RETURNS pg_background_handle
+AS 'MODULE_PATHNAME', 'pg_background_submit'
+LANGUAGE C;
+
+CREATE FUNCTION pg_background_result(
+    pid pg_catalog.int4,
+    cookie pg_catalog.int8
+)
+RETURNS SETOF pg_catalog.record
+AS 'MODULE_PATHNAME', 'pg_background_result'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_background_detach(
+    pid pg_catalog.int4,
+    cookie pg_catalog.int8
+)
+RETURNS pg_catalog.void
+AS 'MODULE_PATHNAME', 'pg_background_detach'
+LANGUAGE C STRICT;
+
+-- single cancel entrypoint with optional grace_ms (0 = immediate).
+CREATE FUNCTION pg_background_cancel(
+    pid pg_catalog.int4,
+    cookie pg_catalog.int8,
+    grace_ms pg_catalog.int4 DEFAULT 0
+)
+RETURNS pg_catalog.void
+AS 'MODULE_PATHNAME', 'pg_background_cancel'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION pg_background_cancel(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4) IS
+'Cancel a worker. grace_ms = 0 sends SIGTERM only; grace_ms > 0 waits that '
+'many ms for clean exit before SIGKILL (capped at 1 hour).';
+
+-- single wait entrypoint with optional timeout_ms (<=0 blocks forever).
+CREATE FUNCTION pg_background_wait(
+    pid pg_catalog.int4,
+    cookie pg_catalog.int8,
+    timeout_ms pg_catalog.int4 DEFAULT 0
+)
+RETURNS pg_catalog.bool
+AS 'MODULE_PATHNAME', 'pg_background_wait'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION pg_background_wait(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4) IS
+'Wait for a worker to exit. timeout_ms <= 0 blocks indefinitely (latch-based, '
+'no polling) and always returns true; timeout_ms > 0 waits up to N ms and '
+'returns true if the worker stopped, false on timeout.';
+
+-- list (record; call with column definition list, or use pg_background_list view)
+CREATE FUNCTION pg_background_list()
+RETURNS SETOF pg_catalog.record
+AS 'MODULE_PATHNAME', 'pg_background_list'
+LANGUAGE C;
+
+-- ----------------------------------------------------------------------
+-- statistics and progress types
 -- ----------------------------------------------------------------------
 
 CREATE TYPE pg_background_stats AS (
@@ -95,6 +227,55 @@ CREATE TYPE pg_background_progress_info AS (
     progress_pct  pg_catalog.int4,
     progress_msg  pg_catalog.text
 );
+
+-- ----------------------------------------------------------------------
+-- statistics and progress functions
+-- ----------------------------------------------------------------------
+
+CREATE FUNCTION pg_background_stats()
+RETURNS pg_background_stats
+AS 'MODULE_PATHNAME', 'pg_background_stats'
+LANGUAGE C;
+
+COMMENT ON FUNCTION pg_background_stats() IS
+'Returns session-local statistics about background workers: launched, completed, '
+'failed, canceled, timed_out, active count, average execution time, max workers.';
+
+CREATE FUNCTION pg_background_record_timeout()
+RETURNS pg_catalog.void
+AS 'MODULE_PATHNAME', 'pg_background_record_timeout'
+LANGUAGE C;
+
+COMMENT ON FUNCTION pg_background_record_timeout() IS
+'Internal: increment session_stats.workers_timed_out. Called from '
+'pg_background_run when a launched worker exceeds its timeout.';
+
+CREATE FUNCTION pg_background_report_progress(
+    pct pg_catalog.int4,
+    msg pg_catalog.text DEFAULT NULL
+)
+RETURNS pg_catalog.void
+AS 'MODULE_PATHNAME', 'pg_background_report_progress'
+LANGUAGE C;
+
+COMMENT ON FUNCTION pg_background_report_progress(pg_catalog.int4, pg_catalog.text) IS
+'Report progress from within a background worker. Call from your SQL: '
+'SELECT pg_background_report_progress(50, ''Halfway done'');';
+
+CREATE FUNCTION pg_background_get_progress(
+    pid pg_catalog.int4,
+    cookie pg_catalog.int8
+)
+RETURNS pg_background_progress_info
+AS 'MODULE_PATHNAME', 'pg_background_get_progress'
+LANGUAGE C;
+
+COMMENT ON FUNCTION pg_background_get_progress(pg_catalog.int4, pg_catalog.int8) IS
+'Get the current progress of a background worker. Returns NULL if progress not yet reported.';
+
+-- ----------------------------------------------------------------------
+-- result info and error types
+-- ----------------------------------------------------------------------
 
 CREATE TYPE pg_background_result_info AS (
     row_count       pg_catalog.int8,
@@ -117,6 +298,176 @@ CREATE TYPE pg_background_error AS (
     constraint_name  pg_catalog.text
 );
 
+-- ----------------------------------------------------------------------
+-- Observability functions
+-- ----------------------------------------------------------------------
+
+CREATE FUNCTION pg_background_result_info(
+    pid pg_catalog.int4,
+    cookie pg_catalog.int8
+)
+RETURNS pg_background_result_info
+AS 'MODULE_PATHNAME', 'pg_background_result_info'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION pg_background_result_info(pg_catalog.int4, pg_catalog.int8) IS
+'Get result metadata (row_count, command_tag, completed, has_error, started_at, finished_at) without consuming results.';
+
+CREATE FUNCTION pg_background_error_info(
+    pid pg_catalog.int4,
+    cookie pg_catalog.int8
+)
+RETURNS pg_background_error
+AS 'MODULE_PATHNAME', 'pg_background_error_info'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION pg_background_error_info(pg_catalog.int4, pg_catalog.int8) IS
+'Get structured error information (sqlstate, message, detail, hint, context, '
+'schema_name, table_name, column_name, constraint_name) from a worker. '
+'Returns NULL if no error.';
+
+-- ----------------------------------------------------------------------
+-- Batch operations
+-- ----------------------------------------------------------------------
+
+CREATE FUNCTION pg_background_detach_all()
+RETURNS pg_catalog.int4
+AS 'MODULE_PATHNAME', 'pg_background_detach_all'
+LANGUAGE C;
+
+COMMENT ON FUNCTION pg_background_detach_all() IS
+'Detach all tracked workers in the current session. Returns number of workers detached.';
+
+CREATE FUNCTION pg_background_cancel_all()
+RETURNS pg_catalog.int4
+AS 'MODULE_PATHNAME', 'pg_background_cancel_all'
+LANGUAGE C;
+
+COMMENT ON FUNCTION pg_background_cancel_all() IS
+'Cancel all running workers in the current session. Returns number of workers for which cancel was requested.';
+
+-- ----------------------------------------------------------------------
+-- Convenience view over pg_background_list()
+-- ----------------------------------------------------------------------
+
+CREATE VIEW pg_background_list AS
+  SELECT pid, cookie, launched_at, user_id, queue_size,
+         state, sql_preview, last_error, consumed, label
+    FROM pg_background_list()
+      AS l(pid pg_catalog.int4, cookie pg_catalog.int8,
+           launched_at pg_catalog.timestamptz, user_id pg_catalog.oid,
+           queue_size pg_catalog.int4, state pg_catalog.text,
+           sql_preview pg_catalog.text, last_error pg_catalog.text,
+           consumed pg_catalog.bool, label pg_catalog.text);
+
+COMMENT ON VIEW pg_background_list IS
+'Session-local list of background workers tracked by this session. '
+'Wraps pg_background_list() so callers do not have to repeat a column-definition list.';
+
+-- ----------------------------------------------------------------------
+-- Joined view (worker registry + pg_stat_activity)
+-- ----------------------------------------------------------------------
+
+CREATE VIEW pg_background_activity AS
+  SELECT l.pid,
+         l.cookie,
+         l.launched_at,
+         l.user_id,
+         l.queue_size,
+         l.state            AS pgbg_state,
+         l.sql_preview,
+         l.last_error,
+         l.consumed,
+         l.label,
+         s.state            AS backend_state,
+         s.wait_event_type,
+         s.wait_event,
+         s.xact_start,
+         s.query_start,
+         s.backend_start,
+         s.query
+    FROM pg_background_list l
+    LEFT JOIN pg_catalog.pg_stat_activity s ON s.pid = l.pid;
+
+COMMENT ON VIEW pg_background_activity IS
+'pg_background_list joined with pg_stat_activity for combined worker + backend visibility.';
+
+-- ----------------------------------------------------------------------
+-- Combined outcome snapshot type and never-raises helper
+-- ----------------------------------------------------------------------
+
+CREATE TYPE pg_background_outcome AS (
+    pid             pg_catalog.int4,
+    cookie          pg_catalog.int8,
+    state           pg_catalog.text,
+    consumed        pg_catalog.bool,
+    completed       pg_catalog.bool,
+    has_error       pg_catalog.bool,
+    row_count       pg_catalog.int8,
+    command_tag     pg_catalog.text,
+    sqlstate        pg_catalog.text,
+    error_message   pg_catalog.text,
+    label           pg_catalog.text,
+    launched_at     pg_catalog.timestamptz
+);
+
+CREATE FUNCTION pg_background_outcome(
+    p_pid pg_catalog.int4,
+    p_cookie pg_catalog.int8
+)
+RETURNS pg_background_outcome
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    out pg_background_outcome;
+    ri  pg_background_result_info;
+    er  pg_background_error;
+BEGIN
+    out.pid    := p_pid;
+    out.cookie := p_cookie;
+
+    /*
+     * Reading from pg_background_list cannot raise — the list function
+     * returns a snapshot of the session-local hash, never errors on a
+     * missing PID, and the SELECT INTO simply leaves the targets NULL
+     * when no row matches. No EXCEPTION wrapper needed.
+     */
+    SELECT l.state, l.consumed, l.label, l.launched_at
+      INTO out.state, out.consumed, out.label, out.launched_at
+      FROM pg_background_list l
+     WHERE l.pid = p_pid AND l.cookie = p_cookie;
+
+    BEGIN
+        ri := pg_background_result_info(p_pid, p_cookie);
+        out.completed   := ri.completed;
+        out.has_error   := ri.has_error;
+        out.row_count   := ri.row_count;
+        out.command_tag := ri.command_tag;
+    EXCEPTION WHEN OTHERS THEN
+        NULL;
+    END;
+
+    BEGIN
+        er := pg_background_error_info(p_pid, p_cookie);
+        out.sqlstate      := er.sqlstate;
+        out.error_message := er.message;
+    EXCEPTION WHEN OTHERS THEN
+        NULL;
+    END;
+
+    RETURN out;
+END;
+$function$;
+
+COMMENT ON FUNCTION pg_background_outcome(pg_catalog.int4, pg_catalog.int8) IS
+'Combined status snapshot (state + result_info + error_info) for a worker handle. '
+'Never raises; returns NULL fields when information is unavailable.';
+
+-- ----------------------------------------------------------------------
+-- pg_background_run_result extends pg_background_outcome with run-specific
+-- fields (timed_out, elapsed_ms).
+-- ----------------------------------------------------------------------
+
 CREATE TYPE pg_background_run_result AS (
     pid             pg_catalog.int4,
     cookie          pg_catalog.int8,
@@ -134,162 +485,7 @@ CREATE TYPE pg_background_run_result AS (
     elapsed_ms      pg_catalog.int8
 );
 
--- ----------------------------------------------------------------------
--- Step 6: collapsed cancel_v2 / wait_v2 entrypoints.
--- ----------------------------------------------------------------------
-
-CREATE FUNCTION pg_background_cancel_v2(
-    pid pg_catalog.int4,
-    cookie pg_catalog.int8,
-    grace_ms pg_catalog.int4 DEFAULT 0
-)
-RETURNS pg_catalog.void
-AS 'MODULE_PATHNAME', 'pg_background_cancel_v2'
-LANGUAGE C STRICT;
-
-COMMENT ON FUNCTION pg_background_cancel_v2(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4) IS
-'Cancel a worker. grace_ms = 0 sends SIGTERM only; grace_ms > 0 waits that '
-'many ms for clean exit before SIGKILL (capped at 1 hour).';
-
-CREATE FUNCTION pg_background_wait_v2(
-    pid pg_catalog.int4,
-    cookie pg_catalog.int8,
-    timeout_ms pg_catalog.int4 DEFAULT 0
-)
-RETURNS pg_catalog.bool
-AS 'MODULE_PATHNAME', 'pg_background_wait_v2'
-LANGUAGE C STRICT;
-
-COMMENT ON FUNCTION pg_background_wait_v2(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4) IS
-'Wait for a worker to exit. timeout_ms <= 0 blocks indefinitely (latch-based, '
-'no polling) and always returns true; timeout_ms > 0 waits up to N ms and '
-'returns true if the worker stopped, false on timeout.';
-
--- ----------------------------------------------------------------------
--- Step 7: readers (return types are the new ones).
--- ----------------------------------------------------------------------
-
-CREATE FUNCTION pg_background_stats_v2()
-RETURNS pg_background_stats
-AS 'MODULE_PATHNAME', 'pg_background_stats_v2'
-LANGUAGE C;
-
-COMMENT ON FUNCTION pg_background_stats_v2() IS
-'Returns session-local statistics about background workers: launched, completed, '
-'failed, canceled, timed_out, active count, average execution time, max workers.';
-
-CREATE FUNCTION pg_background_record_timeout_v2()
-RETURNS pg_catalog.void
-AS 'MODULE_PATHNAME', 'pg_background_record_timeout_v2'
-LANGUAGE C;
-
-COMMENT ON FUNCTION pg_background_record_timeout_v2() IS
-'Internal: increment session_stats.workers_timed_out. Called from '
-'pg_background_run_v2 when a launched worker exceeds its timeout.';
-
-CREATE FUNCTION pg_background_report_progress_v2(
-    pct pg_catalog.int4,
-    msg pg_catalog.text DEFAULT NULL
-)
-RETURNS pg_catalog.void
-AS 'MODULE_PATHNAME', 'pg_background_report_progress_v2'
-LANGUAGE C;
-
-COMMENT ON FUNCTION pg_background_report_progress_v2(pg_catalog.int4, pg_catalog.text) IS
-'Report progress from within a background worker. Call from your SQL: '
-'SELECT pg_background_report_progress_v2(50, ''Halfway done'');';
-
-CREATE FUNCTION pg_background_get_progress_v2(
-    pid pg_catalog.int4,
-    cookie pg_catalog.int8
-)
-RETURNS pg_background_progress_info
-AS 'MODULE_PATHNAME', 'pg_background_get_progress_v2'
-LANGUAGE C;
-
-COMMENT ON FUNCTION pg_background_get_progress_v2(pg_catalog.int4, pg_catalog.int8) IS
-'Get the current progress of a background worker. Returns NULL if progress not yet reported.';
-
-CREATE FUNCTION pg_background_result_info_v2(
-    pid pg_catalog.int4,
-    cookie pg_catalog.int8
-)
-RETURNS pg_background_result_info
-AS 'MODULE_PATHNAME', 'pg_background_result_info_v2'
-LANGUAGE C STRICT;
-
-COMMENT ON FUNCTION pg_background_result_info_v2(pg_catalog.int4, pg_catalog.int8) IS
-'Get result metadata (row_count, command_tag, completed, has_error, started_at, finished_at) without consuming results.';
-
-CREATE FUNCTION pg_background_error_info_v2(
-    pid pg_catalog.int4,
-    cookie pg_catalog.int8
-)
-RETURNS pg_background_error
-AS 'MODULE_PATHNAME', 'pg_background_error_info_v2'
-LANGUAGE C STRICT;
-
-COMMENT ON FUNCTION pg_background_error_info_v2(pg_catalog.int4, pg_catalog.int8) IS
-'Get structured error information (sqlstate, message, detail, hint, context, '
-'schema_name, table_name, column_name, constraint_name) from a worker. '
-'Returns NULL if no error.';
-
--- ----------------------------------------------------------------------
--- Step 8: outcome helper (body unchanged but recreated for hygiene).
--- ----------------------------------------------------------------------
-
-CREATE FUNCTION pg_background_outcome_v2(
-    p_pid pg_catalog.int4,
-    p_cookie pg_catalog.int8
-)
-RETURNS pg_background_outcome
-LANGUAGE plpgsql
-AS $function$
-DECLARE
-    out pg_background_outcome;
-    ri  pg_background_result_info;
-    er  pg_background_error;
-BEGIN
-    out.pid    := p_pid;
-    out.cookie := p_cookie;
-
-    /* Reading from pg_background_list cannot raise — see fresh-install notes. */
-    SELECT l.state, l.consumed, l.label, l.launched_at
-      INTO out.state, out.consumed, out.label, out.launched_at
-      FROM pg_background_list l
-     WHERE l.pid = p_pid AND l.cookie = p_cookie;
-
-    BEGIN
-        ri := pg_background_result_info_v2(p_pid, p_cookie);
-        out.completed   := ri.completed;
-        out.has_error   := ri.has_error;
-        out.row_count   := ri.row_count;
-        out.command_tag := ri.command_tag;
-    EXCEPTION WHEN OTHERS THEN
-        NULL;
-    END;
-
-    BEGIN
-        er := pg_background_error_info_v2(p_pid, p_cookie);
-        out.sqlstate      := er.sqlstate;
-        out.error_message := er.message;
-    EXCEPTION WHEN OTHERS THEN
-        NULL;
-    END;
-
-    RETURN out;
-END;
-$function$;
-
-COMMENT ON FUNCTION pg_background_outcome_v2(pg_catalog.int4, pg_catalog.int8) IS
-'Combined status snapshot (state + result_info + error_info) for a worker handle. '
-'Never raises; returns NULL fields when information is unavailable.';
-
--- ----------------------------------------------------------------------
--- Step 9: run_v2 with extended run_result and timeout-counter bump.
--- ----------------------------------------------------------------------
-
-CREATE FUNCTION pg_background_run_v2(
+CREATE FUNCTION pg_background_run(
     sql        pg_catalog.text,
     queue_size pg_catalog.int4 DEFAULT 0,
     timeout_ms pg_catalog.int4 DEFAULT 0,
@@ -308,31 +504,32 @@ BEGIN
     start_ts := pg_catalog.clock_timestamp();
 
     IF label IS NULL THEN
-        h := pg_background_launch_v2(sql, queue_size);
+        h := pg_background_launch(sql, queue_size);
     ELSE
-        h := pg_background_launch_v2(sql, queue_size, label);
+        h := pg_background_launch(sql, queue_size, label);
     END IF;
 
     IF timeout_ms > 0 THEN
-        finished := pg_background_wait_v2(h.pid, h.cookie, timeout_ms);
+        finished := pg_background_wait(h.pid, h.cookie, timeout_ms);
         IF NOT finished THEN
             BEGIN
-                PERFORM pg_background_cancel_v2(h.pid, h.cookie, 1000);
+                PERFORM pg_background_cancel(h.pid, h.cookie, 1000);
             EXCEPTION WHEN OTHERS THEN
                 NULL;
             END;
+            /* Account for run-driven timeout separately from explicit cancels. */
             BEGIN
-                PERFORM pg_background_record_timeout_v2();
+                PERFORM pg_background_record_timeout();
             EXCEPTION WHEN OTHERS THEN
                 NULL;
             END;
         END IF;
     ELSE
-        PERFORM pg_background_wait_v2(h.pid, h.cookie);
+        PERFORM pg_background_wait(h.pid, h.cookie);
         finished := true;
     END IF;
 
-    o := pg_background_outcome_v2(h.pid, h.cookie);
+    o := pg_background_outcome(h.pid, h.cookie);
     out.pid           := o.pid;
     out.cookie        := o.cookie;
     out.state         := o.state;
@@ -348,7 +545,7 @@ BEGIN
     out.timed_out     := NOT finished;
 
     BEGIN
-        PERFORM pg_background_detach_v2(h.pid, h.cookie);
+        PERFORM pg_background_detach(h.pid, h.cookie);
     EXCEPTION WHEN OTHERS THEN
         NULL;
     END;
@@ -358,16 +555,18 @@ BEGIN
 END;
 $function$;
 
-COMMENT ON FUNCTION pg_background_run_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.int4, pg_catalog.text) IS
+COMMENT ON FUNCTION pg_background_run(pg_catalog.text, pg_catalog.int4, pg_catalog.int4, pg_catalog.text) IS
 'Run a SQL command in a background worker and wait for completion. Returns '
 'the full outcome snapshot plus timed_out and elapsed_ms. On timeout the '
-'worker is canceled with 1s grace and the timeout is recorded in stats.';
+'worker is canceled with 1s grace and the timeout is recorded in stats. '
+'Returns metadata only; use launch+result for result rows.';
 
 -- ----------------------------------------------------------------------
--- Step 10: Tier A helpers (rewired to use new wait_v2 / cancel_v2).
+-- Tier A loop killers
 -- ----------------------------------------------------------------------
 
-CREATE FUNCTION pg_background_run_query_v2(
+-- A1: synchronous one-shot returning rows
+CREATE FUNCTION pg_background_run_query(
     sql        pg_catalog.text,
     queue_size pg_catalog.int4 DEFAULT 0,
     timeout_ms pg_catalog.int4 DEFAULT 0,
@@ -383,55 +582,57 @@ DECLARE
     finished pg_catalog.bool;
 BEGIN
     IF label IS NULL THEN
-        h := pg_background_launch_v2(sql, queue_size);
+        h := pg_background_launch(sql, queue_size);
     ELSE
-        h := pg_background_launch_v2(sql, queue_size, label);
+        h := pg_background_launch(sql, queue_size, label);
     END IF;
 
     IF timeout_ms > 0 THEN
-        finished := pg_background_wait_v2(h.pid, h.cookie, timeout_ms);
+        finished := pg_background_wait(h.pid, h.cookie, timeout_ms);
         IF NOT finished THEN
-            BEGIN PERFORM pg_background_cancel_v2(h.pid, h.cookie, 1000);
+            BEGIN PERFORM pg_background_cancel(h.pid, h.cookie, 1000);
             EXCEPTION WHEN OTHERS THEN NULL; END;
-            BEGIN PERFORM pg_background_record_timeout_v2();
+            BEGIN PERFORM pg_background_record_timeout();
             EXCEPTION WHEN OTHERS THEN NULL; END;
-            BEGIN PERFORM pg_background_detach_v2(h.pid, h.cookie);
+            BEGIN PERFORM pg_background_detach(h.pid, h.cookie);
             EXCEPTION WHEN OTHERS THEN NULL; END;
-            RAISE EXCEPTION 'pg_background_run_query_v2: worker did not complete within % ms', timeout_ms
+            RAISE EXCEPTION 'pg_background_run_query: worker did not complete within % ms', timeout_ms
                 USING ERRCODE = '57014';
         END IF;
     ELSE
-        PERFORM pg_background_wait_v2(h.pid, h.cookie);
+        PERFORM pg_background_wait(h.pid, h.cookie);
     END IF;
 
-    o := pg_background_outcome_v2(h.pid, h.cookie);
+    o := pg_background_outcome(h.pid, h.cookie);
     IF o.has_error THEN
-        BEGIN PERFORM pg_background_detach_v2(h.pid, h.cookie);
+        BEGIN PERFORM pg_background_detach(h.pid, h.cookie);
         EXCEPTION WHEN OTHERS THEN NULL; END;
         RAISE EXCEPTION '%', COALESCE(o.error_message, 'worker error')
             USING ERRCODE = COALESCE(o.sqlstate, 'XX000');
     END IF;
 
     IF col_def IS NULL THEN
-        BEGIN PERFORM pg_background_detach_v2(h.pid, h.cookie);
+        BEGIN PERFORM pg_background_detach(h.pid, h.cookie);
         EXCEPTION WHEN OTHERS THEN NULL; END;
         RETURN;
     END IF;
 
     RETURN QUERY EXECUTE pg_catalog.format(
-        'SELECT * FROM pg_background_result_v2($1, $2) AS r(%s)', col_def
+        'SELECT * FROM pg_background_result($1, $2) AS r(%s)', col_def
     ) USING h.pid, h.cookie;
 
-    BEGIN PERFORM pg_background_detach_v2(h.pid, h.cookie);
+    BEGIN PERFORM pg_background_detach(h.pid, h.cookie);
     EXCEPTION WHEN OTHERS THEN NULL; END;
     RETURN;
 END;
 $function$;
 
-COMMENT ON FUNCTION pg_background_run_query_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.int4, pg_catalog.text, pg_catalog.text) IS
-'Synchronous launch+wait+result+detach with rows. col_def must match the AS clause at the call site.';
+COMMENT ON FUNCTION pg_background_run_query(pg_catalog.text, pg_catalog.int4, pg_catalog.int4, pg_catalog.text, pg_catalog.text) IS
+'Synchronous launch+wait+result+detach with rows. col_def must match the AS clause at the call site, e.g. '
+'SELECT * FROM pg_background_run_query(''SELECT 1'', col_def => ''x int'') AS r(x int).';
 
-CREATE FUNCTION pg_background_drain_v2(
+-- A2: drain — wait for all handles, return one outcome each
+CREATE FUNCTION pg_background_drain(
     handles    pg_background_handle[],
     timeout_ms pg_catalog.int4 DEFAULT 0
 )
@@ -454,31 +655,33 @@ BEGIN
             elapsed_ms := (pg_catalog.date_part('epoch', pg_catalog.clock_timestamp() - start_ts) * 1000)::pg_catalog.int8;
             remaining_ms := timeout_ms - elapsed_ms;
             IF remaining_ms <= 0 THEN
-                o := pg_background_outcome_v2(h.pid, h.cookie);
+                /* deadline blown: emit minimal outcome and skip wait/detach */
+                o := pg_background_outcome(h.pid, h.cookie);
                 RETURN NEXT o;
                 CONTINUE;
             END IF;
-            PERFORM pg_background_wait_v2(h.pid, h.cookie, remaining_ms::pg_catalog.int4);
+            PERFORM pg_background_wait(h.pid, h.cookie, remaining_ms::pg_catalog.int4);
         ELSE
-            BEGIN PERFORM pg_background_wait_v2(h.pid, h.cookie);
+            BEGIN PERFORM pg_background_wait(h.pid, h.cookie);
             EXCEPTION WHEN OTHERS THEN NULL; END;
         END IF;
 
-        o := pg_background_outcome_v2(h.pid, h.cookie);
+        o := pg_background_outcome(h.pid, h.cookie);
         RETURN NEXT o;
 
-        BEGIN PERFORM pg_background_detach_v2(h.pid, h.cookie);
+        BEGIN PERFORM pg_background_detach(h.pid, h.cookie);
         EXCEPTION WHEN OTHERS THEN NULL; END;
     END LOOP;
     RETURN;
 END;
 $function$;
 
-COMMENT ON FUNCTION pg_background_drain_v2(pg_background_handle[], pg_catalog.int4) IS
+COMMENT ON FUNCTION pg_background_drain(pg_background_handle[], pg_catalog.int4) IS
 'Wait for every handle (wall-clock total timeout shared across handles), '
 'collect outcomes, and detach. Returns one row per input handle in input order.';
 
-CREATE FUNCTION pg_background_wait_any_v2(
+-- A3: wait_any — return the first handle to finish, NULL on timeout
+CREATE FUNCTION pg_background_wait_any(
     handles    pg_background_handle[],
     timeout_ms pg_catalog.int4 DEFAULT 0
 )
@@ -499,10 +702,15 @@ BEGIN
         FOREACH h IN ARRAY handles LOOP
             IF h IS NULL THEN CONTINUE; END IF;
             BEGIN
-                IF pg_background_wait_v2(h.pid, h.cookie, 1) THEN
+                /*
+                 * pg_background_wait with timeout_ms=1 polls (timeout_ms<=0
+                 * now means "block forever").
+                 */
+                IF pg_background_wait(h.pid, h.cookie, 1) THEN
                     RETURN h;
                 END IF;
             EXCEPTION WHEN OTHERS THEN
+                /* handle stale or invalid; treat as not-finished */
                 NULL;
             END;
         END LOOP;
@@ -520,11 +728,12 @@ BEGIN
 END;
 $function$;
 
-COMMENT ON FUNCTION pg_background_wait_any_v2(pg_background_handle[], pg_catalog.int4) IS
+COMMENT ON FUNCTION pg_background_wait_any(pg_background_handle[], pg_catalog.int4) IS
 'Return the first handle whose worker has finished. Adaptive polling 50ms..500ms. '
-'Returns NULL on timeout.';
+'Returns NULL on timeout. Caller decides what to do with the still-running handles.';
 
-CREATE FUNCTION pg_background_cancel_by_label_v2(
+-- A4: cancel_by_label — pattern-based cancel
+CREATE FUNCTION pg_background_cancel_by_label(
     pattern  pg_catalog.text,
     grace_ms pg_catalog.int4 DEFAULT 0
 )
@@ -540,9 +749,10 @@ BEGIN
         SELECT pid, cookie FROM pg_background_list WHERE label LIKE pattern
     LOOP
         BEGIN
-            PERFORM pg_background_cancel_v2(r.pid, r.cookie, grace_ms);
+            PERFORM pg_background_cancel(r.pid, r.cookie, grace_ms);
             cnt := cnt + 1;
         EXCEPTION WHEN OTHERS THEN
+            /* worker may have been cleaned up between list and cancel */
             NULL;
         END;
     END LOOP;
@@ -550,10 +760,11 @@ BEGIN
 END;
 $function$;
 
-COMMENT ON FUNCTION pg_background_cancel_by_label_v2(pg_catalog.text, pg_catalog.int4) IS
+COMMENT ON FUNCTION pg_background_cancel_by_label(pg_catalog.text, pg_catalog.int4) IS
 'Cancel every worker whose label matches the SQL LIKE pattern. Returns count canceled.';
 
-CREATE FUNCTION pg_background_purge_v2()
+-- A6: purge — detach only stopped/done workers (vs detach_all which is non-discriminating).
+CREATE FUNCTION pg_background_purge()
 RETURNS pg_catalog.int4
 LANGUAGE plpgsql
 AS $function$
@@ -563,11 +774,12 @@ DECLARE
 BEGIN
     FOR r IN SELECT pid, cookie FROM pg_background_list LOOP
         BEGIN
-            IF pg_background_wait_v2(r.pid, r.cookie, 1) THEN
-                PERFORM pg_background_detach_v2(r.pid, r.cookie);
+            IF pg_background_wait(r.pid, r.cookie, 1) THEN
+                PERFORM pg_background_detach(r.pid, r.cookie);
                 cnt := cnt + 1;
             END IF;
         EXCEPTION WHEN OTHERS THEN
+            /* worker raced cleanup; ignore */
             NULL;
         END;
     END LOOP;
@@ -575,15 +787,31 @@ BEGIN
 END;
 $function$;
 
-COMMENT ON FUNCTION pg_background_purge_v2() IS
-'Detach only workers that have already stopped. '
-'Returns count purged. Use detach_all_v2() to detach all workers regardless of state.';
+COMMENT ON FUNCTION pg_background_purge() IS
+'Detach only workers that have already stopped (success/error/cancel). '
+'Returns count purged. Use detach_all() to detach all workers regardless of state.';
 
 -- ----------------------------------------------------------------------
--- Step 11: renamed privilege helpers.
+-- full SQL accessor — beyond the 120-char preview
+-- ----------------------------------------------------------------------
+CREATE FUNCTION pg_background_full_sql(
+    pid    pg_catalog.int4,
+    cookie pg_catalog.int8
+)
+RETURNS pg_catalog.text
+AS 'MODULE_PATHNAME', 'pg_background_full_sql'
+LANGUAGE C STRICT;
+
+COMMENT ON FUNCTION pg_background_full_sql(pg_catalog.int4, pg_catalog.int8) IS
+'Return the full SQL the worker is running, capped at 64 KiB with a [...] '
+'sentinel for longer queries. NULL if not stored. Use the list view''s '
+'sql_preview for monitoring; this function is for debugging.';
+
+-- ----------------------------------------------------------------------
+-- Hardened privilege helpers
 -- ----------------------------------------------------------------------
 
-CREATE FUNCTION pg_background_grant_privileges_v2(
+CREATE FUNCTION pg_background_grant_privileges(
     role_name TEXT,
     print_commands BOOLEAN DEFAULT FALSE
 )
@@ -592,6 +820,13 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog
 AS $function$
+/*
+ * Grant the standard set of pg_background privileges to a role.
+ *
+ * Discovers extension-owned objects via pg_depend rather than maintaining
+ * an explicit list. New functions/types/views registered by ALTER EXTENSION
+ * UPDATE are picked up automatically.
+ */
 DECLARE
     _ext_oid oid;
     _sql     text;
@@ -613,7 +848,7 @@ BEGIN
            AND d.refclassid = 'pg_extension'::regclass
            AND d.refobjid   = _ext_oid
            AND d.deptype    = 'e'
-           -- v2.0 security: never grant EXECUTE on the SECURITY DEFINER
+           -- security: never grant EXECUTE on the SECURITY DEFINER
            -- privilege helpers (grant/revoke/drop) to the executor role.
            -- They run as the extension owner, so granting them would let
            -- any pgbackground_role member re-grant the role's capabilities
@@ -664,7 +899,7 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $function$;
 
-CREATE FUNCTION pg_background_revoke_privileges_v2(
+CREATE FUNCTION pg_background_revoke_privileges(
     role_name TEXT,
     print_commands BOOLEAN DEFAULT FALSE
 )
@@ -673,6 +908,10 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog
 AS $function$
+/*
+ * Revoke the standard set of pg_background privileges from a role.
+ * Mirror of pg_background_grant_privileges.
+ */
 DECLARE
     _ext_oid oid;
     _sql     text;
@@ -738,42 +977,347 @@ EXCEPTION WHEN OTHERS THEN
 END;
 $function$;
 
+-- ======================================================================
+-- DEPRECATED _v2 ALIASES (see extension/pg_background--2.0.sql for notes).
+-- Removed in 3.0.
+-- ======================================================================
+
+CREATE FUNCTION pg_background_launch_v2(
+    sql pg_catalog.text,
+    queue_size pg_catalog.int4 DEFAULT 0
+)
+RETURNS pg_background_handle
+AS 'MODULE_PATHNAME', 'pg_background_launch'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_background_launch_v2(
+    sql pg_catalog.text,
+    queue_size pg_catalog.int4,
+    label pg_catalog.text
+)
+RETURNS pg_background_handle
+AS 'MODULE_PATHNAME', 'pg_background_launch'
+LANGUAGE C;
+
+CREATE FUNCTION pg_background_submit_v2(
+    sql pg_catalog.text,
+    queue_size pg_catalog.int4 DEFAULT 0
+)
+RETURNS pg_background_handle
+AS 'MODULE_PATHNAME', 'pg_background_submit'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_background_submit_v2(
+    sql pg_catalog.text,
+    queue_size pg_catalog.int4,
+    label pg_catalog.text
+)
+RETURNS pg_background_handle
+AS 'MODULE_PATHNAME', 'pg_background_submit'
+LANGUAGE C;
+
+CREATE FUNCTION pg_background_result_v2(
+    pid pg_catalog.int4,
+    cookie pg_catalog.int8
+)
+RETURNS SETOF pg_catalog.record
+AS 'MODULE_PATHNAME', 'pg_background_result'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_background_detach_v2(
+    pid pg_catalog.int4,
+    cookie pg_catalog.int8
+)
+RETURNS pg_catalog.void
+AS 'MODULE_PATHNAME', 'pg_background_detach'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_background_cancel_v2(
+    pid pg_catalog.int4,
+    cookie pg_catalog.int8,
+    grace_ms pg_catalog.int4 DEFAULT 0
+)
+RETURNS pg_catalog.void
+AS 'MODULE_PATHNAME', 'pg_background_cancel'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_background_wait_v2(
+    pid pg_catalog.int4,
+    cookie pg_catalog.int8,
+    timeout_ms pg_catalog.int4 DEFAULT 0
+)
+RETURNS pg_catalog.bool
+AS 'MODULE_PATHNAME', 'pg_background_wait'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_background_list_v2()
+RETURNS SETOF pg_catalog.record
+AS 'MODULE_PATHNAME', 'pg_background_list'
+LANGUAGE C;
+
+CREATE FUNCTION pg_background_stats_v2()
+RETURNS pg_background_stats
+AS 'MODULE_PATHNAME', 'pg_background_stats'
+LANGUAGE C;
+
+-- Note: pg_background_record_timeout / _report_progress have no _v2 alias
+-- (new in 2.0; the worker-side progress writer shipped as pg_background_progress).
+
+CREATE FUNCTION pg_background_get_progress_v2(
+    pid pg_catalog.int4,
+    cookie pg_catalog.int8
+)
+RETURNS pg_background_progress_info
+AS 'MODULE_PATHNAME', 'pg_background_get_progress'
+LANGUAGE C;
+
+CREATE FUNCTION pg_background_result_info_v2(
+    pid pg_catalog.int4,
+    cookie pg_catalog.int8
+)
+RETURNS pg_background_result_info
+AS 'MODULE_PATHNAME', 'pg_background_result_info'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_background_error_info_v2(
+    pid pg_catalog.int4,
+    cookie pg_catalog.int8
+)
+RETURNS pg_background_error
+AS 'MODULE_PATHNAME', 'pg_background_error_info'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_background_detach_all_v2()
+RETURNS pg_catalog.int4
+AS 'MODULE_PATHNAME', 'pg_background_detach_all'
+LANGUAGE C;
+
+CREATE FUNCTION pg_background_cancel_all_v2()
+RETURNS pg_catalog.int4
+AS 'MODULE_PATHNAME', 'pg_background_cancel_all'
+LANGUAGE C;
+
+CREATE FUNCTION pg_background_full_sql_v2(
+    pid    pg_catalog.int4,
+    cookie pg_catalog.int8
+)
+RETURNS pg_catalog.text
+AS 'MODULE_PATHNAME', 'pg_background_full_sql'
+LANGUAGE C STRICT;
+
+CREATE FUNCTION pg_background_outcome_v2(
+    p_pid pg_catalog.int4,
+    p_cookie pg_catalog.int8
+)
+RETURNS pg_background_outcome
+LANGUAGE sql
+AS $function$ SELECT pg_background_outcome($1, $2); $function$;
+
+CREATE FUNCTION pg_background_run_v2(
+    sql        pg_catalog.text,
+    queue_size pg_catalog.int4 DEFAULT 0,
+    timeout_ms pg_catalog.int4 DEFAULT 0,
+    label      pg_catalog.text DEFAULT NULL
+)
+RETURNS pg_background_run_result
+LANGUAGE sql
+AS $function$ SELECT pg_background_run($1, $2, $3, $4); $function$;
+
+-- run_query is duplicated (not delegated): a SQL/plpgsql wrapper cannot
+-- forward a SETOF record shape without the caller's column-definition list.
+CREATE FUNCTION pg_background_run_query_v2(
+    sql        pg_catalog.text,
+    queue_size pg_catalog.int4 DEFAULT 0,
+    timeout_ms pg_catalog.int4 DEFAULT 0,
+    label      pg_catalog.text DEFAULT NULL,
+    col_def    pg_catalog.text DEFAULT NULL
+)
+RETURNS SETOF pg_catalog.record
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    h        pg_background_handle;
+    o        pg_background_outcome;
+    finished pg_catalog.bool;
+BEGIN
+    IF label IS NULL THEN
+        h := pg_background_launch(sql, queue_size);
+    ELSE
+        h := pg_background_launch(sql, queue_size, label);
+    END IF;
+
+    IF timeout_ms > 0 THEN
+        finished := pg_background_wait(h.pid, h.cookie, timeout_ms);
+        IF NOT finished THEN
+            BEGIN PERFORM pg_background_cancel(h.pid, h.cookie, 1000);
+            EXCEPTION WHEN OTHERS THEN NULL; END;
+            BEGIN PERFORM pg_background_record_timeout();
+            EXCEPTION WHEN OTHERS THEN NULL; END;
+            BEGIN PERFORM pg_background_detach(h.pid, h.cookie);
+            EXCEPTION WHEN OTHERS THEN NULL; END;
+            RAISE EXCEPTION 'pg_background_run_query_v2: worker did not complete within % ms', timeout_ms
+                USING ERRCODE = '57014';
+        END IF;
+    ELSE
+        PERFORM pg_background_wait(h.pid, h.cookie);
+    END IF;
+
+    o := pg_background_outcome(h.pid, h.cookie);
+    IF o.has_error THEN
+        BEGIN PERFORM pg_background_detach(h.pid, h.cookie);
+        EXCEPTION WHEN OTHERS THEN NULL; END;
+        RAISE EXCEPTION '%', COALESCE(o.error_message, 'worker error')
+            USING ERRCODE = COALESCE(o.sqlstate, 'XX000');
+    END IF;
+
+    IF col_def IS NULL THEN
+        BEGIN PERFORM pg_background_detach(h.pid, h.cookie);
+        EXCEPTION WHEN OTHERS THEN NULL; END;
+        RETURN;
+    END IF;
+
+    RETURN QUERY EXECUTE pg_catalog.format(
+        'SELECT * FROM pg_background_result($1, $2) AS r(%s)', col_def
+    ) USING h.pid, h.cookie;
+
+    BEGIN PERFORM pg_background_detach(h.pid, h.cookie);
+    EXCEPTION WHEN OTHERS THEN NULL; END;
+    RETURN;
+END;
+$function$;
+
+CREATE FUNCTION pg_background_drain_v2(
+    handles    pg_background_handle[],
+    timeout_ms pg_catalog.int4 DEFAULT 0
+)
+RETURNS SETOF pg_background_outcome
+LANGUAGE sql
+AS $function$ SELECT * FROM pg_background_drain($1, $2); $function$;
+
+CREATE FUNCTION pg_background_wait_any_v2(
+    handles    pg_background_handle[],
+    timeout_ms pg_catalog.int4 DEFAULT 0
+)
+RETURNS pg_background_handle
+LANGUAGE sql
+AS $function$ SELECT pg_background_wait_any($1, $2); $function$;
+
+CREATE FUNCTION pg_background_cancel_by_label_v2(
+    pattern  pg_catalog.text,
+    grace_ms pg_catalog.int4 DEFAULT 0
+)
+RETURNS pg_catalog.int4
+LANGUAGE sql
+AS $function$ SELECT pg_background_cancel_by_label($1, $2); $function$;
+
+CREATE FUNCTION pg_background_purge_v2()
+RETURNS pg_catalog.int4
+LANGUAGE sql
+AS $function$ SELECT pg_background_purge(); $function$;
+
+-- Note: the privilege helpers have no _v2 alias (renamed, not _v2-aliased).
+
+-- Deprecation markers (canonical replacements in parentheses).
+COMMENT ON FUNCTION pg_background_launch_v2(pg_catalog.text, pg_catalog.int4) IS 'DEPRECATED in 2.0: use pg_background_launch. Removed in 3.0.';
+COMMENT ON FUNCTION pg_background_launch_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.text) IS 'DEPRECATED in 2.0: use pg_background_launch. Removed in 3.0.';
+COMMENT ON FUNCTION pg_background_submit_v2(pg_catalog.text, pg_catalog.int4) IS 'DEPRECATED in 2.0: use pg_background_submit. Removed in 3.0.';
+COMMENT ON FUNCTION pg_background_submit_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.text) IS 'DEPRECATED in 2.0: use pg_background_submit. Removed in 3.0.';
+COMMENT ON FUNCTION pg_background_result_v2(pg_catalog.int4, pg_catalog.int8) IS 'DEPRECATED in 2.0: use pg_background_result. Removed in 3.0.';
+COMMENT ON FUNCTION pg_background_detach_v2(pg_catalog.int4, pg_catalog.int8) IS 'DEPRECATED in 2.0: use pg_background_detach. Removed in 3.0.';
+COMMENT ON FUNCTION pg_background_cancel_v2(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4) IS 'DEPRECATED in 2.0: use pg_background_cancel. Removed in 3.0.';
+COMMENT ON FUNCTION pg_background_wait_v2(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4) IS 'DEPRECATED in 2.0: use pg_background_wait. Removed in 3.0.';
+COMMENT ON FUNCTION pg_background_list_v2() IS 'DEPRECATED in 2.0: use pg_background_list() / the pg_background_list view. Removed in 3.0.';
+COMMENT ON FUNCTION pg_background_stats_v2() IS 'DEPRECATED in 2.0: use pg_background_stats(). Removed in 3.0.';
+COMMENT ON FUNCTION pg_background_get_progress_v2(pg_catalog.int4, pg_catalog.int8) IS 'DEPRECATED in 2.0: use pg_background_get_progress. Removed in 3.0.';
+COMMENT ON FUNCTION pg_background_result_info_v2(pg_catalog.int4, pg_catalog.int8) IS 'DEPRECATED in 2.0: use pg_background_result_info. Removed in 3.0.';
+COMMENT ON FUNCTION pg_background_error_info_v2(pg_catalog.int4, pg_catalog.int8) IS 'DEPRECATED in 2.0: use pg_background_error_info. Removed in 3.0.';
+COMMENT ON FUNCTION pg_background_detach_all_v2() IS 'DEPRECATED in 2.0: use pg_background_detach_all(). Removed in 3.0.';
+COMMENT ON FUNCTION pg_background_cancel_all_v2() IS 'DEPRECATED in 2.0: use pg_background_cancel_all(). Removed in 3.0.';
+COMMENT ON FUNCTION pg_background_full_sql_v2(pg_catalog.int4, pg_catalog.int8) IS 'DEPRECATED in 2.0: use pg_background_full_sql. Removed in 3.0.';
+COMMENT ON FUNCTION pg_background_outcome_v2(pg_catalog.int4, pg_catalog.int8) IS 'DEPRECATED in 2.0: use pg_background_outcome(). Removed in 3.0.';
+COMMENT ON FUNCTION pg_background_run_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.int4, pg_catalog.text) IS 'DEPRECATED in 2.0: use pg_background_run. Removed in 3.0.';
+COMMENT ON FUNCTION pg_background_run_query_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.int4, pg_catalog.text, pg_catalog.text) IS 'DEPRECATED in 2.0: use pg_background_run_query. Removed in 3.0.';
+COMMENT ON FUNCTION pg_background_drain_v2(pg_background_handle[], pg_catalog.int4) IS 'DEPRECATED in 2.0: use pg_background_drain. Removed in 3.0.';
+COMMENT ON FUNCTION pg_background_wait_any_v2(pg_background_handle[], pg_catalog.int4) IS 'DEPRECATED in 2.0: use pg_background_wait_any. Removed in 3.0.';
+COMMENT ON FUNCTION pg_background_cancel_by_label_v2(pg_catalog.text, pg_catalog.int4) IS 'DEPRECATED in 2.0: use pg_background_cancel_by_label. Removed in 3.0.';
+COMMENT ON FUNCTION pg_background_purge_v2() IS 'DEPRECATED in 2.0: use pg_background_purge(). Removed in 3.0.';
+
 -- ----------------------------------------------------------------------
--- Step 12: re-grant + lock down PUBLIC on the new surface.
+-- Re-grant + lock down PUBLIC on the new surface.
+-- The grant walker covers both canonical and _v2 functions automatically.
+-- ----------------------------------------------------------------------
+SELECT pg_background_grant_privileges('pgbackground_role', false);
+
+REVOKE ALL ON FUNCTION pg_background_grant_privileges(text, boolean)  FROM pgbackground_role;
+REVOKE ALL ON FUNCTION pg_background_revoke_privileges(text, boolean) FROM pgbackground_role;
+
+-- ----------------------------------------------------------------------
+-- Optional: helper to drop role explicitly (DROP EXTENSION won't).
+-- ----------------------------------------------------------------------
+CREATE FUNCTION pg_background_drop_executor_role()
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pgbackground_role') THEN
+    EXECUTE 'DROP ROLE pgbackground_role';
+  END IF;
+END;
+$$;
+
+-- ----------------------------------------------------------------------
+-- Lock down PUBLIC on every extension object (metadata-driven sweep,
+-- identical to the fresh-install lockdown). Runs LAST.
 -- ----------------------------------------------------------------------
 
-SELECT pg_background_grant_privileges_v2('pgbackground_role', false);
+DO $lockdown$
+DECLARE
+    _ext_oid oid;
+    _r       record;
+BEGIN
+    SELECT oid INTO _ext_oid FROM pg_extension WHERE extname = 'pg_background';
+    IF _ext_oid IS NULL THEN
+        RAISE EXCEPTION 'pg_background extension not found during lockdown';
+    END IF;
 
-REVOKE ALL ON FUNCTION pg_background_grant_privileges_v2(pg_catalog.text, boolean) FROM public;
-REVOKE ALL ON FUNCTION pg_background_revoke_privileges_v2(pg_catalog.text, boolean) FROM public;
+    FOR _r IN
+        SELECT p.oid::regprocedure AS sig
+          FROM pg_depend d JOIN pg_proc p ON p.oid = d.objid
+         WHERE d.classid = 'pg_proc'::regclass
+           AND d.refclassid = 'pg_extension'::regclass
+           AND d.refobjid = _ext_oid
+           AND d.deptype = 'e'
+    LOOP
+        EXECUTE format('REVOKE ALL ON FUNCTION %s FROM public', _r.sig);
+    END LOOP;
 
--- Belt-and-braces: also revoke from pgbackground_role so the admin-only
--- contract on the SECURITY DEFINER privilege helpers holds even if the bulk
--- grant is replayed later (privilege-escalation guard).
-REVOKE ALL ON FUNCTION pg_background_grant_privileges_v2(pg_catalog.text, boolean) FROM pgbackground_role;
-REVOKE ALL ON FUNCTION pg_background_revoke_privileges_v2(pg_catalog.text, boolean) FROM pgbackground_role;
+    FOR _r IN
+        SELECT t.oid::regtype AS typname
+          FROM pg_depend d
+          JOIN pg_type   t ON t.oid = d.objid
+          JOIN pg_class  c ON c.oid = t.typrelid
+         WHERE d.classid = 'pg_type'::regclass
+           AND d.refclassid = 'pg_extension'::regclass
+           AND d.refobjid = _ext_oid
+           AND d.deptype = 'e'
+           AND t.typtype = 'c'
+           AND c.relkind = 'c'
+    LOOP
+        EXECUTE format('REVOKE ALL ON TYPE %s FROM public', _r.typname);
+    END LOOP;
 
-REVOKE ALL ON FUNCTION pg_background_cancel_v2(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4) FROM public;
-REVOKE ALL ON FUNCTION pg_background_wait_v2(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4) FROM public;
-
-REVOKE ALL ON TYPE pg_background_stats FROM public;
-REVOKE ALL ON TYPE pg_background_progress_info FROM public;
-REVOKE ALL ON FUNCTION pg_background_stats_v2() FROM public;
-REVOKE ALL ON FUNCTION pg_background_record_timeout_v2() FROM public;
-REVOKE ALL ON FUNCTION pg_background_report_progress_v2(pg_catalog.int4, pg_catalog.text) FROM public;
-REVOKE ALL ON FUNCTION pg_background_get_progress_v2(pg_catalog.int4, pg_catalog.int8) FROM public;
-
-REVOKE ALL ON TYPE pg_background_result_info FROM public;
-REVOKE ALL ON TYPE pg_background_error FROM public;
-REVOKE ALL ON FUNCTION pg_background_result_info_v2(pg_catalog.int4, pg_catalog.int8) FROM public;
-REVOKE ALL ON FUNCTION pg_background_error_info_v2(pg_catalog.int4, pg_catalog.int8) FROM public;
-
-REVOKE ALL ON TYPE pg_background_run_result FROM public;
-REVOKE ALL ON FUNCTION pg_background_outcome_v2(pg_catalog.int4, pg_catalog.int8) FROM public;
-REVOKE ALL ON FUNCTION pg_background_run_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.int4, pg_catalog.text) FROM public;
-
-REVOKE ALL ON FUNCTION pg_background_run_query_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.int4, pg_catalog.text, pg_catalog.text) FROM public;
-REVOKE ALL ON FUNCTION pg_background_drain_v2(pg_background_handle[], pg_catalog.int4) FROM public;
-REVOKE ALL ON FUNCTION pg_background_wait_any_v2(pg_background_handle[], pg_catalog.int4) FROM public;
-REVOKE ALL ON FUNCTION pg_background_cancel_by_label_v2(pg_catalog.text, pg_catalog.int4) FROM public;
-REVOKE ALL ON FUNCTION pg_background_purge_v2() FROM public;
+    FOR _r IN
+        SELECT c.oid::regclass AS relname
+          FROM pg_depend d JOIN pg_class c ON c.oid = d.objid
+         WHERE d.classid = 'pg_class'::regclass
+           AND d.refclassid = 'pg_extension'::regclass
+           AND d.refobjid = _ext_oid
+           AND d.deptype = 'e'
+           AND c.relkind IN ('v', 'r', 'm')
+    LOOP
+        EXECUTE format('REVOKE ALL ON TABLE %s FROM public', _r.relname);
+    END LOOP;
+END
+$lockdown$;

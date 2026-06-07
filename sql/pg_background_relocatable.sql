@@ -265,9 +265,9 @@ FROM custom_ext.pg_background_stats_v2();
 
 SELECT (h).pid AS prg_pid, (h).cookie AS prg_cookie
 FROM (SELECT custom_ext.pg_background_launch_v2($$
-    SELECT custom_ext.pg_background_report_progress_v2(25, 'Quarter done');
+    SELECT custom_ext.pg_background_report_progress(25, 'Quarter done');
     SELECT pg_sleep(0.2);
-    SELECT custom_ext.pg_background_report_progress_v2(100, 'Complete');
+    SELECT custom_ext.pg_background_report_progress(100, 'Complete');
 $$, 65536) AS h) s
 \gset
 
@@ -292,19 +292,19 @@ SELECT custom_ext.pg_background_detach_v2(:prg_pid, :prg_cookie);
 -- Create test role
 CREATE ROLE test_relocate_user NOLOGIN;
 
--- pg_background_grant_privileges_v2 with schema qualification (renamed in 2.0)
+-- pg_background_grant_privileges with schema qualification (renamed in 2.0)
 -- This tests that the helper correctly detects the extension schema
 SELECT
-    CASE WHEN custom_ext.pg_background_grant_privileges_v2('test_relocate_user', false) THEN 'PASS' ELSE 'FAIL' END AS test_11a_grant_privileges;
+    CASE WHEN custom_ext.pg_background_grant_privileges('test_relocate_user', false) THEN 'PASS' ELSE 'FAIL' END AS test_11a_grant_privileges;
 
 -- Verify grants were applied (check one function as sample)
 SELECT
     CASE WHEN has_function_privilege('test_relocate_user', 'custom_ext.pg_background_launch_v2(text, int4)', 'EXECUTE') THEN 'PASS' ELSE 'FAIL' END AS test_11b_verify_grant,
     'Function privilege granted' AS description;
 
--- pg_background_revoke_privileges_v2 with schema qualification (renamed in 2.0)
+-- pg_background_revoke_privileges with schema qualification (renamed in 2.0)
 SELECT
-    CASE WHEN custom_ext.pg_background_revoke_privileges_v2('test_relocate_user', false) THEN 'PASS' ELSE 'FAIL' END AS test_11c_revoke_privileges;
+    CASE WHEN custom_ext.pg_background_revoke_privileges('test_relocate_user', false) THEN 'PASS' ELSE 'FAIL' END AS test_11c_revoke_privileges;
 
 -- Verify revoke was applied
 SELECT

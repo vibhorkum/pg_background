@@ -55,7 +55,7 @@
 #define PG_BACKGROUND_KEY_OUTPUT        4
 #define PG_BACKGROUND_NKEYS             5
 
-/* SQL preview length for list_v2() monitoring */
+/* SQL preview length for list() monitoring */
 #define PGBG_SQL_PREVIEW_LEN 120
 
 /* Maximum error message length stored in worker info (prevents memory bloat) */
@@ -129,7 +129,7 @@ typedef struct pg_background_input
  *     Worker-produced state read by the launcher.
  *
  * Written by the worker during execution and read by the launcher via
- * pg_background_result_info_v2 / error_info_v2 / get_progress_v2. The
+ * pg_background_result_info / error_info / get_progress. The
  * launcher zero-initializes the struct at allocation time so partial
  * reads before the worker starts producing values still see sensible
  * defaults (empty strings, 0 timestamps, progress_pct = -1).
@@ -201,11 +201,11 @@ typedef struct pg_background_worker_info
     shm_mq_handle *responseq;           /* Response queue handle */
     bool        consumed;               /* True if results have been read */
     bool        mapping_pinned;         /* True if DSM mapping is pinned */
-    bool        result_disabled;        /* True if launched via submit_v2 (fire-and-forget) */
-    bool        canceled;               /* True if cancel_v2 was called on this worker */
+    bool        result_disabled;        /* True if launched via submit (fire-and-forget) */
+    bool        canceled;               /* True if cancel was called on this worker */
     TimestampTz launched_at;            /* Launch timestamp for monitoring */
     int32       queue_size;             /* Queue size used for this worker */
-    char        sql_preview[PGBG_SQL_PREVIEW_LEN + 1];  /* SQL preview for list_v2 */
+    char        sql_preview[PGBG_SQL_PREVIEW_LEN + 1];  /* SQL preview for list */
     char       *last_error;             /* Last error message (in WorkerInfoMemoryContext) */
 
     /* v1.9: Worker label for operational clarity */
@@ -214,7 +214,7 @@ typedef struct pg_background_worker_info
     /*
      * v1.10 (B3): full SQL text, palloc'd in WorkerInfoMemoryContext.
      * Capped at PGBG_FULL_SQL_MAX_LEN bytes; longer queries are truncated
-     * with a "[...]" marker. Survives DSM detach so pg_background_full_sql_v2
+     * with a "[...]" marker. Survives DSM detach so pg_background_full_sql
      * works after the worker exits.
      */
     char       *full_sql;
@@ -253,7 +253,7 @@ typedef struct pgbg_stats
     int64       workers_completed;
     int64       workers_failed;
     int64       workers_canceled;
-    int64       workers_timed_out;      /* v2.0 (B5a): timeouts from run_v2 */
+    int64       workers_timed_out;      /* v2.0 (B5a): timeouts from run */
     int64       total_execution_us;
 } pgbg_stats;
 

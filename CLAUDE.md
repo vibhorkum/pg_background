@@ -46,11 +46,22 @@ Workers execute SQL in independent transactions. This autonomy is the feature, n
 
 Document behavioral semantics precisely. Users should never be surprised by what a function does.
 
-### Maintain two API generations carefully
-- v1 API: Preserved for backward compatibility. Do not add features to v1.
-- v2 API: Cookie-protected handles, explicit lifecycle. New features go here.
-
-Do not blur the distinction between v1 and v2 semantics.
+### One canonical API; `_v2` retired (2.0)
+- The cookie-protected, explicit-lifecycle API is now the only API. Its
+  **canonical names are unsuffixed** (`pg_background_launch`,
+  `pg_background_wait`, `pg_background_run`, …). New features go here.
+- The v1 API (unsuffixed names returning bare PIDs) was removed in 2.0. The
+  unsuffixed names were reused for the cookie-protected API.
+- Every `_v2` name that shipped through 1.10 is kept as a **thin deprecated
+  alias** (identical behavior, forwards to the canonical function) and is
+  **removed in 3.0**. Do not add new `_v2` names; new functions ship under
+  their unsuffixed name only.
+- Names introduced in 2.0 (`pg_background_report_progress`,
+  `pg_background_record_timeout`, the privilege helpers) have **no `_v2`
+  alias** — no released `_v2` name ever existed for them.
+- The canonical function names `pg_background_list` / `pg_background_stats` /
+  `pg_background_outcome` coexist with a same-named view / type / type;
+  PostgreSQL resolves them by call syntax. This is intentional.
 
 ---
 
@@ -175,12 +186,15 @@ Do not blur the distinction between v1 and v2 semantics.
 
 ### Keep the SQL API simple and explicit
 - Function names clearly indicate behavior: `launch`, `result`, `detach`, `cancel`, `wait`, `submit`
-- `_v2` suffix distinguishes cookie-protected API from legacy
+- Canonical functions are **unsuffixed**: `pg_background_<verb>`
 - Return types are explicit: `pg_background_handle`, `pg_background_stats`, etc.
 
 ### Naming consistency
-- All v2 functions: `pg_background_<verb>_v2`
-- Variants with options: `pg_background_<verb>_v2_<option>` (e.g., `wait_v2_timeout`, `cancel_v2_grace`)
+- All functions: `pg_background_<verb>` (canonical, unsuffixed)
+- Options are extra parameters with sensible defaults, not name variants
+  (e.g., `cancel(pid, cookie, grace_ms DEFAULT 0)`, not `cancel_grace`)
+- `_v2`-suffixed names are deprecated aliases only (removed in 3.0); never
+  add new ones
 - Type names: `pg_background_<noun>`
 
 ### Backward compatibility

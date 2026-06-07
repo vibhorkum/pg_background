@@ -29,31 +29,90 @@ described below atomically. After it runs, every grant the
 to other roles for renamed objects need to be reissued (see *Privilege
 helpers* below).
 
-### Removed: the v1 API
+### The `_v2` suffix is retired (canonical names + deprecated aliases)
 
-`pg_background_launch`, `pg_background_result`, and `pg_background_detach`
-(no `_v2` suffix) are gone. They were thin shims over the v2 path that
-existed for backward compatibility with releases before 1.6.
+The `_v2` suffix existed only to distinguish the cookie-protected API from
+the original v1 functions. With v1 gone (below), the suffix no longer
+distinguishes anything, so **2.0 makes the unsuffixed names canonical**:
 
-| Before (1.x) | After (2.0) |
+| Through 1.10 | 2.0 canonical | 2.0 `_v2` alias |
+|---|---|---|
+| `pg_background_launch_v2(...)` | `pg_background_launch(...)` | kept, deprecated |
+| `pg_background_submit_v2(...)` | `pg_background_submit(...)` | kept, deprecated |
+| `pg_background_result_v2(...)` | `pg_background_result(...)` | kept, deprecated |
+| `pg_background_detach_v2(...)` | `pg_background_detach(...)` | kept, deprecated |
+| `pg_background_cancel_v2(...)` | `pg_background_cancel(...)` | kept, deprecated |
+| `pg_background_wait_v2(...)` | `pg_background_wait(...)` | kept, deprecated |
+| `pg_background_list_v2()` | `pg_background_list()` | kept, deprecated |
+| `pg_background_stats_v2()` | `pg_background_stats()` | kept, deprecated |
+| `pg_background_get_progress_v2(...)` | `pg_background_get_progress(...)` | kept, deprecated |
+| `pg_background_result_info_v2(...)` | `pg_background_result_info(...)` | kept, deprecated |
+| `pg_background_error_info_v2(...)` | `pg_background_error_info(...)` | kept, deprecated |
+| `pg_background_detach_all_v2()` | `pg_background_detach_all()` | kept, deprecated |
+| `pg_background_cancel_all_v2()` | `pg_background_cancel_all()` | kept, deprecated |
+| `pg_background_outcome_v2(...)` | `pg_background_outcome(...)` | kept, deprecated |
+| `pg_background_run_v2(...)` | `pg_background_run(...)` | kept, deprecated |
+| `pg_background_run_query_v2(...)` | `pg_background_run_query(...)` | kept, deprecated |
+| `pg_background_drain_v2(...)` | `pg_background_drain(...)` | kept, deprecated |
+| `pg_background_wait_any_v2(...)` | `pg_background_wait_any(...)` | kept, deprecated |
+| `pg_background_cancel_by_label_v2(...)` | `pg_background_cancel_by_label(...)` | kept, deprecated |
+| `pg_background_purge_v2()` | `pg_background_purge()` | kept, deprecated |
+| `pg_background_full_sql_v2(...)` | `pg_background_full_sql(...)` | kept, deprecated |
+
+**No code change is required for the rename.** Every `_v2` name that shipped
+through 1.10 is kept as a thin deprecated alias that forwards to the
+canonical function with identical behavior; the aliases are **slated for
+removal in 3.0**. Migrate at your own pace — new code should use the
+unsuffixed names. A `DEPRECATED ... Removed in 3.0` comment is attached to
+each alias (`\df+`).
+
+The canonical names coexist with same-named objects of a different kind,
+resolved by call syntax:
+
+- `pg_background_list` is the **view** (preferred for monitoring);
+  `pg_background_list()` is the raw set-returning function.
+- `pg_background_stats` / `pg_background_outcome` are **composite types**;
+  `pg_background_stats()` / `pg_background_outcome(...)` are functions.
+
+Names that are **new in 2.0** have no `_v2` alias because no released `_v2`
+name ever existed for them: `pg_background_report_progress` (the worker-side
+writer that shipped through 1.10 was `pg_background_progress`, renamed
+below), the internal `pg_background_record_timeout`, and the privilege
+helpers (renamed from `grant_pg_background_privileges` /
+`revoke_pg_background_privileges`, below).
+
+### Removed: the v1 API; the unsuffixed names now mean the v2 API
+
+The original v1 functions — `pg_background_launch(sql, queue_size)` returning
+`int4`, `pg_background_result(pid)`, `pg_background_detach(pid)` — are gone.
+They were thin shims over the v2 path that existed for backward
+compatibility with releases before 1.6.
+
+Note that the unsuffixed names are **back, but with the cookie-protected v2
+semantics** (see the rename table above): `pg_background_launch` now returns
+a `pg_background_handle` (`pid` + `cookie`), not a bare `int4`. If you have
+v1 muscle memory, the name is the same but the shape changed.
+
+| Before (1.x, v1) | After (2.0, canonical) |
 |---|---|
-| `pg_background_launch(sql, queue_size)` returns `int4` | `pg_background_launch_v2(sql, queue_size)` returns `pg_background_handle` (pid + cookie) |
-| `pg_background_result(pid)` | `pg_background_result_v2(pid, cookie)` |
-| `pg_background_detach(pid)` | `pg_background_detach_v2(pid, cookie)` |
+| `pg_background_launch(sql, queue_size)` returns `int4` | `pg_background_launch(sql, queue_size)` returns `pg_background_handle` (pid + cookie) |
+| `pg_background_result(pid)` | `pg_background_result(pid, cookie)` |
+| `pg_background_detach(pid)` | `pg_background_detach(pid, cookie)` |
 
 The rewrite is mechanical: capture both `pid` and `cookie` from the handle
-returned by `launch_v2`/`submit_v2`, and pass the cookie to every later
-operation on that worker.
+returned by `launch`/`submit`, and pass the cookie to every later operation
+on that worker. (The `_v2`-suffixed names work identically if you prefer to
+defer the rename — they are deprecated aliases removed in 3.0.)
 
 ```sql
--- Before
+-- Before (v1)
 SELECT pg_background_launch('SELECT 1') AS pid \gset
 SELECT * FROM pg_background_result(:pid) AS (x int);
 
--- After
+-- After (2.0 canonical)
 SELECT (h).pid AS pid, (h).cookie AS cookie
-  FROM (SELECT pg_background_launch_v2('SELECT 1') AS h) s \gset
-SELECT * FROM pg_background_result_v2(:pid, :cookie) AS (x int);
+  FROM (SELECT pg_background_launch('SELECT 1') AS h) s \gset
+SELECT * FROM pg_background_result(:pid, :cookie) AS (x int);
 ```
 
 The cookie protects against PID-reuse hits — the worker you launched cannot
@@ -104,29 +163,31 @@ type of the same name. In 2.0 both were renamed for coherence.
 
 | Before (1.x) | After (2.0) |
 |---|---|
-| `pg_background_progress(pct, msg)` (function) | `pg_background_report_progress_v2(pct, msg)` |
+| `pg_background_progress(pct, msg)` (function) | `pg_background_report_progress(pct, msg)` |
 | `pg_background_progress` (type) | `pg_background_progress_info` |
-| `pg_background_get_progress_v2(pid, cookie)` returns `pg_background_progress` | … returns `pg_background_progress_info` |
+| `pg_background_get_progress_v2(pid, cookie)` returns `pg_background_progress` | `pg_background_get_progress(pid, cookie)` returns `pg_background_progress_info` |
 
 If your worker SQL calls `pg_background_progress(50, 'halfway')`, change
-the call to `pg_background_report_progress_v2(50, 'halfway')`. The type
-rename is only visible if you explicitly reference the type by name (most
-callers don't).
+the call to `pg_background_report_progress(50, 'halfway')`. This is a hard
+rename with **no alias** — the old `pg_background_progress` name is gone.
+The type rename is only visible if you explicitly reference the type by
+name (most callers don't).
 
 ### Renamed: privilege helpers
 
 | Before (1.x) | After (2.0) |
 |---|---|
-| `grant_pg_background_privileges(role)` | `pg_background_grant_privileges_v2(role)` |
-| `revoke_pg_background_privileges(role)` | `pg_background_revoke_privileges_v2(role)` |
+| `grant_pg_background_privileges(role)` | `pg_background_grant_privileges(role)` |
+| `revoke_pg_background_privileges(role)` | `pg_background_revoke_privileges(role)` |
 
-The unprefixed names were polluting the install schema. After the upgrade
-script runs, the helper is reapplied to `pgbackground_role` automatically;
-if you've granted to other roles, reissue the grant by calling the new
-helper:
+The unprefixed names were polluting the install schema. These are hard
+renames with **no `_v2` alias** (the `_v2`-suffixed privilege-helper names
+never shipped in a released version). After the upgrade script runs, the
+helper is reapplied to `pgbackground_role` automatically; if you've granted
+to other roles, reissue the grant by calling the new helper:
 
 ```sql
-SELECT pg_background_grant_privileges_v2('app_executor', false);
+SELECT pg_background_grant_privileges('app_executor', false);
 ```
 
 ### Forward-compatible additions to composite types
@@ -236,7 +297,7 @@ ALTER EXTENSION pg_background UPDATE TO '1.8';
 
 What you get:
 - `pg_background_stats_v2()` — session statistics.
-- `pg_background_progress()` (renamed to `pg_background_report_progress_v2`
+- `pg_background_progress()` (renamed to `pg_background_report_progress`
   in 2.0) — worker progress reporting.
 - `pg_background_get_progress_v2()` — get worker progress.
 - GUCs: `max_workers`, `worker_timeout`, `default_queue_size`.
@@ -380,4 +441,4 @@ If `\df pg_background_launch` returns a row, the upgrade did not run; check
 File an issue at
 <https://github.com/vibhorkum/pg_background/issues> with the source
 version, target version, and the full error output (including any
-`pg_background_grant_privileges_v2 RAISE NOTICE` lines).
+`pg_background_grant_privileges RAISE NOTICE` lines).

@@ -21,7 +21,7 @@ sequenceDiagram
   Launcher->>SHMMQ: shm_mq_wait_for_attach
   Worker->>DSM: dsm_attach + shm_toc_lookup
   Worker->>SHMMQ: shm_mq_attach (sender)
-  Note over Launcher,Worker: launch_v2 returns (pid, cookie) handle
+  Note over Launcher,Worker: launch returns (pid, cookie) handle
   Worker->>Worker: BackgroundWorkerInitializeConnection
   Worker->>Worker: StartTransactionCommand
   Worker->>Worker: execute_sql_string(sql)
@@ -36,8 +36,8 @@ sequenceDiagram
     Worker->>SHMMQ: EmitErrorReport (real 'E' frame)
     Worker--xLauncher: proc_exit(1)
   end
-  Launcher->>SHMMQ: pg_background_result_v2 (consume rows / get error)
-  Launcher->>Launcher: pg_background_detach_v2 (DSM cleanup callback fires)
+  Launcher->>SHMMQ: pg_background_result (consume rows / get error)
+  Launcher->>Launcher: pg_background_detach (DSM cleanup callback fires)
 ```
 
 **Key design points**
@@ -46,8 +46,8 @@ sequenceDiagram
   session-local hash table tracks the segment and the BGW handle but
   never holds a long-lived pointer into it.
 - Errors propagate via two paths: the structured DSM fields (read by
-  `error_info_v2`) and the live `'E'` frame on `shm_mq` (read by
-  `result_v2`). Both must agree; the worker writes DSM first, then emits
+  `error_info`) and the live `'E'` frame on `shm_mq` (read by
+  `result`). Both must agree; the worker writes DSM first, then emits
   the frame.
 - The launcher's `cleanup_worker_info` callback runs at DSM detach, so
   leaking a handle is impossible — even abnormal exit paths reclaim
@@ -62,7 +62,7 @@ sequenceDiagram
 │  Client Session  │
 │  (Launcher)      │
 └────────┬─────────┘
-         │ 1. pg_background_launch_v2(sql)
+         │ 1. pg_background_launch(sql)
          ▼
 ┌──────────────────────────────────┐
 │  Extension C Code                │
@@ -86,7 +86,7 @@ sequenceDiagram
 ┌──────────────────┐
 │  Launcher        │
 │  pg_background_  │
-│  result_v2()     │
+│  result()     │
 └──────────────────┘
 ```
 
@@ -116,7 +116,7 @@ avoids cache-line bouncing between launcher and worker.
 - Created by the launcher in `launch_internal()` (allocates both INPUT
   and OUTPUT, zero-fills OUTPUT, populates INPUT).
 - Worker attaches at startup and looks up both keys.
-- Launcher detaches via `detach_v2()` or session end. The worker's own
+- Launcher detaches via `detach()` or session end. The worker's own
   `dsm_detach` on exit drops its reference; the segment is released when
   refcount hits zero.
 
@@ -128,7 +128,7 @@ frames, and any NOTIFY/'A' frames the worker emits.
 **Flow**:
 1. Worker executes the query via SPI.
 2. Each result row is serialized to the shm_mq.
-3. The launcher reads from the queue in `pg_background_result_v2`.
+3. The launcher reads from the queue in `pg_background_result`.
 4. Queue blocks the writer if full (backpressure).
 
 **Receive-side liveness check (v2.0 C3)**: the launcher's read loop uses
@@ -172,7 +172,7 @@ flow through a remote `DestReceiver` that writes into `shm_mq`.
 - `DataRow`: binary-encoded tuple data.
 - `CommandComplete`: result tag (e.g., "SELECT 42"); the worker also
   writes the row count and command tag into the OUTPUT struct so
-  `result_info_v2` can report them without re-reading the queue.
+  `result_info` can report them without re-reading the queue.
 
 ### Worker hash table
 
@@ -212,7 +212,7 @@ typedef struct pg_background_worker_info {
   `pg_background_worker_info *` across the `dsm_detach` that triggers
   this callback.
 - On launcher session end: PG releases everything.
-- On explicit `detach_v2()`: `detach_worker_seg(info)` clears `seg` /
+- On explicit `detach()`: `detach_worker_seg(info)` clears `seg` /
   `mapping_pinned` before calling `dsm_detach`; the cleanup callback
   then sees the entry but does not double-detach.
 
@@ -234,10 +234,10 @@ shm_mq_wait_for_attach(mqh);   /* BLOCK until worker attaches */
 return handle;                  /* safe to return now */
 ```
 
-> Note: NOTIFY frames produced by `submit_v2` workers are written to
-> the response shm_mq but never read, since `submit_v2` callers don't
-> consume `result_v2`. They are effectively dropped. See README "NOTIFY
-> note for `submit_v2`" for the user-facing recommendation.
+> Note: NOTIFY frames produced by `submit` workers are written to
+> the response shm_mq but never read, since `submit` callers don't
+> consume `result`. They are effectively dropped. See README "NOTIFY
+> note for `submit`" for the user-facing recommendation.
 
 ### PID reuse (solved in the v2 API)
 
