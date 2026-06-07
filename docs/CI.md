@@ -2,27 +2,28 @@
 
 ## Overview
 
-The pg_background CI pipeline uses GitHub Actions with containerized PostgreSQL to ensure consistent, deterministic testing across multiple PostgreSQL versions (14-18). The workflow builds the extension on Ubuntu runners with proper development headers and copies the built artifacts into PostgreSQL Docker containers for testing.
+The pg_background CI pipeline uses GitHub Actions with containerized PostgreSQL to ensure consistent, deterministic testing across multiple PostgreSQL versions (14-19, where 19 is a beta target). The workflow builds the extension on Ubuntu runners with proper development headers and copies the built artifacts into PostgreSQL Docker containers for testing.
 
 ## Quick Start
 
 ### Local Testing with Docker
 
-The easiest way to run tests locally is using the provided `test-local.sh` script:
+The easiest way to run tests locally is using the provided `scripts/test-local.sh` script:
 
 ```bash
 # Test with default PostgreSQL version (17)
-./test-local.sh
+./scripts/test-local.sh
 
 # Test with a specific version
-./test-local.sh 14
-./test-local.sh 15
-./test-local.sh 16
-./test-local.sh 17
-./test-local.sh 18
+./scripts/test-local.sh 14
+./scripts/test-local.sh 15
+./scripts/test-local.sh 16
+./scripts/test-local.sh 17
+./scripts/test-local.sh 18
+./scripts/test-local.sh 19   # PostgreSQL 19 beta1
 
-# Test all supported versions (14-18)
-./test-local.sh all
+# Test all supported versions (14-19)
+./scripts/test-local.sh all
 ```
 
 **Requirements**: Docker must be installed and running. No local PostgreSQL installation required.
@@ -33,21 +34,60 @@ The easiest way to run tests locally is using the provided `test-local.sh` scrip
 
 | Job | Purpose | Runs On | Timeout |
 |-----|---------|---------|---------|
-| **test** | Build and test against PostgreSQL matrix | ubuntu-22.04, ubuntu-24.04 | 15 min |
-| **test-summary** | Aggregate test results | ubuntu-latest | - |
-| **lint** | Static analysis (cppcheck, clang-format) | ubuntu-latest | 10 min |
+| **test** | Build and test against the PostgreSQL × Ubuntu matrix | ubuntu-22.04, ubuntu-24.04 (PG 14–19) | 15 min |
+| **relocatable-test** | Verify `CREATE EXTENSION ... WITH SCHEMA` on every supported PG | ubuntu-24.04 (PG 14–19) | 15 min |
+| **upgrade-test** | Validate the 1.8 → 1.9 → 1.10 → 2.0 upgrade chain | ubuntu-24.04 (PG 14–18) | 15 min |
+| **assert-test** | Run the regression suite against an assert-enabled PG build | ubuntu-24.04 (PG 14–18) | 30 min |
+| **sanitizer-test** | Run the regression suite under AddressSanitizer + UndefinedBehaviorSanitizer | ubuntu-24.04 (PG 17) | 30 min |
+| **test-summary** | Aggregate matrix results into a single status check | ubuntu-24.04 | — |
+| **lint** | Static analysis (**blocking** cppcheck + clang-format) | ubuntu-24.04 | 10 min |
 | **security** | CodeQL security scanning | ubuntu-latest | 20 min |
 
 ### Test Matrix
 
-The test job runs against all combinations:
+The **test** job runs against all combinations:
 
 | Ubuntu Version | PostgreSQL Versions |
 |----------------|---------------------|
-| 22.04 | 14, 15, 16, 17, 18 |
-| 24.04 | 14, 15, 16, 17, 18 |
+| 22.04 | 14, 15, 16, 17, 18, 19 |
+| 24.04 | 14, 15, 16, 17, 18, 19 |
 
-**Total: 10 parallel test jobs**
+PostgreSQL 19 is a beta target: the server runs from the `postgres:19beta1`
+image while the build uses `postgresql-server-dev-19`. The `upgrade-test` and
+`assert-test` jobs stay at 14–18 — the former builds the prior v1.10 binary
+(which only supports 14–18) and the latter builds from the X.0 GA source
+tarball (not published during the beta cycle).
+
+**Per-job parallelism**:
+- `test`: **12** (2 OS × 6 PG)
+- `relocatable-test`: **6** (PG 14–19)
+- `upgrade-test`: **5** (PG 14–18)
+- `assert-test`: **5** (PG 14–18)
+- `sanitizer-test`: **1** (PG 17 only — the build is expensive; add more
+  versions if a class of issue is suspected to be PG-major-specific)
+- `test-summary`, `lint`, `security`: 1 each
+
+**Grand total: 31 jobs per CI run.** This is up from 19 in the
+pre-2.0 layout because the relocatable, upgrade, and sanitizer paths
+were either single-shot or didn't exist; 2.0's matrix expansion is
+deliberate so a PG-major-specific issue in any of those paths cannot
+slip through.
+
+### Sanitizer build details
+
+The `sanitizer-test` job builds PostgreSQL from source with
+`-fsanitize=address,undefined -fno-omit-frame-pointer
+-fno-sanitize-recover=all -O1 -g3` and builds pg_background with the
+matching flags. Loading an instrumented `.so` into a vanilla PG silently
+misses bugs because the runtime allocator is unhooked, so we need a
+PG that was itself instrumented.
+
+Runtime knobs:
+- `ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:halt_on_error=1` — leak
+  detection is off because postmaster's small known leaks would
+  otherwise drown out real issues; halt+abort on error so CI fails on
+  the first real find.
+- `UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1` — same idea.
 
 ### Workflow Triggers
 
@@ -83,7 +123,7 @@ The workflow automatically cancels in-progress runs when new commits are pushed 
 ### Key Features
 
 - **APT Package Caching**: Faster subsequent runs
-- **Parallel Matrix Execution**: All 10 test combinations run simultaneously
+- **Parallel Matrix Execution**: All 12 test combinations run simultaneously
 - **Artifact Upload on Failure**: Regression diffs available for debugging
 - **clang/llvm Symlink Handling**: Automatic compatibility for PGXS requirements
 
@@ -91,16 +131,16 @@ The workflow automatically cancels in-progress runs when new commits are pushed 
 
 The regression tests verify all pg_background v1.8 functionality:
 
-- **v1 API**: `pg_background_launch()`, `pg_background_result()`, `pg_background_detach()`
-- **v2 API**: `pg_background_launch_v2()`, `pg_background_detach_v2()`, `pg_background_cancel_v2()`
-- **Wait Functions**: `pg_background_wait_v2()`, `pg_background_wait_v2_timeout()`
-- **Progress Reporting**: `pg_background_progress()`, `pg_background_get_progress_v2()`
-- **Statistics**: `pg_background_stats_v2()`, `pg_background_list_v2()`
+- **Core API** (canonical, unsuffixed in 2.0): `pg_background_launch()`, `pg_background_result()`, `pg_background_detach()`, `pg_background_cancel()`
+- **Deprecated `_v2` aliases**: `pg_background_launch_v2()`, … (kept through 2.x, removed in 3.0)
+- **Wait Functions**: `pg_background_wait()` (single entrypoint; `timeout_ms` arg replaces the old `_timeout` variant)
+- **Progress Reporting**: `pg_background_report_progress()`, `pg_background_get_progress()`
+- **Statistics**: `pg_background_stats()`, `pg_background_list` (view) / `pg_background_list()`
 - **GUC Settings**: `pg_background.max_workers`, `pg_background.default_queue_size`, `pg_background.worker_timeout`
 
 ## Manual Local Testing
 
-If you prefer not to use `test-local.sh`, follow these steps:
+If you prefer not to use `scripts/test-local.sh`, follow these steps:
 
 ### 1. Start PostgreSQL Container
 
@@ -249,7 +289,7 @@ ls results/
 
 When modifying CI:
 
-1. Test changes locally using `./test-local.sh` first
+1. Test changes locally using `./scripts/test-local.sh` first
 2. Consider all matrix combinations (10 total)
 3. Update this documentation if workflow changes
 4. Keep YAML readable; complex logic goes in step scripts

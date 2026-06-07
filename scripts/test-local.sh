@@ -5,14 +5,15 @@
 # This script builds AND tests entirely within Docker containers,
 # so you don't need PostgreSQL development files installed locally.
 #
-# Usage:
-#   ./test-local.sh [PG_VERSION]
+# Usage (run from the repository root):
+#   ./scripts/test-local.sh [PG_VERSION]
 #
 # Examples:
-#   ./test-local.sh        # Test with PostgreSQL 17 (default)
-#   ./test-local.sh 14     # Test with PostgreSQL 14
-#   ./test-local.sh 15     # Test with PostgreSQL 15
-#   ./test-local.sh all    # Test with all supported versions (14-18)
+#   ./scripts/test-local.sh        # Test with PostgreSQL 17 (default)
+#   ./scripts/test-local.sh 14     # Test with PostgreSQL 14
+#   ./scripts/test-local.sh 15     # Test with PostgreSQL 15
+#   ./scripts/test-local.sh 19     # Test with PostgreSQL 19 beta1
+#   ./scripts/test-local.sh all    # Test with all supported versions (14-19)
 #
 # Requirements:
 #   - Docker installed and running
@@ -57,27 +58,46 @@ cleanup() {
     docker rm "$container" 2>/dev/null || true
 }
 
+#
+# Per-version run owns CURRENT_CONTAINER, and we install an EXIT trap that
+# cleans up whatever's currently set so a script abort (Ctrl-C, set -e
+# trip, etc.) cannot leave a docker container behind. CLAUDE.md §7 calls
+# out the explicit-cleanup-everywhere pattern as fragile and mandates the
+# trap form.
+#
+CURRENT_CONTAINER=""
+trap '[ -n "$CURRENT_CONTAINER" ] && cleanup "$CURRENT_CONTAINER"' EXIT
+
 run_test() {
     local pg_ver="$1"
     local container="${CONTAINER_NAME}_pg${pg_ver}"
+    CURRENT_CONTAINER="$container"
 
     echo ""
     echo "========================================"
     log_info "Testing with PostgreSQL $pg_ver"
     echo "========================================"
 
-    # Cleanup any existing container
+    # Cleanup any existing container from a prior aborted run.
     cleanup "$container"
 
     # Start PostgreSQL container with build tools
     log_step "Starting PostgreSQL $pg_ver container..."
+
+    # Map the major version to its Docker Hub tag. Released majors use the
+    # bare version (postgres:18); a pre-release major uses its beta tag
+    # (PostgreSQL 19 is currently postgres:19beta1). The server-dev package
+    # and install paths still use the bare major (19), so only the image tag
+    # differs. Update this when 19 reaches GA.
+    local image_tag="$pg_ver"
+    [ "$pg_ver" = "19" ] && image_tag="19beta1"
 
     # Use debian-based postgres image and install build dependencies
     docker run --name "$container" -d \
         -e POSTGRES_PASSWORD=postgres \
         -e POSTGRES_USER=postgres \
         -e POSTGRES_DB=postgres \
-        postgres:"$pg_ver"
+        postgres:"$image_tag"
 
     # Wait for PostgreSQL to be ready
     log_step "Waiting for PostgreSQL to start..."
@@ -194,7 +214,7 @@ main() {
 
     if [ "$PG_VERSION" = "all" ]; then
         # Test all supported versions
-        for ver in 14 15 16 17 18; do
+        for ver in 14 15 16 17 18 19; do
             if run_test "$ver"; then
                 passed_versions+=("$ver")
             else
@@ -232,13 +252,15 @@ case "${1:-}" in
         echo "Run pg_background regression tests using Docker."
         echo "Builds and tests entirely within containers - no local PostgreSQL needed."
         echo ""
-        echo "PG_VERSION can be: 14, 15, 16, 17, 18, or 'all'"
+        echo "PG_VERSION can be: 14, 15, 16, 17, 18, 19, or 'all'"
+        echo "(19 is PostgreSQL 19 beta, pulled as postgres:19beta1)"
         echo "Default: $DEFAULT_PG_VERSION"
         echo ""
         echo "Examples:"
         echo "  $0          # Test with PostgreSQL 17"
         echo "  $0 14       # Test with PostgreSQL 14"
-        echo "  $0 all      # Test with all versions (14-18)"
+        echo "  $0 19       # Test with PostgreSQL 19 beta1"
+        echo "  $0 all      # Test with all versions (14-19)"
         exit 0
         ;;
     *)

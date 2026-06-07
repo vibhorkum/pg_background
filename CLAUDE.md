@@ -46,11 +46,22 @@ Workers execute SQL in independent transactions. This autonomy is the feature, n
 
 Document behavioral semantics precisely. Users should never be surprised by what a function does.
 
-### Maintain two API generations carefully
-- v1 API: Preserved for backward compatibility. Do not add features to v1.
-- v2 API: Cookie-protected handles, explicit lifecycle. New features go here.
-
-Do not blur the distinction between v1 and v2 semantics.
+### One canonical API; `_v2` retired (2.0)
+- The cookie-protected, explicit-lifecycle API is now the only API. Its
+  **canonical names are unsuffixed** (`pg_background_launch`,
+  `pg_background_wait`, `pg_background_run`, …). New features go here.
+- The v1 API (unsuffixed names returning bare PIDs) was removed in 2.0. The
+  unsuffixed names were reused for the cookie-protected API.
+- Every `_v2` name that shipped through 1.10 is kept as a **thin deprecated
+  alias** (identical behavior, forwards to the canonical function) and is
+  **removed in 3.0**. Do not add new `_v2` names; new functions ship under
+  their unsuffixed name only.
+- Names introduced in 2.0 (`pg_background_report_progress`,
+  `pg_background_record_timeout`, the privilege helpers) have **no `_v2`
+  alias** — no released `_v2` name ever existed for them.
+- The canonical function names `pg_background_list` / `pg_background_stats` /
+  `pg_background_outcome` coexist with a same-named view / type / type;
+  PostgreSQL resolves them by call syntax. This is intentional.
 
 ---
 
@@ -69,7 +80,7 @@ Do not blur the distinction between v1 and v2 semantics.
 - Test upgrades explicitly: `ALTER EXTENSION pg_background UPDATE TO 'X.Y'`
 
 ### Version support
-- Supported: PostgreSQL 14, 15, 16, 17, 18
+- Supported: PostgreSQL 14, 15, 16, 17, 18, 19 (19 = beta)
 - Version-specific code uses `#if PG_VERSION_NUM` guards in C
 - Compatibility macros live in `pg_background.h`
 - Do not add version-specific SQL without strong justification
@@ -175,12 +186,15 @@ Do not blur the distinction between v1 and v2 semantics.
 
 ### Keep the SQL API simple and explicit
 - Function names clearly indicate behavior: `launch`, `result`, `detach`, `cancel`, `wait`, `submit`
-- `_v2` suffix distinguishes cookie-protected API from legacy
+- Canonical functions are **unsuffixed**: `pg_background_<verb>`
 - Return types are explicit: `pg_background_handle`, `pg_background_stats`, etc.
 
 ### Naming consistency
-- All v2 functions: `pg_background_<verb>_v2`
-- Variants with options: `pg_background_<verb>_v2_<option>` (e.g., `wait_v2_timeout`, `cancel_v2_grace`)
+- All functions: `pg_background_<verb>` (canonical, unsuffixed)
+- Options are extra parameters with sensible defaults, not name variants
+  (e.g., `cancel(pid, cookie, grace_ms DEFAULT 0)`, not `cancel_grace`)
+- `_v2`-suffixed names are deprecated aliases only (removed in 3.0); never
+  add new ones
 - Type names: `pg_background_<noun>`
 
 ### Backward compatibility
@@ -217,18 +231,18 @@ Do not blur the distinction between v1 and v2 semantics.
 - Timeout behavior: `wait_v2_timeout` returns false on timeout, true on completion
 
 ### Version-sensitive testing
-- `./test-local.sh all` tests PostgreSQL 14-18
+- `./scripts/test-local.sh all` tests PostgreSQL 14-19
 - CI matrix covers ubuntu-22.04 and ubuntu-24.04 with all PG versions
 - Version-specific expected outputs when necessary
 
 ### CI pipeline coverage
-- **Main test matrix**: Runs `make installcheck` on PG 14-18 × ubuntu-22.04/24.04
+- **Main test matrix**: Runs `make installcheck` on PG 14-19 × ubuntu-22.04/24.04
 - **Relocatable test**: Verifies extension works in custom schema (not just `public`)
-- **Upgrade test**: Validates upgrade path from 1.8 → 1.9 using `test-upgrade.sh`
+- **Upgrade test**: Validates upgrade path 1.8 → 1.9 → 1.10 using `scripts/test-upgrade.sh`
 - All three test types must pass before merge
 
 ### Upgrade path testing
-- `./test-upgrade.sh [PG_VERSION]` tests extension upgrades in Docker
+- `./scripts/test-upgrade.sh [PG_VERSION]` tests extension upgrades in Docker
 - Validates: old version installs, old functionality works, upgrade succeeds, new features work, old features preserved
 - Always test upgrade paths when adding new functions or types
 - Upgrade scripts must be additive; never remove objects in upgrade scripts
@@ -374,7 +388,7 @@ Do not blur the distinction between v1 and v2 semantics.
 - For metadata features (labels, result info, error info), add direct assertions that query and verify the value
 - Example: if adding a label parameter, add a test that queries `list_v2()` and verifies the label is visible
 
-### Shell script patterns (test-upgrade.sh, test-local.sh)
+### Shell script patterns (scripts/test-upgrade.sh, scripts/test-local.sh)
 - With `set -e`, do not rely on `$?` checks after commands that would already abort
 - Use `if ! command; then` instead of `command; if [ $? -ne 0 ]`
 - Use `psql -X -v ON_ERROR_STOP=1` in automated test scripts to ensure SQL errors propagate as non-zero exit codes
@@ -396,7 +410,7 @@ Do not blur the distinction between v1 and v2 semantics.
 | API ergonomics | Convenience wrappers, batch operations, better handle management |
 | Security hardening | Privilege model improvements, input validation |
 
-### v1.9 Features (Current)
+### v1.9 Features
 
 | Feature | Function/Type |
 |---------|---------------|
@@ -404,6 +418,14 @@ Do not blur the distinction between v1 and v2 semantics.
 | Structured errors | `pg_background_error_info_v2()`, `pg_background_error` type |
 | Result metadata | `pg_background_result_info_v2()`, `pg_background_result_info` type |
 | Batch operations | `pg_background_detach_all_v2()`, `pg_background_cancel_all_v2()` |
+
+### v1.10 Features (Current)
+
+| Feature | Function/Type |
+|---------|---------------|
+| Convenience views | `pg_background_list`, `pg_background_activity` (joins `pg_stat_activity`) |
+| Never-raises status | `pg_background_outcome_v2()`, `pg_background_outcome` type |
+| Synchronous one-shot | `pg_background_run_v2()`, `pg_background_run_result` type |
 
 ### Bad fit for pg_background
 
@@ -443,13 +465,13 @@ make installcheck
 make installcheckclean
 
 # Docker-based testing (no local PostgreSQL required)
-./test-local.sh          # Test with PostgreSQL 17 (default)
-./test-local.sh 14       # Test with specific version
-./test-local.sh all      # Test all supported versions (14-18)
+./scripts/test-local.sh          # Test with PostgreSQL 17 (default)
+./scripts/test-local.sh 14       # Test with specific version
+./scripts/test-local.sh all      # Test all supported versions (14-19)
 
 # Upgrade path testing
-./test-upgrade.sh        # Test 1.8 → 1.9 upgrade on PG 17
-./test-upgrade.sh 16     # Test upgrade on specific PG version
+./scripts/test-upgrade.sh        # Test 1.8 → 1.9 → 1.10 upgrade path on PG 17
+./scripts/test-upgrade.sh 16     # Test upgrade on specific PG version
 ```
 
 ---
@@ -488,15 +510,25 @@ Launcher Session                    Background Worker
 
 | File | Purpose |
 |------|---------|
-| `pg_background.c` | All C implementation (~3200 lines) |
-| `pg_background.h` | Version compatibility macros |
-| `pg_background.control` | Extension metadata (version 1.9) |
-| `pg_background--1.9.sql` | Current version install script |
-| `pg_background--1.8--1.9.sql` | Upgrade from 1.8 |
+| `src/pg_background.c` | Launcher-side C implementation |
+| `src/pg_background_worker.c` | Worker-process C implementation (worker_main, execute_sql_string, error_exit) |
+| `src/pg_background.h` | Version compatibility macros (public to other modules) |
+| `src/pg_background_internal.h` | Cross-file declarations between launcher and worker |
+| `pg_background.control` | Extension metadata (version 1.10) |
+| `extension/pg_background--1.10.sql` | Current version install script |
+| `extension/pg_background--1.9--1.10.sql` | Upgrade from 1.9 |
+| `extension/pg_background--1.9.sql` | 1.9 install script (kept for installs that pin 1.9) |
+| `extension/pg_background--1.8--1.9.sql` | Upgrade from 1.8 |
+| `extension/pg_background--1.8.sql` | 1.8 install script |
+| `extension/legacy/` | Pre-1.8 base + upgrade scripts kept so older installs can still upgrade to 1.10 |
 | `sql/pg_background.sql` | Regression tests |
 | `expected/pg_background.out` | Expected test output |
-| `test-local.sh` | Docker-based multi-version testing |
-| `test-upgrade.sh` | Docker-based upgrade path testing |
+| `scripts/test-local.sh` | Docker-based multi-version testing |
+| `scripts/test-upgrade.sh` | Docker-based upgrade path testing |
+| `scripts/test-relocatable.sh` | Docker-based relocatable-schema test |
+| `scripts/test-assert.sh` | Docker-based assert-enabled PG test |
+| `docs/CONTRIBUTING.md`, `docs/SECURITY.md`, `docs/CI.md` | Contributor / ops docs |
+| `windows/pg_background_win.h` | Windows DLL symbol-export shim |
 | `.github/workflows/ci.yml` | CI pipeline (test matrix, relocatable, upgrade) |
 
 ## 11. Incremental Prompt Mode (AI Workflow Contract)

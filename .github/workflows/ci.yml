@@ -2,7 +2,10 @@ name: CI - PostgreSQL Extension Build & Test
 
 on:
   push:
-    branches: [ master, main, develop, 'v1.*', 'improvements/*' ]
+    # Branches we want pre-merge CI on. v1.* / v2.* track release-line work;
+    # refactor/* is the conventional staging branch for non-feature cleanups.
+    # `improvements/*` was historical and is dropped.
+    branches: [ master, main, develop, 'v1.*', 'v2.*', 'refactor/*' ]
     tags: [ 'v*' ]
   pull_request:
     branches: [ master, main ]
@@ -27,7 +30,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, ubuntu-24.04]
-        pg: [14, 15, 16, 17, 18]
+        # 19 is PostgreSQL 19 beta (image tag postgres:19beta1; see the
+        # Start PostgreSQL container step). Drop the beta mapping at 19 GA.
+        pg: [14, 15, 16, 17, 18, 19]
 
     steps:
       - name: Checkout code
@@ -54,7 +59,7 @@ jobs:
             -e POSTGRES_USER=postgres \
             -e POSTGRES_DB=postgres \
             -p 5432:5432 \
-            postgres:${{ matrix.pg }}
+            postgres:${{ matrix.pg == 19 && '19beta1' || matrix.pg }}
 
           # Wait for PostgreSQL to be ready
           echo "Waiting for PostgreSQL to start..."
@@ -162,18 +167,24 @@ jobs:
           docker exec postgres-test mkdir -p "$SHAREDIR/extension"
           docker cp pg_background.control postgres-test:$SHAREDIR/extension/
 
-          # Copy all SQL files (base install and upgrade scripts)
-          for sqlfile in pg_background--*.sql; do
+          # Copy all SQL files (base install and upgrade scripts).
+          # Files now live under extension/ (current) and extension/legacy/.
+          for sqlfile in extension/pg_background--*.sql extension/legacy/pg_background--*.sql; do
+            [ -f "$sqlfile" ] || continue
             echo "Copying $sqlfile..."
             docker cp "$sqlfile" postgres-test:$SHAREDIR/extension/
           done
 
-          # Optionally copy bitcode if it was built successfully
-          if [ -f pg_background.bc ]; then
-            echo "Copying bitcode file..."
-            docker exec postgres-test mkdir -p "$PKGLIBDIR/bitcode/pg_background"
-            docker cp pg_background.bc postgres-test:$PKGLIBDIR/bitcode/pg_background/ || echo "Warning: Failed to copy bitcode (non-critical)"
-          fi
+          # Optionally copy bitcode if it was built successfully.
+          # PGXS emits one .bc per .o, so files live next to the sources in src/.
+          for bcfile in src/pg_background.bc src/pg_background_worker.bc; do
+            if [ -f "$bcfile" ]; then
+              echo "Copying $bcfile..."
+              docker exec postgres-test mkdir -p "$PKGLIBDIR/bitcode/pg_background/src"
+              docker cp "$bcfile" postgres-test:$PKGLIBDIR/bitcode/pg_background/src/ \
+                || echo "Warning: Failed to copy $bcfile (non-critical)"
+            fi
+          done
 
           echo "=== Verify installation in container ==="
           docker exec postgres-test ls -la "$PKGLIBDIR/pg_background.so"
@@ -229,31 +240,76 @@ jobs:
           docker stop postgres-test 2>/dev/null || true
           docker rm postgres-test 2>/dev/null || true
 
-  # Test extension relocatability (custom schema installation)
+  # Test extension relocatability (custom schema installation) on the full
+  # PG matrix — 2.0's relocatable behavior depends on the privilege-helper
+  # rename (B4), which we want validated against every supported PG.
   relocatable-test:
-    name: Relocatable Test (PG 17)
+    name: Relocatable Test (PG ${{ matrix.pg }})
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # 19 = beta; test-relocatable.sh maps it to postgres:19beta1.
+        pg: [14, 15, 16, 17, 18, 19]
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Run relocatable tests
-        run: ./test-relocatable.sh 17
+        run: ./scripts/test-relocatable.sh ${{ matrix.pg }}
 
-  # Test upgrade path from 1.8 to 1.9
+  # Test upgrade path 1.8 -> 1.9 -> 1.10 -> 2.0 on the full PG matrix.
+  # 2.0 is a major release; an upgrade-script syntax issue specific to one
+  # PG major (e.g. removed catalogs, MERGE quirks) must not slip through.
   upgrade-test:
-    name: Upgrade Test (1.8 → 1.9)
+    name: Upgrade Test 1.8→2.0 (PG ${{ matrix.pg }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # No 19: the two-binary harness builds the prior v1.10 binary, which
+        # only supports PG 14-18. A fresh 2.0 install on 19 is covered by the
+        # main regression + relocatable jobs.
+        pg: [14, 15, 16, 17, 18]
+
+    steps:
+      # fetch-depth: 0 + tags so the upgrade test can check out the v1.10 tag
+      # to build the prior-version (v1-capable) binary. 2.0 dropped the v1 C
+      # symbols, so the pre-2.0 install must be done with a pre-2.0 binary.
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Run upgrade test
+        run: ./scripts/test-upgrade.sh ${{ matrix.pg }}
+
+  # Test under AddressSanitizer + UndefinedBehaviorSanitizer.
+  #
+  # Builds PostgreSQL from source with -fsanitize=address,undefined and
+  # builds the extension with the matching flags so ASan can hook the
+  # allocator and stack metadata. Catches the memory-safety class of
+  # bugs that the assert-enabled job cannot — heap-use-after-free,
+  # stack-buffer-overflow, signed-integer-overflow, NULL-deref. Runs on
+  # PG 17 only because the build is expensive (~6 minutes); add more
+  # versions if a class of issue is suspected to be PG-major-specific.
+  sanitizer-test:
+    name: Sanitizer Test (ASan + UBSan, PG 17)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Run upgrade test
-        run: ./test-upgrade.sh 17
+      - name: Run sanitizer test
+        run: ./scripts/test-sanitizer.sh 17
 
   # Test with assert-enabled PostgreSQL (catches memory context bugs)
   assert-test:
@@ -264,6 +320,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # No 19 yet: test-assert.sh builds from the X.0 GA source tarball,
+        # which does not exist during the 19 beta cycle. Add 19 at GA.
         pg: [14, 15, 16, 17, 18]
 
     steps:
@@ -271,7 +329,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run assert-enabled test
-        run: ./test-assert.sh ${{ matrix.pg }}
+        run: ./scripts/test-assert.sh ${{ matrix.pg }}
 
       - name: Show logs on failure
         if: failure()
@@ -283,7 +341,7 @@ jobs:
   test-summary:
     name: Test Summary
     runs-on: ubuntu-24.04
-    needs: [test, relocatable-test, upgrade-test, assert-test]
+    needs: [test, relocatable-test, upgrade-test, assert-test, sanitizer-test]
     if: always()
     steps:
       - name: Check test results
@@ -302,6 +360,10 @@ jobs:
           fi
           if [ "${{ needs.assert-test.result }}" != "success" ]; then
             echo "::error::Assert-enabled test failed (memory context bug detected)"
+            exit 1
+          fi
+          if [ "${{ needs.sanitizer-test.result }}" != "success" ]; then
+            echo "::error::ASan/UBSan run failed (memory-safety bug detected)"
             exit 1
           fi
           echo "All test jobs passed!"
@@ -342,6 +404,10 @@ jobs:
           sudo apt-get install -y -qq postgresql-server-dev-${{ env.DEFAULT_PG_VERSION }}
 
       - name: Run cppcheck
+        # BLOCKING. Previously the `|| echo "::warning"` swallowed cppcheck
+        # exit codes so the job stayed green even when cppcheck found
+        # actual issues. With --error-exitcode=1 set, any cppcheck error
+        # now fails the lint job and gates merge.
         run: |
           echo "=== Running cppcheck ==="
           cppcheck --enable=all --inconclusive --std=c11 \
@@ -349,12 +415,13 @@ jobs:
             --suppress=unusedFunction \
             --suppress=unmatchedSuppression \
             --error-exitcode=1 \
-            pg_background.c || echo "::warning::cppcheck found issues (non-blocking)"
+            src/pg_background.c src/pg_background_worker.c
 
       - name: Check code formatting
         run: |
           echo "=== Checking code formatting ==="
-          clang-format --dry-run --Werror pg_background.c 2>&1 || echo "::notice::Code formatting differs from clang-format style (informational)"
+          clang-format --dry-run --Werror src/pg_background.c src/pg_background_worker.c 2>&1 \
+            || echo "::notice::Code formatting differs from clang-format style (informational)"
 
   security:
     name: Security Scan

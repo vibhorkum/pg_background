@@ -81,7 +81,7 @@ DO $$
 DECLARE
   user_input text := get_user_input();  -- Could be malicious
 BEGIN
-  PERFORM pg_background_launch_v2(
+  PERFORM pg_background_launch(
     'SELECT * FROM users WHERE id = ' || user_input  -- SQL INJECTION!
   );
 END;
@@ -96,7 +96,7 @@ DO $$
 DECLARE
   user_input text := get_user_input();
 BEGIN
-  PERFORM pg_background_launch_v2(
+  PERFORM pg_background_launch(
     format('SELECT * FROM users WHERE id = %L', user_input)  -- Safely quoted
   );
 END;
@@ -118,7 +118,7 @@ DECLARE
   active_count int;
 BEGIN
   SELECT count(*) INTO active_count
-  FROM pg_background_list_v2() AS (
+  FROM pg_background_list() AS (
     pid int4, cookie int8, launched_at timestamptz, user_id oid,
     queue_size int4, state text, sql_preview text, last_error text, consumed bool
   )
@@ -135,7 +135,7 @@ BEGIN
     RAISE EXCEPTION 'Too many active workers';
   END IF;
   
-  PERFORM pg_background_launch_v2('...');
+  PERFORM pg_background_launch('...');
 END;
 $$;
 ```
@@ -147,7 +147,7 @@ $$;
 SET statement_timeout = '5min';
 
 -- Worker inherits this setting
-SELECT pg_background_launch_v2('slow_query()');
+SELECT pg_background_launch('slow_query()');
 ```
 
 ### Autonomous Transaction Risks
@@ -158,7 +158,7 @@ SELECT pg_background_launch_v2('slow_query()');
 -- ⚠️ IMPORTANT: Worker commits are independent
 BEGIN;
   -- Launch background worker
-  SELECT * FROM pg_background_launch_v2(
+  SELECT * FROM pg_background_launch(
     'INSERT INTO audit_log VALUES (now(), ''user_login'')'
   ) AS h \gset;
   
@@ -175,12 +175,12 @@ ROLLBACK;
 
 ```sql
 -- ✅ GOOD: Audit logging (should commit regardless)
-SELECT pg_background_submit_v2(
+SELECT pg_background_submit(
   format('INSERT INTO audit_log VALUES (now(), %L)', action)
 );
 
 -- ✅ GOOD: Async notification
-SELECT pg_background_submit_v2(
+SELECT pg_background_submit(
   format('SELECT pg_notify(''channel'', %L)', message)
 );
 
@@ -189,7 +189,7 @@ BEGIN;
   INSERT INTO orders VALUES (...);
   
   -- Don't do this! Order INSERT might rollback, but payment won't
-  SELECT pg_background_submit_v2('INSERT INTO payments VALUES (...)');
+  SELECT pg_background_submit('INSERT INTO payments VALUES (...)');
 COMMIT;
 ```
 
@@ -212,9 +212,9 @@ SELECT pg_background_result(:pid);  -- Might attach to WRONG worker!
 **v2 API Fix**:
 ```sql
 -- ✅ SAFE: Cookie prevents PID reuse confusion
-SELECT * FROM pg_background_launch_v2('...') AS h \gset
+SELECT * FROM pg_background_launch('...') AS h \gset
 -- ... time passes ...
-SELECT pg_background_result_v2(:'h.pid', :'h.cookie');  -- Cookie validated
+SELECT pg_background_result(:'h.pid', :'h.cookie');  -- Cookie validated
 ```
 
 **Recommendation**: Always use v2 API in production.
@@ -225,18 +225,18 @@ SELECT pg_background_result_v2(:'h.pid', :'h.cookie');  -- Cookie validated
 
 **Mitigation**:
 - Error messages are truncated at 512 bytes (as of v1.6)
-- Use `pg_background_list_v2()` judiciously (shows SQL previews)
+- Use `pg_background_list()` judiciously (shows SQL previews)
 - Restrict `pgbackground_role` to trusted users only
 
 **Example**:
 ```sql
--- last_error in list_v2() might show:
+-- last_error in list() might show:
 -- "duplicate key value violates unique constraint: value (secret_data)"
 
 -- Protect with VIEW + RLS
 CREATE VIEW safe_worker_list AS
 SELECT pid, cookie, state, consumed
-FROM pg_background_list_v2() AS (...);
+FROM pg_background_list() AS (...);
 -- Omit sql_preview and last_error from public view
 ```
 
@@ -275,7 +275,7 @@ BEGIN
     RAISE EXCEPTION 'Worker quota exceeded';
   END IF;
   
-  SELECT * INTO h FROM pg_background_launch_v2(sql);
+  SELECT * INTO h FROM pg_background_launch(sql);
   RETURN h;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
@@ -283,7 +283,7 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 
 ### 4. Windows Cancel Limitations
 
-**Issue**: On Windows, `cancel_v2()` cannot interrupt running queries.
+**Issue**: On Windows, `cancel()` cannot interrupt running queries.
 
 **Security Impact**: Low, but could enable resource exhaustion.
 
@@ -294,7 +294,7 @@ ALTER DATABASE mydb SET statement_timeout = '10min';
 
 -- Or per-session:
 SET statement_timeout = '5min';
-SELECT pg_background_launch_v2('potentially_slow_query()');
+SELECT pg_background_launch('potentially_slow_query()');
 ```
 
 **See also**: [README.md § Windows Limitations](README.md#windows-limitations)
@@ -312,7 +312,7 @@ Production deployments should:
 - [ ] Implement application-level rate limiting
 - [ ] Use `statement_timeout` to bound query execution
 - [ ] Validate/sanitize all user input in dynamic SQL
-- [ ] Monitor `pg_background_list_v2()` for suspicious activity
+- [ ] Monitor `pg_background_list()` for suspicious activity
 - [ ] Review audit logs for privilege escalation attempts
 - [ ] Test disaster recovery with background workers running
 - [ ] Document autonomous transaction usage in app code

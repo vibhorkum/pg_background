@@ -1,24 +1,27 @@
 MODULE_big = pg_background
-OBJS = pg_background.o
+OBJS = src/pg_background.o src/pg_background_worker.o
 
 EXTENSION = pg_background
 
-# Ship the base + upgrade scripts you support
+# Allow C sources in src/ to find local headers and the Windows shim header
+# (windows/pg_background_win.h is included as "pg_background_win.h").
+PG_CPPFLAGS += -I$(srcdir)/src -I$(srcdir)/windows
+
+# Ship the 2.0 base script plus the upgrade scripts.
+#
+# We deliberately do NOT ship the pre-2.0 *base* install scripts
+# (1.8/1.9/1.10.sql): 2.0 dropped the v1 C functions, so those scripts
+# (which CREATE FUNCTION pg_background_launch ... LANGUAGE C) cannot resolve
+# their symbols against the 2.0 .so and a fresh `CREATE EXTENSION VERSION
+# '1.8'` would fail. Existing pre-2.0 installs upgrade via the --X--Y scripts
+# below (PostgreSQL only needs the upgrade scripts, not the old base scripts,
+# to migrate an installed extension). Anyone on a pre-1.8 install must first
+# reach 1.8 on the 1.10 release line before moving to 2.0.
 DATA = \
-	pg_background--1.9.sql \
-	pg_background--1.8--1.9.sql \
-	pg_background--1.8.sql \
-	pg_background--1.7--1.8.sql \
-	pg_background--1.7.sql \
-	pg_background--1.6--1.7.sql \
-	pg_background--1.6.sql \
-	pg_background--1.4--1.6.sql \
-	pg_background--1.5--1.6.sql \
-	pg_background--1.4--1.5.sql \
-	pg_background--1.0--1.4.sql \
-	pg_background--1.1--1.4.sql \
-	pg_background--1.2--1.4.sql \
-	pg_background--1.3--1.4.sql
+	extension/pg_background--2.0.sql \
+	extension/pg_background--1.10--2.0.sql \
+	extension/pg_background--1.9--1.10.sql \
+	extension/pg_background--1.8--1.9.sql
 
 # Regression
 REGRESS = pg_background

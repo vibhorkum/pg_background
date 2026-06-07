@@ -8,7 +8,7 @@ Then, change include and library directory. Reference the "Include and library d
 Set "POSTGRESQL_DIR" to your PostgreSQL install directory.<br>
 For example,<br>
 ```json
-"POSTGRESQL_DIR": "C:\\Program Files\\PostgreSQL\\9.5"
+"POSTGRESQL_DIR": "C:\\Program Files\\PostgreSQL\\16"
 ```
 2. Launch Visual Studio 2017 and Open windows\vscmake folder.
 3. Choose architecture and build pg_background.

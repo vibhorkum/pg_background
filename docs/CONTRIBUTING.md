@@ -127,10 +127,10 @@ We use `pgindent` for automatic formatting:
 
 ```bash
 # Format a single file
-pgindent pg_background.c
+pgindent src/pg_background.c
 
 # Check formatting without modifying
-pgindent --check pg_background.c
+pgindent --check src/pg_background.c
 ```
 
 **Note**: `pgindent` requires PostgreSQL source tree. See [PostgreSQL wiki](https://wiki.postgresql.org/wiki/Running_pgindent) for setup.
@@ -145,8 +145,8 @@ All code changes must include regression tests in `sql/pg_background.sql`:
 
 ```sql
 -- Test your new feature
-SELECT * FROM pg_background_launch_v2('SELECT 1') AS h \gset
-SELECT * FROM pg_background_result_v2(:h_pid, :h_cookie) AS (result int);
+SELECT * FROM pg_background_launch('SELECT 1') AS h \gset
+SELECT * FROM pg_background_result(:h_pid, :h_cookie) AS (result int);
 ```
 
 Update expected output in `expected/pg_background.out` if needed.
@@ -295,7 +295,7 @@ Large PRs should be split into smaller, logical commits for easier review.
 3. **Style**: Follows PostgreSQL conventions?
 4. **Tests**: Adequate test coverage?
 5. **Documentation**: Clear comments and README updates?
-6. **Compatibility**: Works on PG 14-18?
+6. **Compatibility**: Works on PG 14-19 (19 = beta)?
 
 ### Responding to Feedback
 
@@ -323,7 +323,7 @@ PRs require:
 SET client_min_messages = DEBUG1;
 
 -- Check active workers
-SELECT * FROM pg_background_list_v2() AS (...);
+SELECT * FROM pg_background_list() AS (...);
 
 -- Check DSM usage
 SELECT * FROM pg_shmem_allocations WHERE name LIKE '%pg_background%';
