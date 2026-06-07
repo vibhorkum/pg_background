@@ -1,6 +1,6 @@
 # pg_background: Production-Grade Background SQL for PostgreSQL
 
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14--18-blue.svg)](https://www.postgresql.org/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14--19-blue.svg)](https://www.postgresql.org/)
 [![Version](https://img.shields.io/badge/version-2.0-brightgreen.svg)](https://github.com/vibhorkum/pg_background)
 [![License](https://img.shields.io/badge/license-PostgreSQL-green.svg)](LICENSE)
 [![CI](https://github.com/vibhorkum/pg_background/actions/workflows/ci.yml/badge.svg)](https://github.com/vibhorkum/pg_background/actions/workflows/ci.yml)
@@ -200,6 +200,7 @@ The full chain is documented in [`docs/MIGRATION.md`](docs/MIGRATION.md).
 
 | PostgreSQL Version | Support Status | Notes |
 |--------------------|----------------|-------|
+| **19** | 🧪 Beta Support | Validated against 19beta1; explicit proc.h / latch.h / wait_event.h includes |
 | **18** | ✅ Fully Supported | TupleDescAttr compatibility layer |
 | **17** | ✅ Fully Tested | Recommended for new deployments |
 | **16** | ✅ Fully Tested | Production-ready |
@@ -1993,7 +1994,7 @@ Docker-based testing requires no local PostgreSQL installation:
 ./scripts/test-local.sh 14
 ./scripts/test-local.sh 16
 
-# Test all supported versions (14-18)
+# Test all supported versions (14-19)
 ./scripts/test-local.sh all
 ```
 
@@ -2021,7 +2022,7 @@ The project uses GitHub Actions for continuous integration:
 
 | Job | Description |
 |-----|-------------|
-| **test** | Matrix: PG 14-18 × ubuntu-22.04/24.04 regression tests |
+| **test** | Matrix: PG 14-19 × ubuntu-22.04/24.04 regression tests |
 | **relocatable-test** | Validates custom schema installation (PG 17) |
 | **upgrade-test** | Validates 1.8 → 1.9 upgrade path |
 | **lint** | cppcheck and clang-format checks |
@@ -2096,6 +2097,6 @@ Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group.
 **Version**: 2.0
 **Last Updated**: 2026-05-10
 **Minimum PostgreSQL**: 14
-**Tested Through**: PostgreSQL 18
+**Tested Through**: PostgreSQL 18 (PostgreSQL 19 beta validated)
 
 **Companion docs**: [`docs/MIGRATION.md`](docs/MIGRATION.md) · [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/COOKBOOK.md`](docs/COOKBOOK.md) · [`docs/SECURITY.md`](docs/SECURITY.md) · [`docs/CI.md`](docs/CI.md) · [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md)

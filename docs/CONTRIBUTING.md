@@ -295,7 +295,7 @@ Large PRs should be split into smaller, logical commits for easier review.
 3. **Style**: Follows PostgreSQL conventions?
 4. **Tests**: Adequate test coverage?
 5. **Documentation**: Clear comments and README updates?
-6. **Compatibility**: Works on PG 14-18?
+6. **Compatibility**: Works on PG 14-19 (19 = beta)?
 
 ### Responding to Feedback
 

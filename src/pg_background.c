@@ -11,7 +11,7 @@
  *     contrib/pg_background/pg_background.c
  *
  * SUPPORTED VERSIONS
- *     PostgreSQL 14, 15, 16, 17, 18 (PG_VERSION_NUM >= 140000 && < 190000)
+ *     PostgreSQL 14, 15, 16, 17, 18, 19 (PG_VERSION_NUM >= 140000 && < 200000)
  *
  * DESCRIPTION
  *     This extension provides the ability to launch SQL commands in
@@ -49,8 +49,18 @@
 #include "miscadmin.h"
 #include "parser/analyze.h"
 #include "pgstat.h"
+/*
+ * PG_WAIT_EXTENSION moved to utils/wait_event.h when wait events were split
+ * out of pgstat.h (PG 16). PostgreSQL 19 no longer re-exports it from
+ * pgstat.h, so include the dedicated header explicitly where it exists.
+ */
+#if PG_VERSION_NUM >= 160000
+#include "utils/wait_event.h"
+#endif
 #include "storage/dsm.h"
 #include "storage/ipc.h"
+#include "storage/latch.h"
+#include "storage/proc.h"
 #include "storage/shm_mq.h"
 #include "storage/shm_toc.h"
 #include "tcop/pquery.h"
@@ -80,13 +90,13 @@
 #include "pg_background_internal.h"
 
 /*
- * Supported PostgreSQL versions for pg_background 2.0: 14, 15, 16, 17, 18.
+ * Supported PostgreSQL versions for pg_background 2.0: 14, 15, 16, 17, 18, 19.
  * Older versions would require resurrecting compat shims that have already
  * been pruned; newer majors need re-validation of background-worker and
- * shm_mq APIs.
+ * shm_mq APIs. PostgreSQL 19 is currently a beta target.
  */
-#if PG_VERSION_NUM < 140000 || PG_VERSION_NUM >= 190000
-#error "pg_background 2.0 supports PostgreSQL 14-18 only"
+#if PG_VERSION_NUM < 140000 || PG_VERSION_NUM >= 200000
+#error "pg_background 2.0 supports PostgreSQL 14-19 only"
 #endif
 
 /* ============================================================================

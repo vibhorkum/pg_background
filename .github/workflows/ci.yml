@@ -30,7 +30,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, ubuntu-24.04]
-        pg: [14, 15, 16, 17, 18]
+        # 19 is PostgreSQL 19 beta (image tag postgres:19beta1; see the
+        # Start PostgreSQL container step). Drop the beta mapping at 19 GA.
+        pg: [14, 15, 16, 17, 18, 19]
 
     steps:
       - name: Checkout code
@@ -57,7 +59,7 @@ jobs:
             -e POSTGRES_USER=postgres \
             -e POSTGRES_DB=postgres \
             -p 5432:5432 \
-            postgres:${{ matrix.pg }}
+            postgres:${{ matrix.pg == 19 && '19beta1' || matrix.pg }}
 
           # Wait for PostgreSQL to be ready
           echo "Waiting for PostgreSQL to start..."
@@ -249,7 +251,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg: [14, 15, 16, 17, 18]
+        # 19 = beta; test-relocatable.sh maps it to postgres:19beta1.
+        pg: [14, 15, 16, 17, 18, 19]
 
     steps:
       - name: Checkout code
@@ -269,6 +272,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # No 19: the two-binary harness builds the prior v1.10 binary, which
+        # only supports PG 14-18. A fresh 2.0 install on 19 is covered by the
+        # main regression + relocatable jobs.
         pg: [14, 15, 16, 17, 18]
 
     steps:
@@ -314,6 +320,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # No 19 yet: test-assert.sh builds from the X.0 GA source tarball,
+        # which does not exist during the 19 beta cycle. Add 19 at GA.
         pg: [14, 15, 16, 17, 18]
 
     steps:

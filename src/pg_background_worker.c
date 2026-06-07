@@ -36,6 +36,7 @@
 #include "storage/dsm.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
+#include "storage/proc.h"      /* MyProc; StatementTimeout (moved here in PG 19) */
 #include "storage/shm_mq.h"
 #include "storage/shm_toc.h"
 #include "tcop/pquery.h"
@@ -48,6 +49,7 @@
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
 #include "utils/timeout.h"
+#include "utils/timestamp.h"   /* GetCurrentTimestamp (no longer transitively included in PG 19) */
 
 #include <signal.h>
 
@@ -66,7 +68,7 @@
  * - PortalDefineQuery now takes 7 args (adds CachedPlanSource *)
  * - PortalRun now takes 6 args (removes run_once boolean)
  *
- * These thin wrappers keep the worker body unchanged across PG 14-18.
+ * These thin wrappers keep the worker body unchanged across PG 14-19.
  */
 static inline void
 pgbg_portal_define_query_compat(Portal portal,

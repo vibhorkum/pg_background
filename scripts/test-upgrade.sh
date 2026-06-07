@@ -32,6 +32,18 @@ set -euo pipefail
 DEFAULT_PG_VERSION="17"
 PG_VERSION="${1:-$DEFAULT_PG_VERSION}"
 
+# Docker Hub tag for the image. Released majors use the bare version;
+# PostgreSQL 19 is currently a pre-release pulled as postgres:19beta1. The
+# server-dev package and install paths still use the bare major (19).
+#
+# NOTE: this two-binary harness builds the PRIOR_REF (v1.10) binary, which
+# only supports PostgreSQL 14-18. Running this test against 19 therefore
+# requires a PRIOR_REF whose code compiles on 19 (v1.10 does not); the
+# default invocation cannot target 19. A fresh 2.0 install on 19 is covered
+# by the main regression and relocatable tests instead.
+PG_IMAGE_TAG="$PG_VERSION"
+[ "$PG_VERSION" = "19" ] && PG_IMAGE_TAG="19beta1"
+
 # Git ref whose code provides the prior-version (v1-capable) binary.
 PRIOR_REF="${PRIOR_REF:-v1.10}"
 
@@ -107,7 +119,7 @@ main() {
         -e POSTGRES_PASSWORD=postgres \
         -e POSTGRES_USER=postgres \
         -e POSTGRES_DB=postgres \
-        postgres:"$PG_VERSION"
+        postgres:"$PG_IMAGE_TAG"
 
     log_step "Waiting for PostgreSQL to start..."
     for i in {1..30}; do
@@ -423,6 +435,8 @@ case "${1:-}" in
         echo "source with PRIOR_REF=<git ref> (default: v1.10)."
         echo ""
         echo "PG_VERSION can be: 14, 15, 16, 17, 18 (default: $DEFAULT_PG_VERSION)"
+        echo "(19 needs a PRIOR_REF that compiles on PG19; v1.10 does not, so"
+        echo " the default invocation cannot target 19 — see header notes.)"
         exit 0
         ;;
     *)

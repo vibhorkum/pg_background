@@ -2,7 +2,7 @@
 
 ## Overview
 
-The pg_background CI pipeline uses GitHub Actions with containerized PostgreSQL to ensure consistent, deterministic testing across multiple PostgreSQL versions (14-18). The workflow builds the extension on Ubuntu runners with proper development headers and copies the built artifacts into PostgreSQL Docker containers for testing.
+The pg_background CI pipeline uses GitHub Actions with containerized PostgreSQL to ensure consistent, deterministic testing across multiple PostgreSQL versions (14-19, where 19 is a beta target). The workflow builds the extension on Ubuntu runners with proper development headers and copies the built artifacts into PostgreSQL Docker containers for testing.
 
 ## Quick Start
 
@@ -20,8 +20,9 @@ The easiest way to run tests locally is using the provided `scripts/test-local.s
 ./scripts/test-local.sh 16
 ./scripts/test-local.sh 17
 ./scripts/test-local.sh 18
+./scripts/test-local.sh 19   # PostgreSQL 19 beta1
 
-# Test all supported versions (14-18)
+# Test all supported versions (14-19)
 ./scripts/test-local.sh all
 ```
 
@@ -33,9 +34,9 @@ The easiest way to run tests locally is using the provided `scripts/test-local.s
 
 | Job | Purpose | Runs On | Timeout |
 |-----|---------|---------|---------|
-| **test** | Build and test against the PostgreSQL × Ubuntu matrix | ubuntu-22.04, ubuntu-24.04 (PG 14–18) | 15 min |
-| **relocatable-test** | Verify `CREATE EXTENSION ... WITH SCHEMA` on every supported PG | ubuntu-24.04 (PG 14–18) | 15 min |
-| **upgrade-test** | Validate the 1.8 → 1.9 → 1.10 → 2.0 upgrade chain on every supported PG | ubuntu-24.04 (PG 14–18) | 15 min |
+| **test** | Build and test against the PostgreSQL × Ubuntu matrix | ubuntu-22.04, ubuntu-24.04 (PG 14–19) | 15 min |
+| **relocatable-test** | Verify `CREATE EXTENSION ... WITH SCHEMA` on every supported PG | ubuntu-24.04 (PG 14–19) | 15 min |
+| **upgrade-test** | Validate the 1.8 → 1.9 → 1.10 → 2.0 upgrade chain | ubuntu-24.04 (PG 14–18) | 15 min |
 | **assert-test** | Run the regression suite against an assert-enabled PG build | ubuntu-24.04 (PG 14–18) | 30 min |
 | **sanitizer-test** | Run the regression suite under AddressSanitizer + UndefinedBehaviorSanitizer | ubuntu-24.04 (PG 17) | 30 min |
 | **test-summary** | Aggregate matrix results into a single status check | ubuntu-24.04 | — |
@@ -48,19 +49,25 @@ The **test** job runs against all combinations:
 
 | Ubuntu Version | PostgreSQL Versions |
 |----------------|---------------------|
-| 22.04 | 14, 15, 16, 17, 18 |
-| 24.04 | 14, 15, 16, 17, 18 |
+| 22.04 | 14, 15, 16, 17, 18, 19 |
+| 24.04 | 14, 15, 16, 17, 18, 19 |
+
+PostgreSQL 19 is a beta target: the server runs from the `postgres:19beta1`
+image while the build uses `postgresql-server-dev-19`. The `upgrade-test` and
+`assert-test` jobs stay at 14–18 — the former builds the prior v1.10 binary
+(which only supports 14–18) and the latter builds from the X.0 GA source
+tarball (not published during the beta cycle).
 
 **Per-job parallelism**:
-- `test`: **10** (2 OS × 5 PG)
-- `relocatable-test`: **5** (PG 14–18)
+- `test`: **12** (2 OS × 6 PG)
+- `relocatable-test`: **6** (PG 14–19)
 - `upgrade-test`: **5** (PG 14–18)
 - `assert-test`: **5** (PG 14–18)
 - `sanitizer-test`: **1** (PG 17 only — the build is expensive; add more
   versions if a class of issue is suspected to be PG-major-specific)
 - `test-summary`, `lint`, `security`: 1 each
 
-**Grand total: 28 jobs per CI run.** This is up from 19 in the
+**Grand total: 31 jobs per CI run.** This is up from 19 in the
 pre-2.0 layout because the relocatable, upgrade, and sanitizer paths
 were either single-shot or didn't exist; 2.0's matrix expansion is
 deliberate so a PG-major-specific issue in any of those paths cannot
@@ -116,7 +123,7 @@ The workflow automatically cancels in-progress runs when new commits are pushed 
 ### Key Features
 
 - **APT Package Caching**: Faster subsequent runs
-- **Parallel Matrix Execution**: All 10 test combinations run simultaneously
+- **Parallel Matrix Execution**: All 12 test combinations run simultaneously
 - **Artifact Upload on Failure**: Regression diffs available for debugging
 - **clang/llvm Symlink Handling**: Automatic compatibility for PGXS requirements
 

@@ -4,7 +4,7 @@
  *     Header file for pg_background extension.
  *
  * This file contains compatibility macros for supporting multiple
- * PostgreSQL versions (14-18).
+ * PostgreSQL versions (14-19).
  *
  * Copyright (c) 2014-2026, Vibhor Kumar and contributors
  * Portions Copyright (c) 1996-2026, PostgreSQL Global Development Group

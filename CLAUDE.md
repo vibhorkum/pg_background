@@ -80,7 +80,7 @@ Document behavioral semantics precisely. Users should never be surprised by what
 - Test upgrades explicitly: `ALTER EXTENSION pg_background UPDATE TO 'X.Y'`
 
 ### Version support
-- Supported: PostgreSQL 14, 15, 16, 17, 18
+- Supported: PostgreSQL 14, 15, 16, 17, 18, 19 (19 = beta)
 - Version-specific code uses `#if PG_VERSION_NUM` guards in C
 - Compatibility macros live in `pg_background.h`
 - Do not add version-specific SQL without strong justification
@@ -231,12 +231,12 @@ Document behavioral semantics precisely. Users should never be surprised by what
 - Timeout behavior: `wait_v2_timeout` returns false on timeout, true on completion
 
 ### Version-sensitive testing
-- `./scripts/test-local.sh all` tests PostgreSQL 14-18
+- `./scripts/test-local.sh all` tests PostgreSQL 14-19
 - CI matrix covers ubuntu-22.04 and ubuntu-24.04 with all PG versions
 - Version-specific expected outputs when necessary
 
 ### CI pipeline coverage
-- **Main test matrix**: Runs `make installcheck` on PG 14-18 × ubuntu-22.04/24.04
+- **Main test matrix**: Runs `make installcheck` on PG 14-19 × ubuntu-22.04/24.04
 - **Relocatable test**: Verifies extension works in custom schema (not just `public`)
 - **Upgrade test**: Validates upgrade path 1.8 → 1.9 → 1.10 using `scripts/test-upgrade.sh`
 - All three test types must pass before merge
@@ -467,7 +467,7 @@ make installcheckclean
 # Docker-based testing (no local PostgreSQL required)
 ./scripts/test-local.sh          # Test with PostgreSQL 17 (default)
 ./scripts/test-local.sh 14       # Test with specific version
-./scripts/test-local.sh all      # Test all supported versions (14-18)
+./scripts/test-local.sh all      # Test all supported versions (14-19)
 
 # Upgrade path testing
 ./scripts/test-upgrade.sh        # Test 1.8 → 1.9 → 1.10 upgrade path on PG 17
