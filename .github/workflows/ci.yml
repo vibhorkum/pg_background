@@ -114,8 +114,17 @@ jobs:
 
           sudo apt-get update -qq
 
-          # Install client + server-dev headers for the target major
-          sudo apt-get install -y -qq \
+          # Install client + server-dev headers for the target major. For the
+          # 19 beta, target the pgdg-testing release: its packages sit at a
+          # lower apt priority (100) than stable (500), so without -t apt would
+          # pull stable libpq-dev 18.x and break postgresql-server-dev-19's
+          # "libpq-dev (>= 19~~)" dependency. -t raises testing's priority so
+          # the matching beta libpq-dev / client are pulled together.
+          APT_TARGET=""
+          if [ "${{ matrix.pg }}" = "19" ]; then
+            APT_TARGET="-t $(lsb_release -cs)-pgdg-testing"
+          fi
+          sudo apt-get install -y -qq $APT_TARGET \
             postgresql-client-${{ matrix.pg }} \
             postgresql-server-dev-${{ matrix.pg }}
 
