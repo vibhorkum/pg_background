@@ -102,6 +102,16 @@ jobs:
             $(lsb_release -cs)-pgdg main" \
             | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
 
+          # Pre-release majors (PostgreSQL 19 during its beta cycle) are not in
+          # the main pgdg component yet; their client/server-dev packages live
+          # in the version-scoped pgdg-testing component. Add it only for 19 so
+          # released majors keep pulling exclusively from pgdg main.
+          if [ "${{ matrix.pg }}" = "19" ]; then
+            echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt \
+              $(lsb_release -cs)-pgdg-testing main 19" \
+              | sudo tee /etc/apt/sources.list.d/pgdg-testing.list >/dev/null
+          fi
+
           sudo apt-get update -qq
 
           # Install client + server-dev headers for the target major
