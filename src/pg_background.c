@@ -520,7 +520,6 @@ pgbg_wait_for_stop(pg_background_worker_info *info, int32 timeout_ms)
     {
         pid_t            wpid = 0;
         BgwHandleStatus  hs;
-        long             elapsed_ms;
         long             remaining_us;
 
         hs = GetBackgroundWorkerPid(info->handle, &wpid);
@@ -529,7 +528,7 @@ pgbg_wait_for_stop(pg_background_worker_info *info, int32 timeout_ms)
 
         if (!infinite)
         {
-            elapsed_ms = pgbg_timestamp_diff_ms(start, GetCurrentTimestamp());
+            long             elapsed_ms = pgbg_timestamp_diff_ms(start, GetCurrentTimestamp());
             if (elapsed_ms >= timeout_ms)
                 return false;
             remaining_us = (timeout_ms - elapsed_ms) * 1000L;
@@ -885,7 +884,7 @@ pg_background_launch(PG_FUNCTION_ARGS)
 {
     text   *sql;
     int32   queue_size;
-    char   *label = NULL;
+    const char *label = NULL;
     pid_t   pid;
     uint64  cookie = pg_background_make_cookie();
 
@@ -935,7 +934,7 @@ pg_background_submit(PG_FUNCTION_ARGS)
 {
     text   *sql;
     int32   queue_size;
-    char   *label = NULL;
+    const char *label = NULL;
     pid_t   pid;
     uint64  cookie = pg_background_make_cookie();
 
@@ -1655,8 +1654,7 @@ pg_background_list(PG_FUNCTION_ARGS)
     {
         MemoryContext oldcontext;
         HASH_SEQ_STATUS hstat;
-        pg_background_worker_info *info;
-        int capacity;
+        const pg_background_worker_info *info;
         int count = 0;
 
         funcctx = SRF_FIRSTCALL_INIT();
@@ -1667,7 +1665,7 @@ pg_background_list(PG_FUNCTION_ARGS)
         /* Snapshot all PIDs to avoid race with cleanup callbacks */
         if (worker_hash != NULL)
         {
-            capacity = hash_get_num_entries(worker_hash);
+            int capacity = hash_get_num_entries(worker_hash);
             if (capacity > 0)
             {
                 state->pids = palloc(sizeof(pid_t) * capacity);
@@ -1940,7 +1938,7 @@ cleanup_worker_info(dsm_segment *seg, Datum pid_datum)
         shm_toc *toc = shm_toc_attach(PG_BACKGROUND_MAGIC, dsm_segment_address(seg));
         if (toc != NULL)
         {
-            pg_background_output *output =
+            const pg_background_output *output =
                 shm_toc_lookup(toc, PG_BACKGROUND_KEY_OUTPUT, true);
             if (output != NULL && output->error_sqlstate[0] != '\0')
                 has_dsm_error = true;
@@ -2500,7 +2498,6 @@ pg_background_result_info(PG_FUNCTION_ARGS)
     int32       pid = PG_GETARG_INT32(0);
     int64       cookie = PG_GETARG_INT64(1);
     pg_background_worker_info *info;
-    shm_toc    *toc;
     pg_background_output *output;
     TupleDesc   tupdesc;
     Datum       values[6];
@@ -2541,7 +2538,7 @@ pg_background_result_info(PG_FUNCTION_ARGS)
     /* Read metadata from shared memory */
     if (info->seg != NULL)
     {
-        toc = shm_toc_attach(PG_BACKGROUND_MAGIC, dsm_segment_address(info->seg));
+        shm_toc    *toc = shm_toc_attach(PG_BACKGROUND_MAGIC, dsm_segment_address(info->seg));
         if (toc != NULL)
         {
             output = shm_toc_lookup(toc, PG_BACKGROUND_KEY_OUTPUT, true);
