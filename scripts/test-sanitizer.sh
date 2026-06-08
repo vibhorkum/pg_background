@@ -127,7 +127,12 @@ docker exec "${CONTAINER_NAME}" bash -c "
         make CFLAGS='${SAN_CFLAGS}' LDFLAGS='${SAN_LDFLAGS}' clean
     sudo -u postgres env ${SAN_RUNTIME_OPTS} PATH=/usr/local/pgsql/bin:\$PATH \
         make CFLAGS='${SAN_CFLAGS}' LDFLAGS='${SAN_LDFLAGS}'
-    sudo -u postgres env ${SAN_RUNTIME_OPTS} PATH=/usr/local/pgsql/bin:\$PATH \
+    # 'make install' only copies the built artifacts into the PostgreSQL tree
+    # under /usr/local/pgsql, which is root-owned (PG was built+installed as
+    # root). Run it as root, not postgres, or the install fails with
+    # 'Permission denied'. The instrumented build above still runs as postgres;
+    # install does no compilation, so the sanitizer flags do not apply here.
+    env ${SAN_RUNTIME_OPTS} PATH=/usr/local/pgsql/bin:\$PATH \
         make install
 "
 

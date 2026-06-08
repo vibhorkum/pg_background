@@ -102,10 +102,29 @@ jobs:
             $(lsb_release -cs)-pgdg main" \
             | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
 
+          # Pre-release majors (PostgreSQL 19 during its beta cycle) are not in
+          # the main pgdg component yet; their client/server-dev packages live
+          # in the version-scoped pgdg-testing component. Add it only for 19 so
+          # released majors keep pulling exclusively from pgdg main.
+          if [ "${{ matrix.pg }}" = "19" ]; then
+            echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt \
+              $(lsb_release -cs)-pgdg-testing main 19" \
+              | sudo tee /etc/apt/sources.list.d/pgdg-testing.list >/dev/null
+          fi
+
           sudo apt-get update -qq
 
-          # Install client + server-dev headers for the target major
-          sudo apt-get install -y -qq \
+          # Install client + server-dev headers for the target major. For the
+          # 19 beta, target the pgdg-testing release: its packages sit at a
+          # lower apt priority (100) than stable (500), so without -t apt would
+          # pull stable libpq-dev 18.x and break postgresql-server-dev-19's
+          # "libpq-dev (>= 19~~)" dependency. -t raises testing's priority so
+          # the matching beta libpq-dev / client are pulled together.
+          APT_TARGET=""
+          if [ "${{ matrix.pg }}" = "19" ]; then
+            APT_TARGET="-t $(lsb_release -cs)-pgdg-testing"
+          fi
+          sudo apt-get install -y -qq $APT_TARGET \
             postgresql-client-${{ matrix.pg }} \
             postgresql-server-dev-${{ matrix.pg }}
 
@@ -410,10 +429,32 @@ jobs:
         # now fails the lint job and gates merge.
         run: |
           echo "=== Running cppcheck ==="
+          # -D PG_VERSION_NUM: cppcheck has no PostgreSQL headers, so without a
+          #   value the version gate in pg_background.c (#if PG_VERSION_NUM
+          #   < 140000 || >= 200000) sees an undefined macro (=0), trips the
+          #   intentional #error, and cppcheck cannot extract a valid
+          #   configuration for the file (preprocessorErrorDirective /
+          #   noValidConfiguration, which fail --error-exitcode). Pin a
+          #   supported major so cppcheck analyzes a real build configuration.
+          # nullPointerRedundantCheck / ctunullpointer: false positives. The
+          #   code dereferences pointers from shm_toc_lookup(toc, KEY,
+          #   /*missing_ok=*/false) (never returns NULL) and from hash lookups
+          #   that are NULL-checked before use; the guards exit via
+          #   ereport(ERROR) and check_rights(), which are noreturn. cppcheck
+          #   models neither, so it flags the defensive checks as redundant.
+          # missingInclude / missingIncludeSystem: cppcheck has none of the
+          #   PostgreSQL headers on the include path, so every "..." and <...>
+          #   server header reads as missing. That is expected (we are linting
+          #   our own .c, not the server) and counts toward --error-exitcode,
+          #   so both are suppressed.
           cppcheck --enable=all --inconclusive --std=c11 \
+            -DPG_VERSION_NUM=170000 \
+            --suppress=missingInclude \
             --suppress=missingIncludeSystem \
             --suppress=unusedFunction \
             --suppress=unmatchedSuppression \
+            --suppress=nullPointerRedundantCheck \
+            --suppress=ctunullpointer \
             --error-exitcode=1 \
             src/pg_background.c src/pg_background_worker.c
 

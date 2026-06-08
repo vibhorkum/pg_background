@@ -518,10 +518,6 @@ exists_binary_recv_fn(Oid type)
 static void
 execute_sql_string(const char *sql, pg_background_output *output)
 {
-    List       *raw_parsetree_list;
-    ListCell   *lc1;
-    bool        isTopLevel;
-    int         commands_remaining;
     MemoryContext parsecontext;
     MemoryContext oldcontext;
     /*
@@ -559,6 +555,11 @@ execute_sql_string(const char *sql, pg_background_output *output)
 
     PG_TRY();
     {
+        List       *raw_parsetree_list;
+        ListCell   *lc1;
+        bool        isTopLevel;
+        int         commands_remaining;
+
         oldcontext = MemoryContextSwitchTo(parsecontext);
         raw_parsetree_list = pg_parse_query(sql);
         commands_remaining = list_length(raw_parsetree_list);
