@@ -382,7 +382,7 @@ to use when porting.
 | `pg_background_result(pid)` → `SETOF record` | `pg_background_result_v2(pid, cookie)` → `SETOF record` | Same one-time consumption rule. Avoid calling on errored workers — use `error_info_v2` instead |
 | `pg_background_detach(pid)` → `void` | `pg_background_detach_v2(pid, cookie)` → `void` | Detach removes tracking; the worker keeps running and commits |
 | _(no equivalent)_ | `pg_background_submit_v2(sql, queue_size, label)` | Dedicated fire-and-forget; clearer than `launch + detach` |
-| _(no equivalent)_ | `pg_background_cancel_v2(pid, cookie, grace_ms)` | SIGTERM, optional grace window before SIGKILL |
+| _(no equivalent)_ | `pg_background_cancel_v2(pid, cookie, grace_ms)` | Cooperative SIGTERM; optional grace window to wait for the worker to stop (never force-killed) |
 | _(no equivalent)_ | `pg_background_wait_v2(pid, cookie, timeout_ms)` | Block until exit, optionally bounded |
 | _(no equivalent)_ | `pg_background_list_v2()` / `pg_background_list` view | Per-session worker registry with state, label, last_error |
 | _(no equivalent)_ | `pg_background_stats_v2()` | Counters: launched, completed, failed, canceled, timed_out, active, avg_execution_ms |

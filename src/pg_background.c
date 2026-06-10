@@ -1512,14 +1512,22 @@ pg_background_detach(PG_FUNCTION_ARGS)
  *     Cancel a background worker (v2 API).
  *
  * v2.0: Single entrypoint with optional grace_ms (defaulted in SQL to 0).
- * Sets the cancel flag and sends SIGTERM. If grace_ms > 0, waits up to
- * grace_ms milliseconds for the worker to exit cleanly before sending
- * SIGKILL. Grace period is clamped to PGBG_GRACE_MS_MAX (1 hour).
+ * Sets the cancel flag and sends SIGTERM (cooperative cancellation). If
+ * grace_ms > 0, additionally waits up to grace_ms milliseconds for the
+ * worker to stop, so the caller can observe whether it actually exited.
+ * Grace period is clamped to PGBG_GRACE_MS_MAX (1 hour).
+ *
+ * Cancellation is cooperative: we never SIGKILL the worker, because a
+ * bgworker killed by a signal forces a postmaster crash-recovery restart of
+ * the entire cluster (see pgbg_send_cancel_signals). An unresponsive worker
+ * is therefore not force-stopped; bound runaway SQL with statement_timeout
+ * or pg_background.worker_timeout instead.
  *
  * Parameters:
  *     pid      - Worker process ID
  *     cookie   - Worker identity cookie from launch
- *     grace_ms - Grace period before SIGKILL (0 = immediate SIGTERM only)
+ *     grace_ms - Time to wait for cooperative exit (0 = send SIGTERM and
+ *                return immediately, without waiting)
  */
 Datum
 pg_background_cancel(PG_FUNCTION_ARGS)
@@ -1822,12 +1830,24 @@ pgbg_request_cancel(pg_background_worker_info *info)
 
 /*
  * pgbg_send_cancel_signals
- *     Send cancellation signals to worker.
+ *     Send cancellation signal to worker.
  *
- * Sends SIGTERM for cooperative cancellation. If grace_ms > 0,
- * waits for worker to exit, then sends SIGKILL if still running.
+ * Sends SIGTERM for cooperative cancellation. If grace_ms > 0, waits up to
+ * grace_ms for the worker to stop cooperatively (exponential-backoff poll),
+ * purely so the caller can observe whether the worker actually exited.
  *
- * Uses exponential backoff polling during the grace period.
+ * We deliberately do NOT escalate to SIGKILL. The postmaster treats any
+ * child that dies from an uncaught signal (SIGKILL included) as a crash and
+ * responds by terminating every other backend and reinitializing shared
+ * memory -- a cluster-wide restart that drops all sessions. A direct
+ * SIGKILL of a background worker therefore turns a single cancel into a
+ * server crash. There is no signal that force-stops a bgworker without
+ * tripping crash recovery, so cancellation is cooperative only. This
+ * matches the documented contract (cancel requests termination; it does not
+ * guarantee an immediate stop) and the worker's own SIGTERM handler, which
+ * converts the signal into a catchable query cancel and exits via
+ * proc_exit(1) -- an exit code the postmaster accepts without crash
+ * recovery.
  */
 static void
 pgbg_send_cancel_signals(pg_background_worker_info *info, int32 grace_ms)
@@ -1870,16 +1890,13 @@ pgbg_send_cancel_signals(pg_background_worker_info *info, int32 grace_ms)
         return;
 
     /*
-     * Wait up to grace_ms for the worker to exit cooperatively.
-     * If it does not exit, escalate to SIGKILL on Unix.
+     * Best-effort: wait up to grace_ms for the worker to stop after the
+     * cooperative SIGTERM above. If it has not stopped by then we simply
+     * return -- the worker keeps running and will still honor the pending
+     * cancel at its next interrupt check. We never force-kill (see the
+     * function header for why SIGKILL would crash the whole cluster).
      */
-    if (pgbg_wait_for_stop(info, grace_ms))
-        return;
-
-#ifndef WIN32
-    if (info->pid > 0)
-        (void) kill(info->pid, SIGKILL);
-#endif
+    (void) pgbg_wait_for_stop(info, grace_ms);
 }
 
 /*
