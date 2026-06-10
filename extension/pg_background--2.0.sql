@@ -131,8 +131,9 @@ AS 'MODULE_PATHNAME', 'pg_background_cancel'
 LANGUAGE C STRICT;
 
 COMMENT ON FUNCTION pg_background_cancel(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4) IS
-'Cancel a worker. grace_ms = 0 sends SIGTERM only; grace_ms > 0 waits that '
-'many ms for clean exit before SIGKILL (capped at 1 hour).';
+'Cooperatively cancel a worker via SIGTERM. grace_ms = 0 signals and returns '
+'immediately; grace_ms > 0 also waits up to that many ms (capped at 1 hour) '
+'for the worker to stop. The worker is never force-killed.';
 
 -- single wait entrypoint with optional timeout_ms (<=0 blocks forever).
 CREATE FUNCTION pg_background_wait(

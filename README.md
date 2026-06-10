@@ -559,7 +559,7 @@ SELECT * FROM pg_background_get_progress(:'h.pid', :'h.cookie');
 | `pg_background_error_info(pid, cookie)` | `pg_background_error` | Get structured error details (v1.9) | Error diagnostics |
 | `pg_background_detach(pid, cookie)` | `void` | Stop tracking worker (worker continues) | Cleanup bookkeeping |
 | `pg_background_detach_all()` | `int4` | Detach all workers in session (v1.9) | Session cleanup |
-| `pg_background_cancel(pid, cookie, grace_ms DEFAULT 0)` | `void` | Cancel via SIGTERM (`grace_ms=0`) or SIGTERM + grace + SIGKILL (`grace_ms>0`, capped at 3600000) | Terminate unwanted work |
+| `pg_background_cancel(pid, cookie, grace_ms DEFAULT 0)` | `void` | Cooperative cancel via SIGTERM; `grace_ms>0` also waits up to N ms (capped at 3600000) for the worker to stop. Never force-kills (see Limitation 10) | Terminate unwanted work |
 | `pg_background_cancel_all()` | `int4` | Cancel all workers in session (v1.9) | Emergency cleanup |
 | `pg_background_wait(pid, cookie, timeout_ms DEFAULT 0)` | `bool` | `timeout_ms<=0` blocks indefinitely (returns `true`); `>0` waits up to N ms (returns `true` if stopped, `false` on timeout) | Synchronous barrier / bounded wait |
 | `pg_background_list()` | `SETOF record` | List known workers in current session (column-definition list required) | Internal — prefer the view below |
@@ -588,7 +588,7 @@ SELECT * FROM pg_background_get_progress(:'h.pid', :'h.cookie');
 - `pid`: Process ID from handle
 - `cookie`: Unique identifier from handle (prevents PID reuse)
 - `label`: Optional worker label for identification (v1.9, default: NULL)
-- `grace_ms`: Milliseconds to wait before forceful termination (capped at 1 hour)
+- `grace_ms`: Milliseconds to wait for the worker to stop cooperatively after SIGTERM (capped at 1 hour); the worker is never force-killed
 - `timeout_ms`: Milliseconds to wait for completion
 
 **Handle Type**:
@@ -1736,58 +1736,40 @@ be `NULL`. All ordinary SQL errors (syntax, constraint violation,
 division-by-zero, `RAISE EXCEPTION`, statement cancel) propagate through the
 normal path and appear as their real SQLSTATE, not `08006`.
 
-### 10. Worker SIGSEGV in PG bgworker startup under concurrent cancel
+### 10. Cancellation is cooperative — workers are never force-killed
 
-**Limitation**: when several long-running workers are launched in close
-succession in the same session and then cancelled concurrently (e.g. via
-`pg_background_cancel_by_label` against a label pattern matching ≥2
-workers, especially with `grace_ms > 0`), one of the workers occasionally
-dies with **signal 11 (SIGSEGV)**. PostgreSQL's postmaster sees the
-abnormal exit and triggers a crash-recovery cycle, terminating the launcher
-session.
+**Behavior**: `pg_background_cancel(pid, cookie, grace_ms)` (and the
+batch/by-label variants) cancel a worker **cooperatively** by sending
+`SIGTERM`. The worker converts that into a catchable query cancel at its
+next interrupt check and exits via `proc_exit(1)`. When `grace_ms > 0` the
+launcher additionally waits up to `grace_ms` for the worker to stop, purely
+so the caller can observe whether it did. **pg_background never escalates to
+`SIGKILL`.**
 
-**Diagnostic finding (2.0)**: the segfaulting worker emits **zero log
-output** before dying — no `STATEMENT`, no `ERROR`, not even an early
-`elog(LOG, ...)` placed at the very top of `pg_background_worker_main`.
-That means the SIGSEGV occurs in PostgreSQL's background-worker startup
-machinery, **before our `worker_main` runs and before
-`pq_redirect_to_shm_mq` has installed the launcher-bound logging
-destination**. We initially suspected a race in our `error_exit`; the
-PGBG-DBG-instrumented run showed a working-but-canceled sibling worker
-walking every `error_exit` stage cleanly while the dying worker emitted
-nothing at all — so the bug is upstream of pg_background, in the PG
-bgworker setup path that runs between postmaster fork and our entry point.
+**Why no force-kill**: PostgreSQL's postmaster treats *any* child that dies
+from an uncaught signal (`SIGKILL`, `SIGSEGV`, …) as a crash and responds by
+terminating every other backend and reinitializing shared memory — a
+cluster-wide restart that drops all sessions. There is no signal that
+force-stops a background worker without tripping crash recovery, so a worker
+that ignores the cooperative cancel cannot be force-killed safely.
 
-**Reproduction**: ~75% under the in-tree regression suite on PG 17 in
-Docker with 2–4 concurrent `pg_sleep(60)` workers receiving SIGTERM in
-close succession (the previous form of the `cancel_by_label` test).
-Single-worker `cancel_by_label` does not reproduce.
+**History (fixed in 2.0)**: earlier 2.0 development builds *did* escalate to
+`kill(pid, SIGKILL)` after the grace period expired. This was benign on fast
+machines (the worker almost always exited cooperatively within `grace_ms`,
+so the `SIGKILL` never fired) but caused a hard-to-trace **cluster crash on
+slow or loaded hosts** — most visibly on the Debian/pgdg build farm and
+under Valgrind, where a worker still in PostgreSQL's bgworker *startup* path
+when the grace timer expired was `SIGKILL`ed before it ever reached
+`pg_background_worker_main`. Because `SIGKILL` is uncatchable, the dying
+worker emitted **zero log output**, which made the failure look like an
+upstream SIGSEGV in PG's startup machinery. It was not: it was this
+extension force-killing its own worker. Removing the `SIGKILL` escalation
+resolves it.
 
-**Defensive C-side fixes in 2.0** (section F): two unrelated cleanups in
-`pg_background_worker_error_exit` that match PostgreSQL's standard error
-handling pattern. They do not fix the SIGSEGV (it isn't in our code) but
-they're real correctness improvements:
-- Removed a `RESUME_INTERRUPTS()` before `proc_exit(1)` so a queued
-  second-cancel cannot be dispatched into proc_exit's cleanup chain.
-- Reordered to `EmitErrorReport → AbortCurrentTransaction → FlushErrorState`
-  (was `emit → flush → abort`, which let abort callbacks fire into an
-  empty error stack).
-
-**Workarounds for callers**:
-- Prefer `cancel(pid, cookie, 0)` (immediate SIGTERM, no grace) followed
-  by an explicit `wait(pid, cookie, timeout_ms)` for a bounded wait.
-- Stagger cancels: cancel one worker at a time rather than calling
-  `cancel_by_label` against a pattern matching many concurrent workers.
-- Set `statement_timeout` on the worker SQL so it self-cancels rather than
-  relying on cluster-side cancellation.
-
-**Status / next steps**: settling this requires a core dump from a
-reproduction (run with `ulimit -c unlimited`, install the dump path in
-`/proc/sys/kernel/core_pattern`, and inspect with `gdb`). The frame at
-the top of the stack will identify which PG infrastructure call SEGVs —
-most likely `procsignal_sigusr1_handler`, `BackgroundWorkerInitializeConnection`,
-or a `LWLock` access during early shared-memory setup, before our worker
-has installed its own SIGTERM handler.
+**Guidance for unresponsive workers**: a worker stuck in CPU-bound SQL that
+never reaches an interrupt check will not stop on cancel. Bound such work
+ahead of time with `statement_timeout` or the `pg_background.worker_timeout`
+GUC so it self-cancels.
 
 
 ---

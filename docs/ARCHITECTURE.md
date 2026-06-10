@@ -308,7 +308,10 @@ error-cleanup sequence:
    into proc_exit's cleanup chain via `CHECK_FOR_INTERRUPTS` with no
    live `PG_TRY` to catch the resulting `ereport(ERROR)`.
 
-A residual race in PostgreSQL's BGW startup machinery (before our
-worker_main runs) can still produce a worker SIGSEGV under aggressive
-multi-worker concurrent cancel; see README "Known Limitations §10" for
-the workaround and the next-step debug recipe.
+Cancellation is cooperative only: the launcher sends SIGTERM and, for a
+non-zero grace period, waits for the worker to stop, but it never escalates
+to SIGKILL. Force-killing a bgworker would make the postmaster treat the
+death as a crash and restart the whole cluster. (Earlier 2.0 builds did
+escalate to SIGKILL after the grace period and crashed the cluster on slow
+hosts when the grace timer beat a still-starting worker; see README "Known
+Limitations §10".)
