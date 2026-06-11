@@ -376,8 +376,14 @@ pg_background_worker_main(Datum main_arg)
         /* If cancel was requested before we began, exit quietly */
         if (*(volatile uint32 *)&input->cancel_requested != 0)
         {
-            ResourceOwnerDelete(CurrentResourceOwner);
-            CurrentResourceOwner = NULL;
+            /*
+             * The GUC-restore transaction above already committed, which
+             * resets CurrentResourceOwner to NULL, so there is nothing to
+             * delete here. Calling ResourceOwnerDelete(CurrentResourceOwner)
+             * with a NULL owner trips the Assert(owner != CurrentResourceOwner)
+             * in assert-enabled builds. proc_exit() performs the remaining
+             * shutdown cleanup, including the worker's startup ResourceOwner.
+             */
             proc_exit(0);
         }
 
