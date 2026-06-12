@@ -2073,6 +2073,48 @@ BEGIN
     RAISE NOTICE 'canonical launch/wait/result OK';
 END$$;
 NOTICE:  canonical launch/wait/result OK
+-- Regression guard for the pre-execution cancel branch in the worker.
+--
+-- A grace=0 cancel issued immediately after launch tries to set
+-- input->cancel_requested before the worker reaches its pre-SQL cancel check.
+-- When the worker observes the flag there it must exit via proc_exit(0) WITHOUT
+-- calling ResourceOwnerDelete(CurrentResourceOwner): the GUC-restore transaction
+-- has already committed, so CurrentResourceOwner is NULL there, and deleting a
+-- NULL owner trips Assert(owner != CurrentResourceOwner) on assert-enabled
+-- builds (observed as a worker SIGABRT on the PG19 beta PGDG assert build).
+--
+-- The race between the cancel landing and the worker reaching the check is
+-- inherent, so this is a best-effort trigger rather than a deterministic one;
+-- it is most likely to fire under the slower assert/sanitizer CI lanes, which
+-- is exactly where the crash showed up. The assertion is path-independent:
+-- whichever branch the worker takes, the launcher marked it canceled, so
+-- workers_canceled must advance by >= 1 and the worker must be gone. Single
+-- worker only (see the cancel_by_label note re: upstream multi-worker startup
+-- SIGSEGV).
+DO $$
+DECLARE
+    h               pg_background_handle;
+    before_canceled int8;
+    after_canceled  int8;
+BEGIN
+    SELECT workers_canceled INTO before_canceled FROM pg_background_stats();
+
+    h := pg_background_launch('SELECT pg_sleep(60)', 65536, 'canon-prestart-cancel');
+    /* grace_ms => 0: request immediate termination as early as possible */
+    PERFORM pg_background_cancel(h.pid, h.cookie, 0);
+
+    PERFORM pg_background_wait(h.pid, h.cookie);
+    PERFORM pg_background_detach(h.pid, h.cookie);
+
+    SELECT workers_canceled INTO after_canceled FROM pg_background_stats();
+    IF after_canceled - before_canceled < 1 THEN
+        RAISE EXCEPTION 'pre-start cancel: workers_canceled +%, want >= 1',
+            after_canceled - before_canceled;
+    END IF;
+
+    RAISE NOTICE 'canonical pre-start cancel (grace=0) OK';
+END$$;
+NOTICE:  canonical pre-start cancel (grace=0) OK
 -- run() and run_query() canonical helpers.
 SELECT (pg_background_run('SELECT 1', timeout_ms => 5000)).completed AS run_completed;
  run_completed 
