@@ -2004,6 +2004,19 @@ cleanup_worker_info(dsm_segment *seg, Datum pid_datum)
                 pfree(info->last_error);
                 info->last_error = NULL;
             }
+
+            /*
+             * Free the cached full SQL so repeated launches in a long-lived
+             * session do not grow backend memory without bound. full_sql can
+             * be up to PGBG_FULL_SQL_MAX_LEN and is attacker-sized; the worker
+             * is finished or detached and the entry is about to be removed, so
+             * nothing references it now.
+             */
+            if (info->full_sql != NULL)
+            {
+                pfree(info->full_sql);
+                info->full_sql = NULL;
+            }
         }
     }
 
