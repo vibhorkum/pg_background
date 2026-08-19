@@ -203,6 +203,7 @@ typedef struct pg_background_worker_info
     bool        mapping_pinned;         /* True if DSM mapping is pinned */
     bool        result_disabled;        /* True if launched via submit (fire-and-forget) */
     bool        canceled;               /* True if cancel was called on this worker */
+    bool        active;                 /* True while a result reader holds this segment */
     TimestampTz launched_at;            /* Launch timestamp for monitoring */
     int32       queue_size;             /* Queue size used for this worker */
     char        sql_preview[PGBG_SQL_PREVIEW_LEN + 1];  /* SQL preview for list */
