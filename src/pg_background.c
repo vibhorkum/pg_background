@@ -1855,34 +1855,26 @@ pgbg_send_cancel_signals(pg_background_worker_info *info, int32 grace_ms)
     if (info == NULL)
         return;
 
-#ifndef WIN32
     /*
-     * Windows Cancel Limitations
+     * Cooperative cancellation, PID-reuse safe.
      *
-     * On Unix systems, we use SIGTERM for cooperative cancellation.
-     * Worker checks InterruptPending via CHECK_FOR_INTERRUPTS() in query
-     * execution and can cleanly abort.
+     * Prefer TerminateBackgroundWorker(handle): the postmaster validates the
+     * worker's slot generation before signalling, so it can never deliver a
+     * signal to an unrelated process that reused this worker's PID after the
+     * worker exited. Raw kill(info->pid, SIGTERM) has no such check -- a stale
+     * tracking entry could signal an innocent backend. TerminateBackgroundWorker
+     * still requests termination via SIGTERM (the worker's handle_sigterm turns
+     * it into a catchable query cancel and proc_exit(1)); it never SIGKILLs, so
+     * it does not trip cluster-wide crash recovery. It also works on Windows,
+     * giving the pre-execution cancel that the raw kill() path could not.
      *
-     * WINDOWS LIMITATION:
-     * PostgreSQL on Windows does not support signal-based cancellation for
-     * background workers. The kill() call is not available, and Windows uses
-     * events/threads for IPC instead of signals.
-     *
-     * WORKAROUND:
-     * Workers still check input->cancel_requested flag before executing SQL.
-     * This provides limited cancellation:
-     * - WORKS: Cancel before worker starts SQL execution
-     * - DOES NOT WORK: Cancel during long-running query (no mid-query interrupt)
-     *
-     * PRODUCTION IMPACT:
-     * On Windows, cancel() may not interrupt long-running SQL. Use:
-     * 1. statement_timeout to bound query execution time
-     * 2. Application-level timeouts
-     * 3. Connection pooler limits
-     *
-     * SEE ALSO: windows/ReadMe.md for Windows-specific build notes
+     * The kill() fallback only runs on non-Windows and only if we somehow have
+     * no handle (should not happen for a tracked worker).
      */
-    if (info->pid > 0)
+    if (info->handle != NULL)
+        TerminateBackgroundWorker(info->handle);
+#ifndef WIN32
+    else if (info->pid > 0)
         (void) kill(info->pid, SIGTERM);
 #endif
 

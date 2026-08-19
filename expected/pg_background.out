@@ -350,6 +350,47 @@ SELECT count(*) AS cancel2_count FROM t_cancel2;
 (1 row)
 
 -- -------------------------------------------------------------------------
+-- Security: cancellation uses TerminateBackgroundWorker(handle),
+-- which the postmaster validates against the worker's slot generation, so it
+-- can never signal an unrelated process that reused the worker's PID. The
+-- PID-reuse race is not deterministically reproducible in a regression, so we
+-- assert the behavioural contract instead: cancel must still stop a running
+-- worker. (The report documents the safety property.)
+-- -------------------------------------------------------------------------
+SELECT (h).pid AS cancel_pid, (h).cookie AS cancel_cookie
+FROM (SELECT pg_background_launch('SELECT pg_sleep(30)') AS h) s
+\gset
+SELECT pg_sleep(0.2);
+ pg_sleep 
+----------
+ 
+(1 row)
+
+SELECT pg_background_cancel(:cancel_pid, :cancel_cookie, 3000);
+ pg_background_cancel 
+----------------------
+ 
+(1 row)
+
+SELECT pg_background_wait(:cancel_pid, :cancel_cookie, 2000) AS cancel_stopped;
+ cancel_stopped 
+----------------
+ t
+(1 row)
+
+SELECT pg_background_detach(:cancel_pid, :cancel_cookie);
+ pg_background_detach 
+----------------------
+ 
+(1 row)
+
+SELECT 'PASS' AS cancel_works;
+ cancel_works 
+--------------
+ PASS
+(1 row)
+
+-- -------------------------------------------------------------------------
 -- ops: detach all stopped workers returned by list
 -- -------------------------------------------------------------------------
 DO $$
