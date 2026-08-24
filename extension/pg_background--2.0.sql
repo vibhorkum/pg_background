@@ -771,10 +771,14 @@ COMMENT ON FUNCTION pg_background_full_sql(pg_catalog.int4, pg_catalog.int8) IS
 -- ----------------------------------------------------------------------
 
 DO $$
+DECLARE
+  _saved_search_path pg_catalog.text := pg_catalog.current_setting('search_path');
 BEGIN
+  PERFORM pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true);
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pgbackground_role') THEN
     CREATE ROLE pgbackground_role NOLOGIN INHERIT;
   END IF;
+  PERFORM pg_catalog.set_config('search_path', _saved_search_path, true);
 END
 $$;
 
@@ -789,7 +793,7 @@ CREATE FUNCTION pg_background_grant_privileges(
 RETURNS BOOLEAN
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $function$
 /*
  * Grant the standard set of pg_background privileges to a role.
@@ -877,7 +881,7 @@ CREATE FUNCTION pg_background_revoke_privileges(
 RETURNS BOOLEAN
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $function$
 /*
  * Revoke the standard set of pg_background privileges from a role.
@@ -1254,10 +1258,10 @@ CREATE FUNCTION pg_background_drop_executor_role()
 RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
 BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pgbackground_role') THEN
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'pgbackground_role') THEN
     EXECUTE 'DROP ROLE pgbackground_role';
   END IF;
 END;
@@ -1276,9 +1280,12 @@ $$;
 
 DO $lockdown$
 DECLARE
-    _ext_oid oid;
-    _r       record;
+    _saved_search_path pg_catalog.text := pg_catalog.current_setting('search_path');
+    _ext_oid pg_catalog.oid;
+    _r       pg_catalog.record;
 BEGIN
+    PERFORM pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true);
+
     SELECT oid INTO _ext_oid FROM pg_extension WHERE extname = 'pg_background';
     IF _ext_oid IS NULL THEN
         RAISE EXCEPTION 'pg_background extension not found during lockdown';
@@ -1292,7 +1299,7 @@ BEGIN
            AND d.refobjid = _ext_oid
            AND d.deptype = 'e'
     LOOP
-        EXECUTE format('REVOKE ALL ON FUNCTION %s FROM public', _r.sig);
+        EXECUTE pg_catalog.format('REVOKE ALL ON FUNCTION %s FROM public', _r.sig);
     END LOOP;
 
     FOR _r IN
@@ -1307,7 +1314,7 @@ BEGIN
            AND t.typtype = 'c'
            AND c.relkind = 'c'
     LOOP
-        EXECUTE format('REVOKE ALL ON TYPE %s FROM public', _r.typname);
+        EXECUTE pg_catalog.format('REVOKE ALL ON TYPE %s FROM public', _r.typname);
     END LOOP;
 
     FOR _r IN
@@ -1319,7 +1326,9 @@ BEGIN
            AND d.deptype = 'e'
            AND c.relkind IN ('v', 'r', 'm')
     LOOP
-        EXECUTE format('REVOKE ALL ON TABLE %s FROM public', _r.relname);
+        EXECUTE pg_catalog.format('REVOKE ALL ON TABLE %s FROM public', _r.relname);
     END LOOP;
+
+    PERFORM pg_catalog.set_config('search_path', _saved_search_path, true);
 END
 $lockdown$;

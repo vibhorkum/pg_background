@@ -285,10 +285,14 @@ COMMENT ON FUNCTION pg_background_cancel_all_v2() IS
 -- ----------------------------------------------------------------------
 
 DO $$
+DECLARE
+  _saved_search_path pg_catalog.text := pg_catalog.current_setting('search_path');
 BEGIN
+  PERFORM pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true);
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pgbackground_role') THEN
     CREATE ROLE pgbackground_role NOLOGIN INHERIT;
   END IF;
+  PERFORM pg_catalog.set_config('search_path', _saved_search_path, true);
 END
 $$;
 
@@ -307,7 +311,7 @@ CREATE OR REPLACE FUNCTION grant_pg_background_privileges(
 RETURNS BOOLEAN
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $function$
 DECLARE
     _sql text;
@@ -422,7 +426,7 @@ CREATE OR REPLACE FUNCTION revoke_pg_background_privileges(
 RETURNS BOOLEAN
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $function$
 DECLARE
     _sql text;
@@ -581,7 +585,7 @@ CREATE OR REPLACE FUNCTION pg_background_drop_executor_role()
 RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $$
 BEGIN
   -- best effort: revoke from all members is admin's responsibility if needed

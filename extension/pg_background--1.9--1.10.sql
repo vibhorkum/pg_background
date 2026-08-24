@@ -486,8 +486,10 @@ REVOKE ALL ON TABLE pg_background_activity FROM public;
 -- Grant new objects to the executor role.
 DO $do$
 DECLARE
+    _saved_search_path pg_catalog.text := pg_catalog.current_setting('search_path');
     _schema text;
 BEGIN
+    PERFORM pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true);
     SELECT n.nspname INTO _schema
       FROM pg_extension e
       JOIN pg_namespace n ON n.oid = e.extnamespace
@@ -501,6 +503,7 @@ BEGIN
         EXECUTE format('GRANT SELECT ON TABLE %I.pg_background_list TO pgbackground_role', _schema);
         EXECUTE format('GRANT SELECT ON TABLE %I.pg_background_activity TO pgbackground_role', _schema);
     END IF;
+    PERFORM pg_catalog.set_config('search_path', _saved_search_path, true);
 END
 $do$;
 
@@ -517,7 +520,7 @@ CREATE OR REPLACE FUNCTION grant_pg_background_privileges(
 RETURNS BOOLEAN
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $function$
 DECLARE
     _ext_oid oid;
@@ -597,7 +600,7 @@ CREATE OR REPLACE FUNCTION revoke_pg_background_privileges(
 RETURNS BOOLEAN
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $function$
 DECLARE
     _ext_oid oid;
@@ -676,8 +679,10 @@ $function$;
 
 DO $do$
 DECLARE
+    _saved_search_path pg_catalog.text := pg_catalog.current_setting('search_path');
     _schema text;
 BEGIN
+    PERFORM pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true);
     SELECT n.nspname INTO _schema
       FROM pg_extension e
       JOIN pg_namespace n ON n.oid = e.extnamespace
@@ -698,5 +703,6 @@ BEGIN
     ) THEN
         EXECUTE format('REVOKE ALL ON FUNCTION %I.pg_background_drop_executor_role() FROM pgbackground_role', _schema);
     END IF;
+    PERFORM pg_catalog.set_config('search_path', _saved_search_path, true);
 END
 $do$;

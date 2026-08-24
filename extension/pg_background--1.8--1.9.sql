@@ -129,7 +129,7 @@ CREATE OR REPLACE FUNCTION grant_pg_background_privileges(
 RETURNS BOOLEAN
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $function$
 DECLARE
     _sql text;
@@ -243,7 +243,7 @@ CREATE OR REPLACE FUNCTION revoke_pg_background_privileges(
 RETURNS BOOLEAN
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog
+SET search_path = pg_catalog, pg_temp
 AS $function$
 DECLARE
     _sql text;
