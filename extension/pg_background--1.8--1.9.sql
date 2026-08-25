@@ -132,13 +132,13 @@ SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $function$
 DECLARE
-    _sql text;
-    _schema text;
+    _sql pg_catalog.text;
+    _schema pg_catalog.text;
 BEGIN
     -- Get the schema where this extension is installed
     SELECT n.nspname INTO _schema
-    FROM pg_extension e
-    JOIN pg_namespace n ON n.oid = e.extnamespace
+    FROM pg_catalog.pg_extension e
+    JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
     WHERE e.extname = 'pg_background';
 
     IF _schema IS NULL THEN
@@ -146,87 +146,87 @@ BEGIN
     END IF;
 
     -- v1
-    _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_launch(pg_catalog.text, pg_catalog.int4) TO %I', _schema, role_name);
+    _sql := pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.pg_background_launch(pg_catalog.text, pg_catalog.int4) TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_result(pg_catalog.int4) TO %I', _schema, role_name);
+    _sql := pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.pg_background_result(pg_catalog.int4) TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_detach(pg_catalog.int4) TO %I', _schema, role_name);
+    _sql := pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.pg_background_detach(pg_catalog.int4) TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
     -- v2 types
-    _sql := format('GRANT USAGE ON TYPE %I.pg_background_handle TO %I', _schema, role_name);
+    _sql := pg_catalog.format('GRANT USAGE ON TYPE %I.pg_background_handle TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('GRANT USAGE ON TYPE %I.pg_background_stats TO %I', _schema, role_name);
+    _sql := pg_catalog.format('GRANT USAGE ON TYPE %I.pg_background_stats TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('GRANT USAGE ON TYPE %I.pg_background_progress TO %I', _schema, role_name);
+    _sql := pg_catalog.format('GRANT USAGE ON TYPE %I.pg_background_progress TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
     -- v1.9 types
-    _sql := format('GRANT USAGE ON TYPE %I.pg_background_result_info TO %I', _schema, role_name);
+    _sql := pg_catalog.format('GRANT USAGE ON TYPE %I.pg_background_result_info TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('GRANT USAGE ON TYPE %I.pg_background_error TO %I', _schema, role_name);
+    _sql := pg_catalog.format('GRANT USAGE ON TYPE %I.pg_background_error TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
     -- v2 launch/submit (both 2-arg from 1.8 and 3-arg with label from 1.9)
-    _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_launch_v2(pg_catalog.text, pg_catalog.int4) TO %I', _schema, role_name);
+    _sql := pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.pg_background_launch_v2(pg_catalog.text, pg_catalog.int4) TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_launch_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.text) TO %I', _schema, role_name);
+    _sql := pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.pg_background_launch_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.text) TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_submit_v2(pg_catalog.text, pg_catalog.int4) TO %I', _schema, role_name);
+    _sql := pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.pg_background_submit_v2(pg_catalog.text, pg_catalog.int4) TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_submit_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.text) TO %I', _schema, role_name);
+    _sql := pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.pg_background_submit_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.text) TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_result_v2(pg_catalog.int4, pg_catalog.int8) TO %I', _schema, role_name);
+    _sql := pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.pg_background_result_v2(pg_catalog.int4, pg_catalog.int8) TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_detach_v2(pg_catalog.int4, pg_catalog.int8) TO %I', _schema, role_name);
+    _sql := pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.pg_background_detach_v2(pg_catalog.int4, pg_catalog.int8) TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_cancel_v2(pg_catalog.int4, pg_catalog.int8) TO %I', _schema, role_name);
+    _sql := pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.pg_background_cancel_v2(pg_catalog.int4, pg_catalog.int8) TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_cancel_v2_grace(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4) TO %I', _schema, role_name);
+    _sql := pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.pg_background_cancel_v2_grace(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4) TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_wait_v2(pg_catalog.int4, pg_catalog.int8) TO %I', _schema, role_name);
+    _sql := pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.pg_background_wait_v2(pg_catalog.int4, pg_catalog.int8) TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_wait_v2_timeout(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4) TO %I', _schema, role_name);
+    _sql := pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.pg_background_wait_v2_timeout(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4) TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_list_v2() TO %I', _schema, role_name);
+    _sql := pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.pg_background_list_v2() TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
     -- v2 stats and progress (from 1.8)
-    _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_stats_v2() TO %I', _schema, role_name);
+    _sql := pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.pg_background_stats_v2() TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_progress(pg_catalog.int4, pg_catalog.text) TO %I', _schema, role_name);
+    _sql := pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.pg_background_progress(pg_catalog.int4, pg_catalog.text) TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_get_progress_v2(pg_catalog.int4, pg_catalog.int8) TO %I', _schema, role_name);
+    _sql := pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.pg_background_get_progress_v2(pg_catalog.int4, pg_catalog.int8) TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
     -- v1.9 new functions
-    _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_result_info_v2(pg_catalog.int4, pg_catalog.int8) TO %I', _schema, role_name);
+    _sql := pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.pg_background_result_info_v2(pg_catalog.int4, pg_catalog.int8) TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_error_info_v2(pg_catalog.int4, pg_catalog.int8) TO %I', _schema, role_name);
+    _sql := pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.pg_background_error_info_v2(pg_catalog.int4, pg_catalog.int8) TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_detach_all_v2() TO %I', _schema, role_name);
+    _sql := pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.pg_background_detach_all_v2() TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('GRANT EXECUTE ON FUNCTION %I.pg_background_cancel_all_v2() TO %I', _schema, role_name);
+    _sql := pg_catalog.format('GRANT EXECUTE ON FUNCTION %I.pg_background_cancel_all_v2() TO %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
     RETURN TRUE;
@@ -246,13 +246,13 @@ SECURITY DEFINER
 SET search_path = pg_catalog, pg_temp
 AS $function$
 DECLARE
-    _sql text;
-    _schema text;
+    _sql pg_catalog.text;
+    _schema pg_catalog.text;
 BEGIN
     -- Get the schema where this extension is installed
     SELECT n.nspname INTO _schema
-    FROM pg_extension e
-    JOIN pg_namespace n ON n.oid = e.extnamespace
+    FROM pg_catalog.pg_extension e
+    JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
     WHERE e.extname = 'pg_background';
 
     IF _schema IS NULL THEN
@@ -260,87 +260,87 @@ BEGIN
     END IF;
 
     -- v1.9 new functions first
-    _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_cancel_all_v2() FROM %I', _schema, role_name);
+    _sql := pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_background_cancel_all_v2() FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_detach_all_v2() FROM %I', _schema, role_name);
+    _sql := pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_background_detach_all_v2() FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_error_info_v2(pg_catalog.int4, pg_catalog.int8) FROM %I', _schema, role_name);
+    _sql := pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_background_error_info_v2(pg_catalog.int4, pg_catalog.int8) FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_result_info_v2(pg_catalog.int4, pg_catalog.int8) FROM %I', _schema, role_name);
+    _sql := pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_background_result_info_v2(pg_catalog.int4, pg_catalog.int8) FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
     -- v2 stats and progress
-    _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_get_progress_v2(pg_catalog.int4, pg_catalog.int8) FROM %I', _schema, role_name);
+    _sql := pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_background_get_progress_v2(pg_catalog.int4, pg_catalog.int8) FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_progress(pg_catalog.int4, pg_catalog.text) FROM %I', _schema, role_name);
+    _sql := pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_background_progress(pg_catalog.int4, pg_catalog.text) FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_stats_v2() FROM %I', _schema, role_name);
+    _sql := pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_background_stats_v2() FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
     -- v2
-    _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_list_v2() FROM %I', _schema, role_name);
+    _sql := pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_background_list_v2() FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_wait_v2_timeout(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4) FROM %I', _schema, role_name);
+    _sql := pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_background_wait_v2_timeout(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4) FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_wait_v2(pg_catalog.int4, pg_catalog.int8) FROM %I', _schema, role_name);
+    _sql := pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_background_wait_v2(pg_catalog.int4, pg_catalog.int8) FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_cancel_v2_grace(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4) FROM %I', _schema, role_name);
+    _sql := pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_background_cancel_v2_grace(pg_catalog.int4, pg_catalog.int8, pg_catalog.int4) FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_cancel_v2(pg_catalog.int4, pg_catalog.int8) FROM %I', _schema, role_name);
+    _sql := pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_background_cancel_v2(pg_catalog.int4, pg_catalog.int8) FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_detach_v2(pg_catalog.int4, pg_catalog.int8) FROM %I', _schema, role_name);
+    _sql := pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_background_detach_v2(pg_catalog.int4, pg_catalog.int8) FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_result_v2(pg_catalog.int4, pg_catalog.int8) FROM %I', _schema, role_name);
+    _sql := pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_background_result_v2(pg_catalog.int4, pg_catalog.int8) FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
     -- v2 launch/submit (both 2-arg from 1.8 and 3-arg with label from 1.9)
-    _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_submit_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.text) FROM %I', _schema, role_name);
+    _sql := pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_background_submit_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.text) FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_submit_v2(pg_catalog.text, pg_catalog.int4) FROM %I', _schema, role_name);
+    _sql := pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_background_submit_v2(pg_catalog.text, pg_catalog.int4) FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_launch_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.text) FROM %I', _schema, role_name);
+    _sql := pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_background_launch_v2(pg_catalog.text, pg_catalog.int4, pg_catalog.text) FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_launch_v2(pg_catalog.text, pg_catalog.int4) FROM %I', _schema, role_name);
+    _sql := pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_background_launch_v2(pg_catalog.text, pg_catalog.int4) FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
     -- v1.9 types
-    _sql := format('REVOKE USAGE ON TYPE %I.pg_background_error FROM %I', _schema, role_name);
+    _sql := pg_catalog.format('REVOKE USAGE ON TYPE %I.pg_background_error FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('REVOKE USAGE ON TYPE %I.pg_background_result_info FROM %I', _schema, role_name);
+    _sql := pg_catalog.format('REVOKE USAGE ON TYPE %I.pg_background_result_info FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('REVOKE USAGE ON TYPE %I.pg_background_progress FROM %I', _schema, role_name);
+    _sql := pg_catalog.format('REVOKE USAGE ON TYPE %I.pg_background_progress FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('REVOKE USAGE ON TYPE %I.pg_background_stats FROM %I', _schema, role_name);
+    _sql := pg_catalog.format('REVOKE USAGE ON TYPE %I.pg_background_stats FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('REVOKE USAGE ON TYPE %I.pg_background_handle FROM %I', _schema, role_name);
+    _sql := pg_catalog.format('REVOKE USAGE ON TYPE %I.pg_background_handle FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
     -- v1
-    _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_detach(pg_catalog.int4) FROM %I', _schema, role_name);
+    _sql := pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_background_detach(pg_catalog.int4) FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_result(pg_catalog.int4) FROM %I', _schema, role_name);
+    _sql := pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_background_result(pg_catalog.int4) FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
-    _sql := format('REVOKE EXECUTE ON FUNCTION %I.pg_background_launch(pg_catalog.text, pg_catalog.int4) FROM %I', _schema, role_name);
+    _sql := pg_catalog.format('REVOKE EXECUTE ON FUNCTION %I.pg_background_launch(pg_catalog.text, pg_catalog.int4) FROM %I', _schema, role_name);
     EXECUTE _sql; IF print_commands THEN RAISE INFO '%', _sql; END IF;
 
     RETURN TRUE;

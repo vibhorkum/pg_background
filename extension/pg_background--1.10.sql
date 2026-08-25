@@ -751,7 +751,7 @@ DECLARE
   _saved_search_path pg_catalog.text := pg_catalog.current_setting('search_path');
 BEGIN
   PERFORM pg_catalog.set_config('search_path', 'pg_catalog, pg_temp', true);
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pgbackground_role') THEN
+  IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'pgbackground_role') THEN
     CREATE ROLE pgbackground_role NOLOGIN INHERIT;
   END IF;
   PERFORM pg_catalog.set_config('search_path', _saved_search_path, true);
@@ -785,12 +785,12 @@ AS $function$
  * picked up automatically.
  */
 DECLARE
-    _ext_oid oid;
-    _sql     text;
-    _r       record;
+    _ext_oid pg_catalog.oid;
+    _sql     pg_catalog.text;
+    _r       pg_catalog.record;
 BEGIN
     SELECT oid INTO _ext_oid
-      FROM pg_extension
+      FROM pg_catalog.pg_extension
      WHERE extname = 'pg_background';
 
     IF _ext_oid IS NULL THEN
@@ -804,16 +804,16 @@ BEGIN
     -- arbitrary roles (including PUBLIC), bypassing admin control.
     -- Privilege helpers must stay admin-only.
     FOR _r IN
-        SELECT p.oid::regprocedure AS sig
-          FROM pg_depend d
-          JOIN pg_proc   p ON p.oid = d.objid
-         WHERE d.classid    = 'pg_proc'::regclass
-           AND d.refclassid = 'pg_extension'::regclass
+        SELECT p.oid::pg_catalog.regprocedure AS sig
+          FROM pg_catalog.pg_depend d
+          JOIN pg_catalog.pg_proc   p ON p.oid = d.objid
+         WHERE d.classid    = 'pg_catalog.pg_proc'::pg_catalog.regclass
+           AND d.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass
            AND d.refobjid   = _ext_oid
            AND d.deptype    = 'e'
            AND NOT p.prosecdef
     LOOP
-        _sql := format('GRANT EXECUTE ON FUNCTION %s TO %I', _r.sig, role_name);
+        _sql := pg_catalog.format('GRANT EXECUTE ON FUNCTION %s TO %I', _r.sig, role_name);
         EXECUTE _sql;
         IF print_commands THEN RAISE INFO '%', _sql; END IF;
     END LOOP;
@@ -822,34 +822,34 @@ BEGIN
     -- Filter to typtype='c' AND the underlying relkind='c' (the auto-
     -- generated rowtypes for views/tables/array element types are excluded).
     FOR _r IN
-        SELECT t.oid::regtype AS typname
-          FROM pg_depend d
-          JOIN pg_type   t ON t.oid = d.objid
-          JOIN pg_class  c ON c.oid = t.typrelid
-         WHERE d.classid    = 'pg_type'::regclass
-           AND d.refclassid = 'pg_extension'::regclass
+        SELECT t.oid::pg_catalog.regtype AS typname
+          FROM pg_catalog.pg_depend d
+          JOIN pg_catalog.pg_type   t ON t.oid = d.objid
+          JOIN pg_catalog.pg_class  c ON c.oid = t.typrelid
+         WHERE d.classid    = 'pg_catalog.pg_type'::pg_catalog.regclass
+           AND d.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass
            AND d.refobjid   = _ext_oid
            AND d.deptype    = 'e'
            AND t.typtype    = 'c'
            AND c.relkind    = 'c'
     LOOP
-        _sql := format('GRANT USAGE ON TYPE %s TO %I', _r.typname, role_name);
+        _sql := pg_catalog.format('GRANT USAGE ON TYPE %s TO %I', _r.typname, role_name);
         EXECUTE _sql;
         IF print_commands THEN RAISE INFO '%', _sql; END IF;
     END LOOP;
 
     -- Relations (views, tables, materialized views): GRANT SELECT.
     FOR _r IN
-        SELECT c.oid::regclass AS relname
-          FROM pg_depend d
-          JOIN pg_class  c ON c.oid = d.objid
-         WHERE d.classid    = 'pg_class'::regclass
-           AND d.refclassid = 'pg_extension'::regclass
+        SELECT c.oid::pg_catalog.regclass AS relname
+          FROM pg_catalog.pg_depend d
+          JOIN pg_catalog.pg_class  c ON c.oid = d.objid
+         WHERE d.classid    = 'pg_catalog.pg_class'::pg_catalog.regclass
+           AND d.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass
            AND d.refobjid   = _ext_oid
            AND d.deptype    = 'e'
            AND c.relkind    IN ('v', 'r', 'm')
     LOOP
-        _sql := format('GRANT SELECT ON TABLE %s TO %I', _r.relname, role_name);
+        _sql := pg_catalog.format('GRANT SELECT ON TABLE %s TO %I', _r.relname, role_name);
         EXECUTE _sql;
         IF print_commands THEN RAISE INFO '%', _sql; END IF;
     END LOOP;
@@ -877,12 +877,12 @@ AS $function$
  * objects via pg_depend rather than maintaining an explicit list.
  */
 DECLARE
-    _ext_oid oid;
-    _sql     text;
-    _r       record;
+    _ext_oid pg_catalog.oid;
+    _sql     pg_catalog.text;
+    _r       pg_catalog.record;
 BEGIN
     SELECT oid INTO _ext_oid
-      FROM pg_extension
+      FROM pg_catalog.pg_extension
      WHERE extname = 'pg_background';
 
     IF _ext_oid IS NULL THEN
@@ -891,49 +891,49 @@ BEGIN
 
     -- Relations: REVOKE SELECT.
     FOR _r IN
-        SELECT c.oid::regclass AS relname
-          FROM pg_depend d
-          JOIN pg_class  c ON c.oid = d.objid
-         WHERE d.classid    = 'pg_class'::regclass
-           AND d.refclassid = 'pg_extension'::regclass
+        SELECT c.oid::pg_catalog.regclass AS relname
+          FROM pg_catalog.pg_depend d
+          JOIN pg_catalog.pg_class  c ON c.oid = d.objid
+         WHERE d.classid    = 'pg_catalog.pg_class'::pg_catalog.regclass
+           AND d.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass
            AND d.refobjid   = _ext_oid
            AND d.deptype    = 'e'
            AND c.relkind    IN ('v', 'r', 'm')
     LOOP
-        _sql := format('REVOKE SELECT ON TABLE %s FROM %I', _r.relname, role_name);
+        _sql := pg_catalog.format('REVOKE SELECT ON TABLE %s FROM %I', _r.relname, role_name);
         EXECUTE _sql;
         IF print_commands THEN RAISE INFO '%', _sql; END IF;
     END LOOP;
 
     -- Composite types: REVOKE USAGE.
     FOR _r IN
-        SELECT t.oid::regtype AS typname
-          FROM pg_depend d
-          JOIN pg_type   t ON t.oid = d.objid
-          JOIN pg_class  c ON c.oid = t.typrelid
-         WHERE d.classid    = 'pg_type'::regclass
-           AND d.refclassid = 'pg_extension'::regclass
+        SELECT t.oid::pg_catalog.regtype AS typname
+          FROM pg_catalog.pg_depend d
+          JOIN pg_catalog.pg_type   t ON t.oid = d.objid
+          JOIN pg_catalog.pg_class  c ON c.oid = t.typrelid
+         WHERE d.classid    = 'pg_catalog.pg_type'::pg_catalog.regclass
+           AND d.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass
            AND d.refobjid   = _ext_oid
            AND d.deptype    = 'e'
            AND t.typtype    = 'c'
            AND c.relkind    = 'c'
     LOOP
-        _sql := format('REVOKE USAGE ON TYPE %s FROM %I', _r.typname, role_name);
+        _sql := pg_catalog.format('REVOKE USAGE ON TYPE %s FROM %I', _r.typname, role_name);
         EXECUTE _sql;
         IF print_commands THEN RAISE INFO '%', _sql; END IF;
     END LOOP;
 
     -- Functions: REVOKE EXECUTE.
     FOR _r IN
-        SELECT p.oid::regprocedure AS sig
-          FROM pg_depend d
-          JOIN pg_proc   p ON p.oid = d.objid
-         WHERE d.classid    = 'pg_proc'::regclass
-           AND d.refclassid = 'pg_extension'::regclass
+        SELECT p.oid::pg_catalog.regprocedure AS sig
+          FROM pg_catalog.pg_depend d
+          JOIN pg_catalog.pg_proc   p ON p.oid = d.objid
+         WHERE d.classid    = 'pg_catalog.pg_proc'::pg_catalog.regclass
+           AND d.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass
            AND d.refobjid   = _ext_oid
            AND d.deptype    = 'e'
     LOOP
-        _sql := format('REVOKE EXECUTE ON FUNCTION %s FROM %I', _r.sig, role_name);
+        _sql := pg_catalog.format('REVOKE EXECUTE ON FUNCTION %s FROM %I', _r.sig, role_name);
         EXECUTE _sql;
         IF print_commands THEN RAISE INFO '%', _sql; END IF;
     END LOOP;
@@ -1026,7 +1026,7 @@ SET search_path = pg_catalog, pg_temp
 AS $$
 BEGIN
   -- best effort: revoke from all members is admin's responsibility if needed
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'pgbackground_role') THEN
+  IF EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'pgbackground_role') THEN
     EXECUTE 'DROP ROLE pgbackground_role';
   END IF;
 END;
