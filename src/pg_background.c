@@ -1690,14 +1690,60 @@ pg_background_list(PG_FUNCTION_ARGS)
 
         funcctx->user_fctx = state;
 
-        /* Resolve tupledesc from coldeflist */
+        /*
+         * Resolve tupledesc from the caller's column-definition list and
+         * validate it before use. The label column (v1.9) is the trailing
+         * column, so both the historical 9-column shape and the current
+         * 10-column shape are accepted; a 9-column caller simply omits it and
+         * heap_form_tuple() forms only the columns the descriptor declares.
+         * Any other arity, or a by-reference type where a by-value type is
+         * expected (or vice versa), would otherwise make heap_form_tuple()
+         * dereference a scalar as a pointer and crash the backend, so reject
+         * it with a clean error. Prefer the pg_background_list view, which
+         * always supplies the correct rowtype.
+         */
         {
             TupleDesc tupdesc;
+            int       i;
+            static const Oid expected[10] = {
+                INT4OID,        /* pid */
+                INT8OID,        /* cookie */
+                TIMESTAMPTZOID, /* launched_at */
+                OIDOID,         /* user_id */
+                INT4OID,        /* queue_size */
+                TEXTOID,        /* state */
+                TEXTOID,        /* sql_preview */
+                TEXTOID,        /* last_error */
+                BOOLOID,        /* consumed */
+                TEXTOID         /* label */
+            };
+
             if (get_call_result_type(fcinfo, NULL, &tupdesc) != TYPEFUNC_COMPOSITE)
                 ereport(ERROR,
                         (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                          errmsg("function returning record called in context that cannot accept type record"),
                          errhint("Call it in FROM with a column definition list.")));
+
+            if (tupdesc->natts != 9 && tupdesc->natts != 10)
+                ereport(ERROR,
+                        (errcode(ERRCODE_DATATYPE_MISMATCH),
+                         errmsg("pg_background_list() requires a 9- or 10-column definition list"),
+                         errdetail("Got %d columns; expected 9 or 10.", tupdesc->natts),
+                         errhint("Use the pg_background_list view instead of a custom column list.")));
+
+            for (i = 0; i < tupdesc->natts; i++)
+            {
+                Oid att = TupleDescAttr(tupdesc, i)->atttypid;
+
+                if (att != expected[i])
+                    ereport(ERROR,
+                            (errcode(ERRCODE_DATATYPE_MISMATCH),
+                             errmsg("pg_background_list() column %d has the wrong type", i + 1),
+                             errdetail("Column %d has type OID %u; expected %u.",
+                                       i + 1, att, expected[i]),
+                             errhint("Use the pg_background_list view instead of a custom column list.")));
+            }
+
             funcctx->tuple_desc = BlessTupleDesc(tupdesc);
         }
 

@@ -864,6 +864,49 @@ SELECT
 DROP ROLE test_priv_user;
 
 -- -------------------------------------------------------------------------
+-- Security: pg_background_list() validates the caller-supplied
+-- column-definition list before writing its fixed 10-column layout. A
+-- mismatched arity or a by-value column declared as by-reference (or vice
+-- versa) previously made heap_form_tuple() dereference a scalar as a
+-- pointer and crash the backend. Both bad shapes must now raise a clean
+-- SQL error, and the pg_background_list view (correct rowtype) must work.
+-- -------------------------------------------------------------------------
+DO $$
+BEGIN
+  PERFORM 1 FROM pg_background_list() AS x(bad text);
+  RAISE NOTICE 'list_wrong_types=FAIL_no_error';
+EXCEPTION WHEN datatype_mismatch THEN
+  RAISE NOTICE 'list_wrong_types=PASS';
+END;
+$$;
+
+DO $$
+BEGIN
+  PERFORM 1 FROM pg_background_list() AS x(pid int4);
+  RAISE NOTICE 'list_wrong_count=FAIL_no_error';
+EXCEPTION WHEN datatype_mismatch THEN
+  RAISE NOTICE 'list_wrong_count=PASS';
+END;
+$$;
+
+-- Correct arity (10 columns) but one column of the wrong type: exercises the
+-- per-column type-validation branch, distinct from the arity checks above.
+DO $$
+BEGIN
+  PERFORM 1 FROM pg_background_list()
+    AS x(pid text, cookie int8, launched_at timestamptz, user_id oid,
+         queue_size int4, state text, sql_preview text, last_error text,
+         consumed bool, label text);
+  RAISE NOTICE 'list_wrong_coltype=FAIL_no_error';
+EXCEPTION WHEN datatype_mismatch THEN
+  RAISE NOTICE 'list_wrong_coltype=PASS';
+END;
+$$;
+
+SELECT CASE WHEN (SELECT count(*) FROM pg_background_list) >= 0
+            THEN 'PASS' ELSE 'FAIL' END AS list_view_ok;
+
+-- -------------------------------------------------------------------------
 -- Bounds Validation: cancel_v2_grace grace_ms bounds
 -- -------------------------------------------------------------------------
 
