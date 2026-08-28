@@ -125,6 +125,39 @@ SELECT count(*) FROM t_detach_v2;
 (1 row)
 
 -- -------------------------------------------------------------------------
+-- The cached full SQL (full_sql, up to 64 KiB and attacker-sized) is freed on
+-- cleanup, so repeated launch/detach in one long-lived session does not grow
+-- backend memory without bound. Launch several large-SQL workers, detach each,
+-- then assert the "pg_background worker info" memory context stayed small.
+-- With the leak, 10 x ~60 KiB of cached SQL would push it well past the
+-- threshold.
+-- -------------------------------------------------------------------------
+DO $$
+DECLARE
+  h         pg_background_handle;
+  big       text := 'SELECT 1 /* ' || repeat('x', 60000) || ' */';
+  i         int;
+  ctx_bytes bigint;
+BEGIN
+  FOR i IN 1..10 LOOP
+    h := pg_background_launch(big);
+    PERFORM pg_background_wait((h).pid, (h).cookie, 5000);
+    PERFORM pg_background_detach((h).pid, (h).cookie);
+  END LOOP;
+
+  SELECT COALESCE(sum(total_bytes), 0) INTO ctx_bytes
+    FROM pg_backend_memory_contexts
+   WHERE name = 'pg_background worker info';
+
+  IF ctx_bytes < 300000 THEN
+    RAISE NOTICE 'memgrowth_ok=PASS';
+  ELSE
+    RAISE NOTICE 'memgrowth_ok=FAIL total=%', ctx_bytes;
+  END IF;
+END;
+$$;
+NOTICE:  memgrowth_ok=PASS
+-- -------------------------------------------------------------------------
 -- wait_v2 (1.6 API): timeout + then success
 --   - pg_background_wait_v2(pid,cookie,timeout_ms) -> bool
 --   - pg_background_wait_v2(pid,cookie) -> void (blocking)
