@@ -224,7 +224,7 @@ static uint64 pg_background_make_cookie(void);
 static void pgbg_request_cancel(pg_background_worker_info *info);
 static void pgbg_send_cancel_signals(pg_background_worker_info *info, int32 grace_ms);
 static const char *pgbg_state_from_handle(pg_background_worker_info *info);
-static void detach_worker_seg(pg_background_worker_info *info);
+static bool detach_worker_seg(pg_background_worker_info *info);
 
 /* ============================================================================
  * MODULE MAGIC AND FUNCTION DECLARATIONS
@@ -1335,7 +1335,30 @@ pg_background_result(PG_FUNCTION_ARGS)
 
             case 'D':
             {
-                HeapTuple result = form_result_tuple(state, tupdesc, &msg);
+                HeapTuple result;
+
+                /*
+                 * Mark the worker in-use across tuple decode. A column type
+                 * whose receive function runs user SQL (e.g. a domain CHECK)
+                 * can re-enter a sibling entrypoint such as
+                 * pg_background_detach_all(); detach_worker_seg() refuses to
+                 * free a segment whose reader is active, preventing a
+                 * use-after-free of this queue. Cleared on both the normal
+                 * and error paths so a failed decode cannot pin the worker.
+                 */
+                state->info->active = true;
+                PG_TRY();
+                {
+                    result = form_result_tuple(state, tupdesc, &msg);
+                }
+                PG_CATCH();
+                {
+                    state->info->active = false;
+                    PG_RE_THROW();
+                }
+                PG_END_TRY();
+                state->info->active = false;
+
                 SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(result));
             }
 
@@ -1830,14 +1853,25 @@ pg_background_list(PG_FUNCTION_ARGS)
  * Replaces three nearly-identical inline blocks in the result-streaming SRF
  * tail, pg_background_detach, and pg_background_detach_all.
  */
-static void
+static bool
 detach_worker_seg(pg_background_worker_info *info)
 {
     dsm_segment *seg;
     bool         was_pinned;
 
     if (info == NULL || info->seg == NULL)
-        return;
+        return false;
+
+    /*
+     * Refuse to free a segment whose result reader is still streaming. A
+     * type input/receive function can run user SQL (e.g. a domain CHECK)
+     * that re-enters a sibling detach path (pg_background_detach_all, etc.);
+     * freeing here would leave the reader's shm_mq handle dangling. The
+     * reader clears info->active before its own final detach, so this only
+     * defers reentrant frees, never the legitimate one.
+     */
+    if (info->active)
+        return false;
 
     seg        = info->seg;
     was_pinned = info->mapping_pinned;
@@ -1848,6 +1882,7 @@ detach_worker_seg(pg_background_worker_info *info)
     if (was_pinned)
         dsm_unpin_mapping(seg);
     dsm_detach(seg);
+    return true;
 }
 
 /*
@@ -2192,6 +2227,28 @@ save_worker_info(pid_t pid, uint64 cookie, dsm_segment *seg,
                      errhint("A stale tracking entry for this PID exists from a different user; the just-launched worker has been terminated.")));
         }
 
+        /*
+         * A result reader may still hold this entry, marking it active while a
+         * receive function runs user SQL. detach_worker_seg() refuses to free
+         * an active entry, and overwriting it in place would corrupt the
+         * reader's tracked identity and result state. Reject the reuse: tear
+         * down the just-launched worker and raise, leaving the reader's entry
+         * intact.
+         */
+        if (info->active)
+        {
+            if (handle != NULL)
+                TerminateBackgroundWorker(handle);
+            if (seg != NULL)
+                dsm_detach(seg);
+
+            ereport(ERROR,
+                    (errcode(ERRCODE_OBJECT_IN_USE),
+                     errmsg("background worker with PID \"%d\" is currently reading results",
+                            (int) pid),
+                     errhint("Consume or detach the existing result for this PID before reusing it.")));
+        }
+
         detach_worker_seg(info);
     }
 
@@ -2210,6 +2267,7 @@ save_worker_info(pid_t pid, uint64 cookie, dsm_segment *seg,
     info->mapping_pinned = false;
     info->result_disabled = result_disabled;
     info->canceled = false;
+    info->active = false;
 
     info->launched_at = GetCurrentTimestamp();
     info->queue_size = queue_size;
@@ -2856,8 +2914,14 @@ pg_background_detach_all(PG_FUNCTION_ARGS)
         info = find_worker_info(pids_to_detach[i]);
         if (info != NULL && info->seg != NULL)
         {
-            detach_worker_seg(info);
-            detached++;
+            /*
+             * Count only detaches that actually tore down the segment.
+             * detach_worker_seg() returns false when a result reader is
+             * still active; that worker is detached later by the reader's
+             * own cleanup, so counting it here would over-report.
+             */
+            if (detach_worker_seg(info))
+                detached++;
         }
     }
 

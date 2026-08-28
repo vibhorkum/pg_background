@@ -1792,6 +1792,33 @@ BEGIN
     RAISE NOTICE 'canonical launch/wait/result OK';
 END$$;
 
+-- -------------------------------------------------------------------------
+-- Security: a type receive function that runs user SQL during
+-- result decode must not be able to free the segment the reader still
+-- holds. We build a composite whose field is a domain whose CHECK calls
+-- pg_background_detach_all(); the launcher decodes the worker's row via
+-- record_recv -> domain_check -> detach_all (reentrancy). With the in-use
+-- guard, detach_worker_seg() refuses to free the active reader's segment,
+-- so the backend survives (no use-after-free) and the reentrant
+-- detach_all() counts 0 (the only tracked worker is active and cannot be
+-- torn down). Reaching the final PASS marker below is the assertion; a
+-- regression would crash the backend and abort the run.
+-- -------------------------------------------------------------------------
+CREATE DOMAIN uaf_dom AS int4 CHECK (pg_background_detach_all() = 0);
+CREATE TYPE uaf_comp AS (a uaf_dom);
+
+SELECT (h).pid AS uaf_pid, (h).cookie AS uaf_cookie
+FROM (SELECT pg_background_launch('SELECT ROW(1)::uaf_comp') AS h) s
+\gset
+
+SELECT pg_background_wait(:uaf_pid, :uaf_cookie, 5000) AS uaf_waited;
+SELECT c FROM pg_background_result(:uaf_pid, :uaf_cookie) AS t(c uaf_comp);
+SELECT pg_background_detach_all() AS uaf_cleanup_detached;
+SELECT 'PASS' AS uaf_no_crash;
+
+DROP TYPE uaf_comp;
+DROP DOMAIN uaf_dom;
+
 -- Regression guard for the pre-execution cancel branch in the worker.
 --
 -- A grace=0 cancel issued immediately after launch tries to set
