@@ -21,6 +21,31 @@ SELECT * FROM t ORDER BY id;
   1
 (1 row)
 
+-- -------------------------------------------------------------------------
+-- Security: SQL supplied as a packed (short-header) varlena from a
+-- table column must be copied with VARDATA_ANY, not VARDATA. A short value
+-- stored in a table has a 1-byte header; VARDATA() would skip 4 bytes,
+-- dropping the first 3 characters and reading past the datum. Launch a short
+-- query read from a column and assert it executed intact (result = 42).
+-- -------------------------------------------------------------------------
+CREATE TEMP TABLE varlena_q (q text);
+INSERT INTO varlena_q VALUES ('SELECT 42');
+SELECT (h).pid AS varlena_pid, (h).cookie AS varlena_cookie
+FROM (SELECT pg_background_launch((SELECT q FROM varlena_q)) AS h) s
+\gset
+SELECT pg_background_wait(:varlena_pid, :varlena_cookie, 5000) AS varlena_waited;
+ varlena_waited 
+----------------
+ t
+(1 row)
+
+SELECT x AS varlena_result FROM pg_background_result(:varlena_pid, :varlena_cookie) AS t(x int4);
+ varlena_result 
+----------------
+             42
+(1 row)
+
+DROP TABLE varlena_q;
 -- ----------------------------------------------------------------------
 -- v2: detach should not crash the session
 -- ----------------------------------------------------------------------

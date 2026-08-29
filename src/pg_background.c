@@ -718,7 +718,7 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
 
     /* SQL text */
     sqlp = shm_toc_allocate(toc, sql_len + SQL_TERMINATOR_LEN);
-    memcpy(sqlp, VARDATA(sql), sql_len);
+    memcpy(sqlp, VARDATA_ANY(sql), sql_len);
     sqlp[sql_len] = '\0';
     shm_toc_insert(toc, PG_BACKGROUND_KEY_SQL, sqlp);
 
@@ -821,8 +821,8 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
      * Prepare preview with UTF-8 aware truncation.
      * pg_mbcliplen() ensures we don't cut multi-byte characters mid-sequence.
      */
-    preview_len = pg_mbcliplen(VARDATA(sql), sql_len, PGBG_SQL_PREVIEW_LEN);
-    memcpy(preview, VARDATA(sql), preview_len);
+    preview_len = pg_mbcliplen(VARDATA_ANY(sql), sql_len, PGBG_SQL_PREVIEW_LEN);
+    memcpy(preview, VARDATA_ANY(sql), preview_len);
     preview[preview_len] = '\0';
 
     /*
@@ -832,7 +832,7 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
      */
     {
         char *full_sql_cstr = palloc(sql_len + 1);
-        memcpy(full_sql_cstr, VARDATA(sql), sql_len);
+        memcpy(full_sql_cstr, VARDATA_ANY(sql), sql_len);
         full_sql_cstr[sql_len] = '\0';
 
         /* Save info */
