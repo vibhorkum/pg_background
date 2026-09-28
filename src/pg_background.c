@@ -1304,7 +1304,8 @@ pg_background_result(PG_FUNCTION_ARGS)
 
                 for (i = 0; i < natts; i++)
                 {
-                    Oid type_id;
+                    Oid   type_id;
+                    int16 format;
 
                     (void) pq_getmsgstring(&msg);
                     (void) pq_getmsgint(&msg, 4);
@@ -1312,9 +1313,20 @@ pg_background_result(PG_FUNCTION_ARGS)
                     type_id = pq_getmsgint(&msg, 4);
                     (void) pq_getmsgint(&msg, 2);
                     (void) pq_getmsgint(&msg, 4);
-                    (void) pq_getmsgint(&msg, 2);
+                    format = (int16) pq_getmsgint(&msg, 2);
 
-                    if (exists_binary_recv_fn(type_id))
+                    /*
+                     * Use the format the worker chose for the column: binary
+                     * when the type and every type nested in it have binary
+                     * I/O, text otherwise. It is not recomputed here because
+                     * the type may have changed since the worker sent the row.
+                     */
+                    if (format != 0 && format != 1)
+                        ereport(ERROR,
+                                (errcode(ERRCODE_PROTOCOL_VIOLATION),
+                                 errmsg("invalid format code %d in RowDescription", (int) format)));
+
+                    if (format == 1)
                     {
                         if (type_id != TupleDescAttr(tupdesc, i)->atttypid)
                             ereport(ERROR,
@@ -2671,11 +2683,13 @@ pg_background_result_info(PG_FUNCTION_ARGS)
             if (output != NULL)
             {
                 /*
-                 * Read the publish flag first; only treat the row_count /
-                 * command_tag pair as valid if the worker has fully written
-                 * them. The pg_read_barrier() pairs with the worker's
-                 * pg_write_barrier() in execute_sql_string so we cannot see
-                 * a fresh row_count paired with a stale command_tag.
+                 * Read the publish flag first and read the row_count /
+                 * command_tag pair only after the worker has written one.
+                 * The pg_read_barrier() pairs with the worker's
+                 * pg_write_barrier() in execute_sql_string. While a
+                 * multi-command string is running the pair can mix two
+                 * commands, which is why these fields are reliable only when
+                 * completed is true (see the function header).
                  */
                 if (output->result_published)
                 {
@@ -2687,7 +2701,7 @@ pg_background_result_info(PG_FUNCTION_ARGS)
 
                 /*
                  * v2.0 (B5b): execution timestamps. Zero means "not set yet"
-                 * (worker hasn't reached the SPI loop / hasn't finished).
+                 * (worker hasn't reached the command loop / hasn't finished).
                  */
                 started_at = output->started_at;
                 finished_at = output->finished_at;

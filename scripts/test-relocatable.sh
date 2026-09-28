@@ -13,11 +13,11 @@ DEFAULT_PG_VERSION="17"
 PG_VERSION="${1:-$DEFAULT_PG_VERSION}"
 
 # Docker Hub tag for the image. Released majors use the bare version;
-# PostgreSQL 19 is currently a pre-release pulled as postgres:19beta1. The
+# PostgreSQL 19 is currently a pre-release pulled as postgres:19beta4. The
 # server-dev package and install paths still use the bare major (19).
 # Update this when 19 reaches GA.
 PG_IMAGE_TAG="$PG_VERSION"
-[ "$PG_VERSION" = "19" ] && PG_IMAGE_TAG="19beta1"
+[ "$PG_VERSION" = "19" ] && PG_IMAGE_TAG="19beta4"
 
 # Container name
 CONTAINER_NAME="pg_background_relocatable_test"
@@ -231,7 +231,7 @@ case "${1:-}" in
         echo "Run pg_background relocatable schema tests using Docker."
         echo "Tests extension functionality when installed in a custom schema."
         echo ""
-        echo "PG_VERSION can be: 14, 15, 16, 17, 18, 19 (19 = beta, postgres:19beta1)"
+        echo "PG_VERSION can be: 14, 15, 16, 17, 18, 19 (19 = beta, postgres:19beta4)"
         echo "Default: $DEFAULT_PG_VERSION"
         exit 0
         ;;

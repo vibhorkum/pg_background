@@ -145,8 +145,9 @@ typedef struct pg_background_input
  *   - result_published is the publish flag for the row_count + command_tag
  *     pair. Same idiom: write the pair, pg_write_barrier(), then set the
  *     flag. Reader tests the flag first, pg_read_barrier(), then reads
- *     the pair. Prevents a launcher from seeing a fresh row_count paired
- *     with a stale command_tag.
+ *     the pair. The flag stays set while later commands of a
+ *     multi-command string overwrite the pair, so the pair is consistent
+ *     only once the worker has finished.
  *
  * Stored under PG_BACKGROUND_KEY_OUTPUT in the DSM table of contents.
  */
@@ -172,12 +173,12 @@ typedef struct pg_background_output
     /* Result metadata (written by worker on completion) */
     int64       result_row_count;                        /* Rows returned/affected */
     char        command_tag[PGBG_COMMAND_TAG_LEN];       /* Command completion tag */
-    uint8       result_published;                        /* 0 = not yet, 1 = pair valid */
+    uint8       result_published;                        /* 0 = not yet, 1 = a pair has been written */
 
     /*
      * v2.0 (B5b): execution timestamps. started_at is written by the worker
-     * just before the SPI loop starts; finished_at is written when the
-     * worker finishes (success or error). Both are TimestampTz (microseconds
+     * just before the command loop starts, and finished_at when the worker
+     * finishes (success or error). Both are TimestampTz (microseconds
      * since 2000-01-01 UTC) and zero means "not set".
      */
     TimestampTz started_at;             /* Execution start (0 = not set) */
@@ -286,13 +287,5 @@ extern PGDLLEXPORT void pg_background_worker_main(Datum main_arg);
  * Argument is `pid_t *`.
  */
 extern void pg_background_error_callback(void *arg);
-
-/*
- * exists_binary_recv_fn
- *     Whether a type has a binary receive function. Lives in
- *     pg_background_worker.c; the launcher's result reader calls it when
- *     deciding how to consume a tuple field.
- */
-extern bool exists_binary_recv_fn(Oid type);
 
 #endif  /* PG_BACKGROUND_INTERNAL_H_ */

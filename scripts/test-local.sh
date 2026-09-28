@@ -86,11 +86,11 @@ run_test() {
 
     # Map the major version to its Docker Hub tag. Released majors use the
     # bare version (postgres:18); a pre-release major uses its beta tag
-    # (PostgreSQL 19 is currently postgres:19beta1). The server-dev package
+    # (PostgreSQL 19 is currently postgres:19beta4). The server-dev package
     # and install paths still use the bare major (19), so only the image tag
     # differs. Update this when 19 reaches GA.
     local image_tag="$pg_ver"
-    [ "$pg_ver" = "19" ] && image_tag="19beta1"
+    [ "$pg_ver" = "19" ] && image_tag="19beta4"
 
     # Use debian-based postgres image and install build dependencies
     docker run --name "$container" -d \
@@ -253,7 +253,7 @@ case "${1:-}" in
         echo "Builds and tests entirely within containers - no local PostgreSQL needed."
         echo ""
         echo "PG_VERSION can be: 14, 15, 16, 17, 18, 19, or 'all'"
-        echo "(19 is PostgreSQL 19 beta, pulled as postgres:19beta1)"
+        echo "(19 is PostgreSQL 19 beta, pulled as postgres:19beta4)"
         echo "Default: $DEFAULT_PG_VERSION"
         echo ""
         echo "Examples:"

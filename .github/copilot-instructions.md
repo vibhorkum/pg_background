@@ -9,7 +9,7 @@ This file guides GitHub Copilot to produce better code reviews, suggestions, and
 **pg_background** is a PostgreSQL extension that executes SQL commands in background worker processes. It is:
 
 - Implemented in **C** (PostgreSQL backend code) and **SQL** (extension scripts)
-- Tightly coupled to **PostgreSQL internals**: Background Worker API, Dynamic Shared Memory (DSM), SPI, shm_mq
+- Tightly coupled to **PostgreSQL internals**: Background Worker API, Dynamic Shared Memory (DSM), parser/planner/portal APIs, shm_mq
 - **Security-sensitive**: Executes arbitrary SQL with caller's privileges
 - **Version-sensitive**: Supports PostgreSQL 14-18 with compatibility macros
 - **Not a generic application**: PostgreSQL extension patterns differ significantly from typical app code
@@ -61,8 +61,8 @@ When reviewing changes, verify:
 - [ ] Worker cleanup happens on all exit paths
 - [ ] `BackgroundWorkerHandle` is never `pfree()`d (let PostgreSQL manage it)
 
-### SPI and Transactions
-- [ ] `SPI_connect()`/`SPI_finish()` paired correctly
+### Query Execution and Transactions
+- [ ] Each command of the SQL string goes through parse, analyze, plan and a portal, with `CommandCounterIncrement()` between commands
 - [ ] No assumptions about caller's transaction state in worker code
 - [ ] Error handling uses `PG_TRY`/`PG_CATCH` appropriately
 
@@ -229,7 +229,7 @@ When suggesting code changes:
 | File | Review Focus |
 |------|--------------|
 | `src/pg_background.c` | Launcher-side implementation; watch for memory, concurrency, cleanup |
-| `src/pg_background_worker.c` | Worker-process implementation; SPI, error paths |
+| `src/pg_background_worker.c` | Worker-process implementation: query execution, error paths |
 | `src/pg_background.h` | Version compatibility; ensure macros work on all PG versions |
 | `src/pg_background_internal.h` | Cross-file declarations between launcher and worker |
 | `pg_background.control` | Version must match latest SQL script |

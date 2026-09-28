@@ -42,7 +42,9 @@
 #include "tcop/pquery.h"
 #include "tcop/tcopprot.h"
 #include "tcop/utility.h"
+#include "utils/fmgroids.h"
 #include "utils/guc.h"
+#include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
 #include "utils/resowner.h"
@@ -50,6 +52,7 @@
 #include "utils/syscache.h"
 #include "utils/timeout.h"
 #include "utils/timestamp.h"   /* GetCurrentTimestamp (no longer transitively included in PG 19) */
+#include "utils/typcache.h"
 
 #include <signal.h>
 
@@ -106,8 +109,10 @@ pgbg_portal_run_compat(Portal portal,
 
 static void pg_background_worker_error_exit(pg_background_output *output);
 static void execute_sql_string(const char *sql, pg_background_output *output);
+static bool pgbg_type_has_binary_io(Oid type);
+static bool pgbg_type_has_binary_io_walk(Oid type, List **checked);
+static void pgbg_set_result_formats(Portal portal);
 static void handle_sigterm(SIGNAL_ARGS);
-/* exists_binary_recv_fn is exported via pg_background_internal.h */
 
 /* ============================================================================
  * BACKGROUND WORKER ERROR-EXIT PATH
@@ -394,24 +399,19 @@ pg_background_worker_main(Datum main_arg)
         StartTransactionCommand();
 
         /*
-         * Apply worker timeout. Priority:
-         * 1. pg_background.worker_timeout if set (> 0)
-         * 2. session's statement_timeout if set (> 0)
-         * 3. no timeout
+         * pg_background.worker_timeout, when set (> 0), limits all commands
+         * of the SQL string together (not the commit) and is armed once here.
+         * Otherwise statement_timeout limits each command separately (see
+         * execute_sql_string()). The timer armed here then also covers
+         * parsing the SQL string, which counts toward the first command, as
+         * in exec_simple_query.
          */
-        {
-            int effective_timeout = 0;
-
-            if (pgbg_worker_timeout > 0)
-                effective_timeout = pgbg_worker_timeout;
-            else if (StatementTimeout > 0)
-                effective_timeout = StatementTimeout;
-
-            if (effective_timeout > 0)
-                enable_timeout_after(STATEMENT_TIMEOUT, effective_timeout);
-            else
-                disable_timeout(STATEMENT_TIMEOUT, false);
-        }
+        if (pgbg_worker_timeout > 0)
+            enable_timeout_after(STATEMENT_TIMEOUT, pgbg_worker_timeout);
+        else if (StatementTimeout > 0)
+            enable_timeout_after(STATEMENT_TIMEOUT, StatementTimeout);
+        else
+            disable_timeout(STATEMENT_TIMEOUT, false);
 
         SetUserIdAndSecContext(input->current_user_id, input->sec_context);
 
@@ -486,40 +486,133 @@ pg_background_worker_main(Datum main_arg)
  */
 
 /*
- * exists_binary_recv_fn
- *     Check if a type has a binary receive function.
+ * pgbg_type_has_binary_io
+ *     Whether values of a type can travel in binary format: the type has
+ *     binary send and receive functions, and so does every type nested in
+ *     it (array element, domain base type, composite attribute, range
+ *     subtype).
  *
- * Non-static so the launcher's result reader (in pg_background.c) can
- * call it directly. Declared extern in pg_background_internal.h.
+ * The worker sends a result column in binary format when this returns true
+ * and in text format otherwise, and reports the choice in the format code of
+ * the RowDescription, which the launcher follows. The columns of an
+ * anonymous record are not known here, so a record column goes in binary
+ * format.
  */
-bool
-exists_binary_recv_fn(Oid type)
+static bool
+pgbg_type_has_binary_io(Oid type)
 {
-    HeapTuple typeTuple;
+    List       *checked = NIL;
+    bool        result;
+
+    result = pgbg_type_has_binary_io_walk(type, &checked);
+    list_free(checked);
+
+    return result;
+}
+
+/*
+ * pgbg_type_has_binary_io_walk
+ *     The recursive part of pgbg_type_has_binary_io().
+ *
+ * checked collects the types found to have binary I/O during this walk, so a
+ * type reached along several paths (for example two attributes of the same
+ * composite type) is examined once. A type without binary I/O ends the walk,
+ * so every type met again is either in checked or has no binary I/O check
+ * pending: PostgreSQL does not allow a type to contain itself.
+ */
+static bool
+pgbg_type_has_binary_io_walk(Oid type, List **checked)
+{
+    HeapTuple   typeTuple;
     Form_pg_type pt;
-    bool exists_recv_fn;
+    bool        result;
+    char        typtype;
+    Oid         nested = InvalidOid;
+
+    check_stack_depth();
+    CHECK_FOR_INTERRUPTS();
+
+    if (list_member_oid(*checked, type))
+        return true;
 
     typeTuple = SearchSysCache1(TYPEOID, ObjectIdGetDatum(type));
     if (!HeapTupleIsValid(typeTuple))
         elog(ERROR, "cache lookup failed for type %u", type);
 
     pt = (Form_pg_type) GETSTRUCT(typeTuple);
-    exists_recv_fn = OidIsValid(pt->typreceive);
+    result = OidIsValid(pt->typsend) && OidIsValid(pt->typreceive);
+    typtype = pt->typtype;
+    if (IsTrueArrayType(pt))
+        nested = pt->typelem;
+    else if (typtype == TYPTYPE_DOMAIN)
+        nested = pt->typbasetype;
     ReleaseSysCache(typeTuple);
 
-    return exists_recv_fn;
+    if (!result)
+        return false;
+
+    if (OidIsValid(nested))
+        result = pgbg_type_has_binary_io_walk(nested, checked);
+    else if (typtype == TYPTYPE_RANGE)
+        result = pgbg_type_has_binary_io_walk(get_range_subtype(type), checked);
+    else if (typtype == TYPTYPE_MULTIRANGE)
+        result = pgbg_type_has_binary_io_walk(get_multirange_range(type), checked);
+    else if (typtype == TYPTYPE_COMPOSITE)
+    {
+        TupleDesc   tupdesc = lookup_rowtype_tupdesc(type, -1);
+        int         i;
+
+        for (i = 0; i < tupdesc->natts && result; i++)
+        {
+            Form_pg_attribute att = TupleDescAttr(tupdesc, i);
+
+            if (!att->attisdropped)
+                result = pgbg_type_has_binary_io_walk(att->atttypid, checked);
+        }
+        ReleaseTupleDesc(tupdesc);
+    }
+
+    if (result)
+        *checked = lappend_oid(*checked, type);
+
+    return result;
+}
+
+/*
+ * pgbg_set_result_formats
+ *     Choose the wire format of each result column of a portal: binary when
+ *     pgbg_type_has_binary_io() allows it, text otherwise.
+ */
+static void
+pgbg_set_result_formats(Portal portal)
+{
+    int         natts;
+    int16      *formats;
+    int         i;
+
+    if (portal->tupDesc == NULL)
+        return;
+
+    natts = portal->tupDesc->natts;
+    formats = palloc(natts * sizeof(int16));
+    for (i = 0; i < natts; i++)
+        formats[i] = pgbg_type_has_binary_io(TupleDescAttr(portal->tupDesc, i)->atttypid) ? 1 : 0;
+
+    PortalSetResultFormat(portal, natts, formats);
+    pfree(formats);
 }
 
 /*
  * execute_sql_string
  *     Parse and execute SQL commands in the worker.
  *
- * Supports multiple commands separated by semicolons.
+ * Supports multiple commands separated by semicolons. Each command sees the
+ * effects of the commands before it.
  * Transaction control statements are not allowed.
  *
  * Populates output->result_row_count and output->command_tag with metadata
  * from the final command executed, and writes started_at/finished_at
- * timestamps around the SPI loop.
+ * timestamps around the command loop.
  */
 static void
 execute_sql_string(const char *sql, pg_background_output *output)
@@ -564,12 +657,14 @@ execute_sql_string(const char *sql, pg_background_output *output)
         List       *raw_parsetree_list;
         ListCell   *lc1;
         bool        isTopLevel;
+        bool        per_command_timeout;
         int         commands_remaining;
 
         oldcontext = MemoryContextSwitchTo(parsecontext);
         raw_parsetree_list = pg_parse_query(sql);
         commands_remaining = list_length(raw_parsetree_list);
         isTopLevel = (commands_remaining == 1);
+        per_command_timeout = (pgbg_worker_timeout <= 0);
         MemoryContextSwitchTo(oldcontext);
 
         foreach(lc1, raw_parsetree_list)
@@ -582,12 +677,29 @@ execute_sql_string(const char *sql, pg_background_output *output)
             bool        snapshot_set = false;
             Portal      portal;
             DestReceiver *receiver;
-            int16       format = 1;
 
             if (IsA(parsetree->stmt, TransactionStmt))
                 ereport(ERROR,
                         (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                          errmsg("transaction control statements are not allowed in pg_background")));
+
+            /*
+             * Without pg_background.worker_timeout, statement_timeout limits
+             * each command separately and follows a SET statement_timeout run
+             * by an earlier command, as exec_simple_query does. A timer that
+             * is still running (the one armed before parsing, for the first
+             * command) is left as is.
+             */
+            if (per_command_timeout)
+            {
+                if (StatementTimeout > 0)
+                {
+                    if (!get_timeout_active(STATEMENT_TIMEOUT))
+                        enable_timeout_after(STATEMENT_TIMEOUT, StatementTimeout);
+                }
+                else
+                    disable_timeout(STATEMENT_TIMEOUT, false);
+            }
 
             commandTag = CreateCommandTag((Node *) parsetree);
             set_ps_display(GetCommandTagName(commandTag));
@@ -615,7 +727,7 @@ execute_sql_string(const char *sql, pg_background_output *output)
 
             pgbg_portal_define_query_compat(portal, NULL, sql, commandTag, plantree_list, NULL);
             PortalStart(portal, NULL, 0, InvalidSnapshot);
-            PortalSetResultFormat(portal, 1, &format);
+            pgbg_set_result_formats(portal);
 
             commands_remaining--;
             if (commands_remaining > 0)
@@ -635,24 +747,39 @@ execute_sql_string(const char *sql, pg_background_output *output)
             EndCommand(&qc, DestRemote, false);
 
             /*
-             * v1.9: Store result metadata from each command.
-             * The final values reflect the last command executed.
+             * Store result metadata for each command. The values left after
+             * the loop describe the last command, and the tag is the one
+             * EndCommand() sent.
              *
-             * v1.10: Publish via a write barrier + flag so a launcher reader
-             * (pg_background_result_info) cannot observe a fresh
-             * row_count paired with a stale command_tag. Mirrors the
-             * error_sqlstate publish-flag idiom.
+             * The write barrier orders the pair before the flag, so a reader
+             * never sees the flag before a pair is written. The flag stays
+             * set while later commands of a multi-command string overwrite
+             * the pair, so a concurrent reader (pg_background_result_info)
+             * can see the row_count of one command with the command_tag of
+             * another. The pair is consistent once the worker has finished.
              */
             if (output != NULL)
             {
                 output->result_row_count = qc.nprocessed;
-                strlcpy(output->command_tag, GetCommandTagName(commandTag),
+                strlcpy(output->command_tag,
+                        GetCommandTagName(qc.commandTag != CMDTAG_UNKNOWN ?
+                                          qc.commandTag : commandTag),
                         sizeof(output->command_tag));
                 pg_write_barrier();
                 output->result_published = 1;
             }
 
             PortalDrop(portal, false);
+
+            /*
+             * Make this command's effects visible to the next one, as
+             * exec_simple_query does between the commands of a query string.
+             */
+            if (commands_remaining > 0)
+                CommandCounterIncrement();
+
+            if (per_command_timeout)
+                disable_timeout(STATEMENT_TIMEOUT, false);
         }
 
         CommandCounterIncrement();

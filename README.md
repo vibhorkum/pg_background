@@ -140,7 +140,7 @@ A 30-second decision table. Pick the row that matches your job, not the column y
 
 The launcher allocates a DSM segment, registers a dynamic background
 worker, and waits for it to attach a shared-memory queue. The worker
-restores the launcher's GUCs, runs the SQL via SPI, streams rows back
+restores the launcher's GUCs, runs each SQL command through a portal, streams rows back
 through the queue, and writes structured metadata (row count, command
 tag, error fields) into a launcher-readable struct in DSM. The
 launcher consumes rows via `pg_background_result` and tears down
@@ -179,7 +179,7 @@ publish-flag patterns are in **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)**.
 **Forward-compatibility additions** — adding columns later is painful, so 2.0 widens the composite types now:
 
 - `pg_background_stats` gains `workers_timed_out int8` (separate from `workers_canceled`; bumped by `pg_background_run` on timeout).
-- `pg_background_result_info` gains `started_at`, `finished_at` (timestamptz) — the worker writes these around its SPI loop.
+- `pg_background_result_info` gains `started_at`, `finished_at` (timestamptz) — the worker writes these around its command loop.
 - `pg_background_error` gains `schema_name`, `table_name`, `column_name`, `constraint_name` — sourced from PG's `edata` for heap/access errors.
 - `pg_background_run_result` now **extends** `pg_background_outcome` (gains `cookie`, `state`, `consumed`, `label`, `launched_at`) plus `timed_out` + `elapsed_ms`. No more duplicate column shape.
 
@@ -200,7 +200,7 @@ The full chain is documented in [`docs/MIGRATION.md`](docs/MIGRATION.md).
 
 | PostgreSQL Version | Support Status | Notes |
 |--------------------|----------------|-------|
-| **19** | 🧪 Beta Support | Validated against 19beta1; explicit proc.h / latch.h / wait_event.h includes |
+| **19** | 🧪 Beta Support | Validated against 19beta4; explicit proc.h / latch.h / wait_event.h includes |
 | **18** | ✅ Fully Supported | TupleDescAttr compatibility layer |
 | **17** | ✅ Fully Tested | Recommended for new deployments |
 | **16** | ✅ Fully Tested | Production-ready |
@@ -385,7 +385,7 @@ SET pg_background.worker_timeout = '5min';
 |---------------|---------|-------|-------------|
 | `pg_background.max_workers` | 16 | 1-1000 | Max concurrent workers per session |
 | `pg_background.default_queue_size` | 65536 | 4KB-256MB | Default shared memory queue size |
-| `pg_background.worker_timeout` | 0 | 0-∞ | Worker execution timeout (0 = no limit) |
+| `pg_background.worker_timeout` | 0 | 0-∞ | Limit for all statements of the SQL string together, not including the commit (0 = not set, `statement_timeout` then applies to each statement) |
 
 ---
 
@@ -583,7 +583,7 @@ SELECT * FROM pg_background_get_progress(:'h.pid', :'h.cookie');
 | `pg_background_purge()` | `int4` | Detach only workers that have already stopped (vs `detach_all` which is unconditional) |
 
 **Parameters**:
-- `sql`: SQL command(s) to execute (multiple statements allowed)
+- `sql`: SQL command(s) to execute. Multiple statements are allowed: they run in one transaction, and each sees the effects of the statements before it.
 - `queue_size`: Shared memory queue size in bytes (default: 65536, min: 4096)
 - `pid`: Process ID from handle
 - `cookie`: Unique identifier from handle (prevents PID reuse)
@@ -1164,7 +1164,15 @@ WHERE backend_type LIKE '%background%'
 
 #### 2. Statement Timeout
 
-Workers inherit `statement_timeout` from launcher session.
+Workers inherit `statement_timeout` from the launcher session. It applies to
+each statement of the SQL string separately, as for a multi-statement query
+sent by a client: parsing the string counts toward the first statement, and a
+`SET statement_timeout` inside the string applies to the statements after it.
+When `pg_background.worker_timeout` is set, it limits all statements of the
+string together instead, and `statement_timeout` is not applied. The worker
+takes `worker_timeout` when it starts, so a `SET pg_background.worker_timeout`
+inside the string does not change it. Neither timeout covers the commit at the
+end, including deferred triggers and constraint checks that run there.
 
 **Set Per-Worker Timeout**:
 ```sql
@@ -1441,6 +1449,14 @@ ERROR: remote query result rowtype does not match the specified FROM clause rowt
 return `SETOF record`. PostgreSQL needs the row shape declared at parse
 time, either via `AS (col1 type, col2 type, ...)` or by reading from a
 view/wrapper that has a fixed row type.
+
+Declare each column with the type the worker's query returns (for a domain,
+its base type). A column whose type has no binary send/receive functions (for
+example `aclitem`, or an array, domain, named composite or range type that
+contains one) is sent as text and must be declared `text`. The fields of an
+anonymous record (`ROW(...)` without a named type) are not checked, so such a
+column is always sent in binary, and the worker fails when it has to send a
+non-NULL field whose type has no binary send function.
 
 **Solutions**:
 

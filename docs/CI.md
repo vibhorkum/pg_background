@@ -52,7 +52,7 @@ The **test** job runs against all combinations:
 | 22.04 | 14, 15, 16, 17, 18, 19 |
 | 24.04 | 14, 15, 16, 17, 18, 19 |
 
-PostgreSQL 19 is a beta target: the server runs from the `postgres:19beta1`
+PostgreSQL 19 is a beta target: the server runs from the `postgres:19beta4`
 image while the build uses `postgresql-server-dev-19`. The `upgrade-test` and
 `assert-test` jobs stay at 14–18 — the former builds the prior v1.10 binary
 (which only supports 14–18) and the latter builds from the X.0 GA source

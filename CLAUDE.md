@@ -31,7 +31,7 @@ pg_background is a PostgreSQL extension that executes SQL commands in background
 ## 2. Core Design Principles
 
 ### Preserve PostgreSQL-native design
-This extension uses PostgreSQL's native Background Worker API, Dynamic Shared Memory, and SPI. Do not introduce external dependencies or non-PostgreSQL patterns.
+This extension uses PostgreSQL's native Background Worker API, Dynamic Shared Memory, and the parser, planner and portal APIs. Do not introduce external dependencies or non-PostgreSQL patterns.
 
 ### Prefer simple APIs over feature creep
 The extension provides async SQL execution primitives. Resist adding orchestration, scheduling, or workflow features that belong in application code or dedicated tools like pg_cron.
@@ -109,11 +109,12 @@ Document behavioral semantics precisely. Users should never be surprised by what
 - Clean up in error paths using `PG_TRY`/`PG_CATCH`/`PG_FINALLY`
 - In PG_CATCH, clear partial state (e.g., result metadata) before publishing error flags
 
-### SPI and transaction handling
-- Workers use `SPI_connect()`/`SPI_finish()` for SQL execution
-- Workers run in their own transaction; do not assume caller's transaction state
-- Commit happens automatically when worker exits cleanly
-- Explicit `SPI_commit()` calls are not used; worker exit triggers commit
+### Query execution and transaction handling
+- Workers run each command of the SQL string the way `exec_simple_query` does: parse, analyze, plan, then run it in a portal (`execute_sql_string`)
+- `CommandCounterIncrement()` between commands makes each command see the effects of the commands before it
+- `statement_timeout` is armed for each command, and parsing the string counts toward the first one. `pg_background.worker_timeout`, when set, limits all commands together instead, with its value at worker start. Neither timeout covers the commit
+- Workers run in their own transaction. Do not assume the caller's transaction state
+- The worker commits after the last command. Transaction control statements (`BEGIN`, `COMMIT`, ...) in the string are rejected, while a single `DO` or `CALL` runs as a top-level statement and may commit inside
 
 ### Worker lifecycle and cleanup
 - DSM segments are created by launcher, attached by worker
@@ -492,7 +493,7 @@ Launcher Session                    Background Worker
        |                            Worker starts:
        |                              - Attach DSM
        |                              - Connect to database
-       |                              - SPI_execute(SQL)
+       |                              - Run each command in a portal
        |                              - Stream results via shm_mq
        |                              - Exit (auto-commit)
        |                                   |

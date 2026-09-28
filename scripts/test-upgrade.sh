@@ -33,7 +33,7 @@ DEFAULT_PG_VERSION="17"
 PG_VERSION="${1:-$DEFAULT_PG_VERSION}"
 
 # Docker Hub tag for the image. Released majors use the bare version;
-# PostgreSQL 19 is currently a pre-release pulled as postgres:19beta1. The
+# PostgreSQL 19 is currently a pre-release pulled as postgres:19beta4. The
 # server-dev package and install paths still use the bare major (19).
 #
 # NOTE: this two-binary harness builds the PRIOR_REF (v1.10) binary, which
@@ -42,7 +42,7 @@ PG_VERSION="${1:-$DEFAULT_PG_VERSION}"
 # default invocation cannot target 19. A fresh 2.0 install on 19 is covered
 # by the main regression and relocatable tests instead.
 PG_IMAGE_TAG="$PG_VERSION"
-[ "$PG_VERSION" = "19" ] && PG_IMAGE_TAG="19beta1"
+[ "$PG_VERSION" = "19" ] && PG_IMAGE_TAG="19beta4"
 
 # Git ref whose code provides the prior-version (v1-capable) binary.
 PRIOR_REF="${PRIOR_REF:-v1.10}"

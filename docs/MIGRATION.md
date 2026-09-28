@@ -200,7 +200,7 @@ changes.
 | Type | New columns | Notes |
 |---|---|---|
 | `pg_background_stats` | `workers_timed_out int8` | Separate counter from `workers_canceled`, bumped by `pg_background_run_v2` on timeout |
-| `pg_background_result_info` | `started_at`, `finished_at` (timestamptz, nullable) | Worker writes these around the SPI loop |
+| `pg_background_result_info` | `started_at`, `finished_at` (timestamptz, nullable) | Worker writes these around the command loop |
 | `pg_background_error` | `schema_name`, `table_name`, `column_name`, `constraint_name` (text, nullable) | Sourced from PG's `edata`; populated for heap/access-layer errors |
 | `pg_background_run_result` | now extends `pg_background_outcome` (gains `cookie`, `state`, `consumed`, `label`, `launched_at`) plus `timed_out`, `elapsed_ms` | Replaces 1.10's standalone shape |
 

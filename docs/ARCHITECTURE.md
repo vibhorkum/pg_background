@@ -77,7 +77,7 @@ sequenceDiagram
 │  Background Worker Process       │
 │  - Attach database               │
 │  - Restore session GUCs          │
-│  - Execute SQL via SPI           │
+│  - Run SQL through portals       │
 │  - Send results via shm_mq       │
 │  - Exit (DSM cleanup)            │
 └──────────────────────────────────┘
@@ -126,7 +126,7 @@ avoids cache-line bouncing between launcher and worker.
 frames, and any NOTIFY/'A' frames the worker emits.
 
 **Flow**:
-1. Worker executes the query via SPI.
+1. Worker runs each command of the SQL string through a portal.
 2. Each result row is serialized to the shm_mq.
 3. The launcher reads from the queue in `pg_background_result`.
 4. Queue blocks the writer if full (backpressure).
@@ -160,7 +160,7 @@ RegisterDynamicBackgroundWorker(&worker, &handle);
 - `bgw_notify_pid`: launcher PID (for postmaster-driven notifications).
 - `bgw_main_arg`: DSM handle (Datum).
 
-### Server Programming Interface (SPI)
+### Query execution
 
 **Execution pipeline**: parse → analyze → plan → execute via Portal.
 The worker calls into `pg_parse_query`, `pg_analyze_and_rewrite_*`,
@@ -169,7 +169,10 @@ flow through a remote `DestReceiver` that writes into `shm_mq`.
 
 **Result serialization on the wire**:
 - `RowDescription`: column metadata (names, types, formats).
-- `DataRow`: binary-encoded tuple data.
+- `DataRow`: tuple data, binary for columns whose types, including every
+  nested type, have binary send/receive functions and text for the others.
+  The fields of an anonymous record are not checked, so a record column is
+  always binary.
 - `CommandComplete`: result tag (e.g., "SELECT 42"); the worker also
   writes the row count and command tag into the OUTPUT struct so
   `result_info` can report them without re-reading the queue.
@@ -274,7 +277,7 @@ context underneath them was a latent use-after-free.
 The OUTPUT struct contains pairs of fields the worker writes that the
 launcher reads concurrently:
 
-- `result_row_count` + `command_tag` (paired post-SPI metadata)
+- `result_row_count` + `command_tag` (metadata of the last finished command)
 - The whole error block (`error_message`, `error_detail`,
   `error_hint`, `error_context`, `error_schema_name`, `error_table_name`,
   `error_column_name`, `error_constraint_name`)
@@ -287,10 +290,13 @@ For each pair the worker writes the data fields first, issues
 | result_row_count + command_tag | `result_published` (uint8) |
 | error_* fields | `error_sqlstate` (non-empty) |
 
-Readers test the flag first; if set, issue `pg_read_barrier()` and only
-then read the other fields. This prevents the launcher from observing a
-fresh `row_count` paired with a stale `command_tag`, or a partially-
-written error.
+Readers test the flag first. If it is set, they issue `pg_read_barrier()`
+and only then read the other fields. This prevents the launcher from
+reading a partially written error, or a result pair before the worker has
+written one. The worker rewrites the result pair for each command of a
+multi-command string while `result_published` stays set, so the pair is
+consistent only once the worker has finished (`completed` is true in
+`pg_background_result_info`).
 
 ### Worker error-exit cleanup ordering (v2.0 F)
 

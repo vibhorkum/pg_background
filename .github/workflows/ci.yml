@@ -30,7 +30,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-22.04, ubuntu-24.04]
-        # 19 is PostgreSQL 19 beta (image tag postgres:19beta1; see the
+        # 19 is PostgreSQL 19 beta (image tag postgres:19beta4; see the
         # Start PostgreSQL container step). Drop the beta mapping at 19 GA.
         pg: [14, 15, 16, 17, 18, 19]
 
@@ -59,7 +59,7 @@ jobs:
             -e POSTGRES_USER=postgres \
             -e POSTGRES_DB=postgres \
             -p 5432:5432 \
-            postgres:${{ matrix.pg == 19 && '19beta1' || matrix.pg }}
+            postgres:${{ matrix.pg == 19 && '19beta4' || matrix.pg }}
 
           # Wait for PostgreSQL to be ready
           echo "Waiting for PostgreSQL to start..."
@@ -270,7 +270,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 19 = beta; test-relocatable.sh maps it to postgres:19beta1.
+        # 19 = beta; test-relocatable.sh maps it to postgres:19beta4.
         pg: [14, 15, 16, 17, 18, 19]
 
     steps:
