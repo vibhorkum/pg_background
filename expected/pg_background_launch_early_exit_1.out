@@ -1,0 +1,30 @@
+-- -------------------------------------------------------------------------
+-- Launch of a worker that failed before storing its PID.
+--
+-- When the launcher's startup check finds the worker already stopped, it
+-- takes the PID the worker stored in shared memory. This test makes the
+-- worker fail at an injection point before that store and holds the launcher
+-- until the worker has exited. Launch has no PID to return and must raise
+-- an error instead of returning a handle.
+--
+-- The worker-side point has to fire in another process, so it is attached
+-- cluster-wide and makes every pg_background worker on the server fail at
+-- startup while attached (a few seconds, longer if the session is lost
+-- before it detaches the point). The test runs only with
+-- make installcheck PGBG_GLOBAL_INJECTION_TESTS=1, which scripts/test-assert.sh
+-- passes for its disposable cluster, and skips itself on servers without
+-- injection points.
+--
+-- Nothing SQL can see tells when the failed worker has been reaped, so the
+-- helper pauses before releasing the launcher. If the worker takes longer
+-- to start, fail and be reaped, the startup check sees it running, launch
+-- returns a handle and the test fails. It cannot pass by mistake.
+-- -------------------------------------------------------------------------
+SELECT count(*) > 0 AS has_injection_points
+FROM pg_available_extensions WHERE name = 'injection_points'
+\gset
+\if :has_injection_points
+\else
+\echo 'injection_points is not available, test skipped'
+injection_points is not available, test skipped
+\quit

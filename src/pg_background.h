@@ -52,4 +52,23 @@
         pg_analyze_and_rewrite((parse), (string), (types), (num), (env))
 #endif
 
+/*
+ * ============================================================================
+ * INJECTION POINTS
+ * ============================================================================
+ *
+ * Injection points exist since PostgreSQL 17 and run only in servers built
+ * with --enable-injection-points. Elsewhere INJECTION_POINT() expands to a
+ * no-op. PostgreSQL 18 added a callback argument to the macro.
+ */
+#if PG_VERSION_NUM >= 180000
+#include "utils/injection_point.h"
+#define PGBG_INJECTION_POINT(name) INJECTION_POINT(name, NULL)
+#elif PG_VERSION_NUM >= 170000
+#include "utils/injection_point.h"
+#define PGBG_INJECTION_POINT(name) INJECTION_POINT(name)
+#else
+#define PGBG_INJECTION_POINT(name) ((void) (name))
+#endif
+
 #endif  /* PG_BACKGROUND_H_ */

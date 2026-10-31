@@ -80,18 +80,29 @@ docker exec "${CONTAINER_NAME}" bash -c "
     tar xzf postgresql-*.tar.gz
 "
 
+# PostgreSQL 17+ is also built with injection points and gets the
+# injection_points module, which the sql/pg_background_launch_*.sql tests
+# need. Without them those tests skip themselves.
 step "Building PostgreSQL with --enable-cassert (assertions enabled)..."
-docker exec "${CONTAINER_NAME}" bash -c '
+docker exec -e PG_MAJOR="${PG_VERSION}" "${CONTAINER_NAME}" bash -c '
     PG_SRC=$(ls -d /tmp/postgresql-*/)
     cd "$PG_SRC"
+    INJECTION_POINTS=""
+    if [ "$PG_MAJOR" -ge 17 ]; then
+        INJECTION_POINTS="--enable-injection-points"
+    fi
     ./configure \
         --enable-cassert \
         --enable-debug \
+        $INJECTION_POINTS \
         --prefix=/usr/local/pgsql \
         --with-openssl \
         > /dev/null
     make -j$(nproc) > /dev/null 2>&1
     make install > /dev/null
+    if [ -n "$INJECTION_POINTS" ]; then
+        make -C src/test/modules/injection_points install > /dev/null
+    fi
 '
 
 step "Setting up PostgreSQL user and data directory..."
@@ -136,11 +147,13 @@ docker exec "${CONTAINER_NAME}" bash -c "
 step "Running regression tests (expecting failure on error path)..."
 set +e  # Don't exit on test failure - we expect it might fail
 
+# The cluster lives only in this container, so the tests that attach
+# cluster-wide injection points run here too.
 docker exec "${CONTAINER_NAME}" bash -c '
     cd /tmp/pg_background
     export PATH=/usr/local/pgsql/bin:$PATH
     chown -R postgres:postgres /tmp/pg_background
-    sudo -u postgres env PATH=/usr/local/pgsql/bin:$PATH make installcheck 2>&1
+    sudo -u postgres env PATH=/usr/local/pgsql/bin:$PATH make installcheck PGBG_GLOBAL_INJECTION_TESTS=1 2>&1
 '
 TEST_RESULT=$?
 
