@@ -37,7 +37,7 @@ The easiest way to run tests locally is using the provided `scripts/test-local.s
 | **test** | Build and test against the PostgreSQL × Ubuntu matrix | ubuntu-22.04, ubuntu-24.04 (PG 14–19) | 15 min |
 | **relocatable-test** | Verify `CREATE EXTENSION ... WITH SCHEMA` on every supported PG | ubuntu-24.04 (PG 14–19) | 15 min |
 | **upgrade-test** | Validate the 1.8 → 1.9 → 1.10 → 2.0 upgrade chain | ubuntu-24.04 (PG 14–18) | 15 min |
-| **assert-test** | Run the regression suite against an assert-enabled PG build | ubuntu-24.04 (PG 14–18) | 30 min |
+| **assert-test** | Run the regression suite against an assert-enabled PG build. PG 17+ is also built with injection points, which the `pg_background_launch_*` tests need, and the cluster-wide injection test runs here only (`PGBG_GLOBAL_INJECTION_TESTS=1`) | ubuntu-24.04 (PG 14–18) | 30 min |
 | **sanitizer-test** | Run the regression suite under AddressSanitizer + UndefinedBehaviorSanitizer | ubuntu-24.04 (PG 17) | 30 min |
 | **test-summary** | Aggregate matrix results into a single status check | ubuntu-24.04 | — |
 | **lint** | Static analysis (**blocking** cppcheck + clang-format) | ubuntu-24.04 | 10 min |

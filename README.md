@@ -1290,6 +1290,25 @@ ALTER SYSTEM SET max_worker_processes = 32;
 SELECT pg_reload_conf();  -- Or restart PostgreSQL
 ```
 
+#### Issue 1a: "could not start background process"
+
+**Symptom**:
+```
+ERROR: could not start background process
+HINT: More details may be available in the server log.
+```
+
+**Cause**: the worker failed during startup before it stored its PID in
+shared memory, for example because the postmaster could not fork it, and
+it was already gone when `launch` checked its startup. The launcher has
+no PID to return, so `launch` fails instead of returning a handle. Other
+startup failures still return a handle, and the failure shows up later
+(see Known Limitations, "Early Worker Failures").
+
+**Solution**: check the server log for the reason (such as
+`could not fork worker process`) and fix the resource shortage it
+names.
+
 #### Issue 2: "cookie mismatch for PID XXXXX"
 
 **Symptom**:
@@ -1726,6 +1745,12 @@ installs the shm_mq destination cannot be captured as a structured error.
 
 **Observable behavior for the launcher**:
 
+- If the worker failed before storing its PID in shared memory and had
+  already exited when `launch` checked its startup, `launch` itself raises
+  `could not start background process` and returns no handle, since there
+  is no PID to put in one. In every other case (the worker was still
+  running at that check, or it failed after storing its PID) `launch`
+  returns a handle and the failure shows up as described below.
 - `pg_background_result()` raises `SQLSTATE 08006 "lost connection to
   worker process"` when it tries to read results from the detached shm_mq.
   `pg_background_wait()` blocks on `WaitForBackgroundWorkerShutdown` and

@@ -230,6 +230,7 @@ Document behavioral semantics precisely. Users should never be surprised by what
 - Error conditions: invalid handles, cookie mismatches, resource exhaustion
 - Privilege paths: verify `pgbackground_role` grants work correctly
 - Timeout behavior: `wait_v2_timeout` returns false on timeout, true on completion
+- Launcher/worker timing paths: use injection points (`PGBG_INJECTION_POINT` in `pg_background.h`) in a test file that skips itself without the `injection_points` extension, as `sql/pg_background_launch_stopped.sql` does. Keep points local to the test session (`injection_points_set_local()`). A test that needs a cluster-wide point goes behind `PGBG_GLOBAL_INJECTION_TESTS` in the Makefile
 
 ### Version-sensitive testing
 - `./scripts/test-local.sh all` tests PostgreSQL 14-19
@@ -524,10 +525,12 @@ Launcher Session                    Background Worker
 | `extension/legacy/` | Pre-1.8 base + upgrade scripts kept so older installs can still upgrade to 1.10 |
 | `sql/pg_background.sql` | Regression tests |
 | `expected/pg_background.out` | Expected test output |
+| `sql/pg_background_launch_stopped.sql` | Injection-point test of a worker that exits before the launcher's startup check (PG 17+ with injection points, skipped elsewhere: `expected/pg_background_launch_stopped_1.out`) |
+| `sql/pg_background_launch_early_exit.sql` | Same, for a worker that fails before storing its PID. Attaches a cluster-wide injection point, so it runs only with `make installcheck PGBG_GLOBAL_INJECTION_TESTS=1` (`scripts/test-assert.sh`) |
 | `scripts/test-local.sh` | Docker-based multi-version testing |
 | `scripts/test-upgrade.sh` | Docker-based upgrade path testing |
 | `scripts/test-relocatable.sh` | Docker-based relocatable-schema test |
-| `scripts/test-assert.sh` | Docker-based assert-enabled PG test |
+| `scripts/test-assert.sh` | Docker-based assert-enabled PG test (PG 17+ also with injection points) |
 | `docs/CONTRIBUTING.md`, `docs/SECURITY.md`, `docs/CI.md` | Contributor / ops docs |
 | `windows/pg_background_win.h` | Windows DLL symbol-export shim |
 | `.github/workflows/ci.yml` | CI pipeline (test matrix, relocatable, upgrade) |
