@@ -107,6 +107,7 @@ sequenceDiagram
 | 2 | `GUC` | launcher → worker | serialized session GUCs |
 | 3 | `QUEUE` | bidirectional | `shm_mq` for result streaming |
 | 4 | `OUTPUT` | worker → launcher | progress, error fields, result row count, command tag, started_at, finished_at, error-source identifiers |
+| 5 | `WORKER_PID` | worker → launcher | `pid_t` the worker sets to its PID before attaching to the queue, zero until then (see "Worker that exits before the startup check") |
 
 **v2.0 (C1)** split the previous single `FIXED_DATA` chunk into INPUT and
 OUTPUT under separate TOC keys. The split clarifies barrier ordering and
@@ -241,6 +242,53 @@ return handle;                  /* safe to return now */
 > the response shm_mq but never read, since `submit` callers don't
 > consume `result`. They are effectively dropped. See README "NOTIFY
 > note for `submit`" for the user-facing recommendation.
+
+### Worker that exits before the startup check
+
+**Problem**: the launcher gets the worker's PID from
+`WaitForBackgroundWorkerStartup()`, which reports it only while the
+worker runs. A short worker (`SELECT 1`, `ANALYZE` of an empty table)
+can finish before the launcher looks. The call then returns
+`BGWH_STOPPED` and no PID.
+
+**Solution**: the segment has a `pid_t` under
+`PG_BACKGROUND_KEY_WORKER_PID`, and the worker writes `MyProcPid` there
+before it attaches to the queue. On `BGWH_STOPPED` the launcher takes
+the PID from there after `shm_mq_wait_for_attach()`. If that worker
+exited before storing its PID, the value is zero and `launch` raises
+`could not start background process`. A worker that stored its PID, or
+that the launcher saw as `BGWH_STARTED`, gets a handle even if it dies
+before attaching, and the failure shows up later as `08006` (see README,
+"Early Worker Failures").
+
+The PID has a key of its own rather than a field in the output struct,
+so the input and output layouts stay as they were. A session still
+running a library build without the key creates a segment without it,
+and a worker from the new build finds no key and skips the store.
+
+Two regression tests cover the `BGWH_STOPPED` path with injection
+points. Both hold the launcher at an injection point before the startup
+check and let a helper worker release it, and both skip themselves on
+servers built without `--enable-injection-points`:
+
+- `sql/pg_background_launch_stopped.sql`: the worker ran its SQL, and
+  the handle must carry its PID. The helper releases the launcher once
+  the worker has committed and left `pg_stat_activity`, after a pause for
+  the postmaster to reap it. Its injection points are local to the test
+  session, so it runs in every `make installcheck`.
+- `sql/pg_background_launch_early_exit.sql`: the worker fails at an
+  injection point before storing its PID, and `launch` must raise. The
+  failed worker never shows up in `pg_stat_activity`, so the helper only
+  pauses for it to start, fail and be reaped. The worker-side point has
+  to fire in the worker, so it is cluster-wide and breaks every
+  pg_background worker on the server while attached. The test runs only
+  with `make installcheck PGBG_GLOBAL_INJECTION_TESTS=1`, which
+  `scripts/test-assert.sh` passes for its disposable cluster.
+
+No SQL-visible state shows that the postmaster has reaped a worker, so
+the pauses are margins, not proof. When a worker outlives one, the
+startup check sees it running and the test fails without the expected
+notice or error. Neither test can pass by mistake.
 
 ### PID reuse (solved in the v2 API)
 

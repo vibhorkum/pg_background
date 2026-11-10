@@ -626,7 +626,9 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
     BackgroundWorkerHandle *worker_handle;
     pg_background_input  *input;
     pg_background_output *output;
-    pid_t        pid;
+    pid_t       *worker_pid;
+    pid_t        pid = 0;
+    BgwHandleStatus status;
     shm_mq_handle *responseq;
     MemoryContext oldcontext;
     char preview[PGBG_SQL_PREVIEW_LEN + 1];
@@ -677,6 +679,7 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
     shm_toc_initialize_estimator(&e);
     shm_toc_estimate_chunk(&e, sizeof(pg_background_input));
     shm_toc_estimate_chunk(&e, sizeof(pg_background_output));
+    shm_toc_estimate_chunk(&e, sizeof(pid_t));
     shm_toc_estimate_chunk(&e, sql_len + 1);
     guc_len = EstimateGUCStateSpace();
     shm_toc_estimate_chunk(&e, guc_len);
@@ -715,6 +718,11 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
     memset(output, 0, sizeof(pg_background_output));
     output->progress_pct = -1;          /* -1 = not reported yet */
     shm_toc_insert(toc, PG_BACKGROUND_KEY_OUTPUT, output);
+
+    /* Worker PID, set by the worker, zero until then */
+    worker_pid = shm_toc_allocate(toc, sizeof(pid_t));
+    *worker_pid = 0;
+    shm_toc_insert(toc, PG_BACKGROUND_KEY_WORKER_PID, worker_pid);
 
     /* SQL text */
     sqlp = shm_toc_allocate(toc, sql_len + SQL_TERMINATOR_LEN);
@@ -779,7 +787,8 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
     if (!RegisterDynamicBackgroundWorker(&worker, &worker_handle))
     {
         MemoryContextSwitchTo(oldcontext);
-        /* Clean up DSM segment to prevent resource leak */
+        /* Clean up the queue handle and DSM segment to prevent resource leaks */
+        shm_mq_detach(responseq);
         dsm_detach(seg);
         ereport(ERROR,
                 (errcode(ERRCODE_INSUFFICIENT_RESOURCES),
@@ -795,7 +804,19 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
 
     shm_mq_set_handle(responseq, worker_handle);
 
-    switch (WaitForBackgroundWorkerStartup(worker_handle, &pid))
+    /*
+     * Lets a test hold the launcher here until the worker has exited, so that
+     * the startup check below returns BGWH_STOPPED.
+     */
+    PGBG_INJECTION_POINT("pg-background-launch-before-startup-wait");
+
+    /*
+     * WaitForBackgroundWorkerStartup() sets pid only for BGWH_STARTED. A short
+     * worker can finish before we look, and BGWH_STOPPED leaves pid unset.
+     * The worker's PID then comes from the segment below.
+     */
+    status = WaitForBackgroundWorkerStartup(worker_handle, &pid);
+    switch (status)
     {
         case BGWH_STARTED:
         case BGWH_STOPPED:
@@ -816,6 +837,29 @@ launch_internal(text *sql, int32 queue_size, uint64 cookie,
      * Wait until worker attaches as sender before we return to SQL.
      */
     shm_mq_wait_for_attach(responseq);
+
+    /*
+     * A worker that stopped before we checked its startup stored its PID in
+     * the segment before attaching to the queue. shm_mq_wait_for_attach()
+     * took the queue spinlock after that attach, so the stored PID is
+     * visible here. Zero means the worker exited before storing its PID, and
+     * there is no PID to return for it.
+     */
+    if (status == BGWH_STOPPED)
+    {
+        PGBG_INJECTION_POINT("pg-background-launch-worker-stopped");
+
+        pid = *worker_pid;
+        if (pid == 0)
+        {
+            shm_mq_detach(responseq);
+            dsm_detach(seg);
+            ereport(ERROR,
+                    (errcode(ERRCODE_INSUFFICIENT_RESOURCES),
+                     errmsg("could not start background process"),
+                     errhint("More details may be available in the server log.")));
+        }
+    }
 
     /*
      * Prepare preview with UTF-8 aware truncation.

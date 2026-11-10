@@ -23,8 +23,15 @@ DATA = \
 	extension/pg_background--1.9--1.10.sql \
 	extension/pg_background--1.8--1.9.sql
 
-# Regression
-REGRESS = pg_background
+# Regression. The pg_background_launch_* tests need injection points and skip
+# themselves on servers without them. pg_background_launch_early_exit attaches
+# a cluster-wide injection point that makes every pg_background worker on the
+# server fail while attached, so it runs only on request, for a disposable
+# cluster: make installcheck PGBG_GLOBAL_INJECTION_TESTS=1
+REGRESS = pg_background pg_background_launch_stopped
+ifdef PGBG_GLOBAL_INJECTION_TESTS
+REGRESS += pg_background_launch_early_exit
+endif
 
 # Note: The test SQL file handles CREATE EXTENSION itself,
 # so we don't use --load-extension here.

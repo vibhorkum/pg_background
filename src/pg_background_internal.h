@@ -47,13 +47,20 @@
  *                               during execution and read by the launcher.
  * Splitting them clarifies barrier ordering and avoids cache-line bouncing
  * between the two roles.
+ *
+ * PG_BACKGROUND_KEY_WORKER_PID holds a pid_t the worker sets to its PID
+ * before attaching to the queue (see launch_internal). It has a key of its
+ * own so the input and output structs keep their layout: a worker looks the
+ * key up with missing_ok and skips the store when a launcher from a build
+ * without it created the segment.
  */
 #define PG_BACKGROUND_KEY_INPUT         0
 #define PG_BACKGROUND_KEY_SQL           1
 #define PG_BACKGROUND_KEY_GUC           2
 #define PG_BACKGROUND_KEY_QUEUE         3
 #define PG_BACKGROUND_KEY_OUTPUT        4
-#define PG_BACKGROUND_NKEYS             5
+#define PG_BACKGROUND_KEY_WORKER_PID    5
+#define PG_BACKGROUND_NKEYS             6
 
 /* SQL preview length for list() monitoring */
 #define PGBG_SQL_PREVIEW_LEN 120

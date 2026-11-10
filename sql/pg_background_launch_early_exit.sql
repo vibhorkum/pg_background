@@ -1,0 +1,100 @@
+-- -------------------------------------------------------------------------
+-- Launch of a worker that failed before storing its PID.
+--
+-- When the launcher's startup check finds the worker already stopped, it
+-- takes the PID the worker stored in shared memory. This test makes the
+-- worker fail at an injection point before that store and holds the launcher
+-- until the worker has exited. Launch has no PID to return and must raise
+-- an error instead of returning a handle.
+--
+-- The worker-side point has to fire in another process, so it is attached
+-- cluster-wide and makes every pg_background worker on the server fail at
+-- startup while attached (a few seconds, longer if the session is lost
+-- before it detaches the point). The test runs only with
+-- make installcheck PGBG_GLOBAL_INJECTION_TESTS=1, which scripts/test-assert.sh
+-- passes for its disposable cluster, and skips itself on servers without
+-- injection points.
+--
+-- Nothing SQL can see tells when the failed worker has been reaped, so the
+-- helper pauses before releasing the launcher. If the worker takes longer
+-- to start, fail and be reaped, the startup check sees it running, launch
+-- returns a handle and the test fails. It cannot pass by mistake.
+-- -------------------------------------------------------------------------
+SELECT count(*) > 0 AS has_injection_points
+FROM pg_available_extensions WHERE name = 'injection_points'
+\gset
+\if :has_injection_points
+\else
+\echo 'injection_points is not available, test skipped'
+\quit
+\endif
+
+SET client_min_messages = warning;
+CREATE EXTENSION IF NOT EXISTS pg_background;
+CREATE EXTENSION IF NOT EXISTS injection_points;
+DROP FUNCTION IF EXISTS launch_early_exit_release(integer);
+RESET client_min_messages;
+
+-- Run by a helper worker. Waits until the launcher with PID launcher_pid
+-- sits at the injection point, pauses so the worker it launched there can
+-- start, fail and be reaped, and releases the launcher. The loop is
+-- bounded, and the result names the condition that was not met.
+CREATE FUNCTION launch_early_exit_release(launcher_pid integer)
+RETURNS text
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    i integer;
+BEGIN
+    FOR i IN 1 .. 6000 LOOP
+        PERFORM pg_stat_clear_snapshot();
+        EXIT WHEN EXISTS (
+            SELECT 1 FROM pg_stat_activity
+            WHERE pid = launcher_pid
+              AND wait_event = 'pg-background-launch-before-startup-wait');
+        IF i = 6000 THEN
+            RETURN 'launcher did not reach the injection point';
+        END IF;
+        PERFORM pg_sleep(0.01);
+    END LOOP;
+
+    PERFORM pg_sleep(2);
+    PERFORM injection_points_wakeup('pg-background-launch-before-startup-wait');
+    RETURN 'released';
+END
+$$;
+
+-- The helper starts before the worker-side point is attached, so it is
+-- already past that point.
+SELECT (h).pid AS release_pid, (h).cookie AS release_cookie
+FROM (SELECT pg_background_launch(
+          format('SELECT launch_early_exit_release(%s)', pg_backend_pid()),
+          0, 'launch-early-exit-release') AS h) s
+\gset
+
+-- Cluster-wide: makes every pg_background worker started from now on fail
+-- at startup, until the point is detached after the launch below.
+SELECT injection_points_attach('pg-background-worker-before-publish-pid', 'error');
+
+-- Local injection points run only in this session.
+SELECT injection_points_set_local();
+SELECT injection_points_attach('pg-background-launch-before-startup-wait', 'wait');
+SELECT injection_points_attach('pg-background-launch-worker-stopped', 'notice');
+
+-- The notice shows that the startup check returned BGWH_STOPPED. The worker
+-- never stored its PID, so launch raises. The timeout turns a lost helper
+-- into an error instead of a hang.
+SET statement_timeout = '120s';
+SELECT pg_background_launch('SELECT 1', 0, 'launch-early-exit');
+RESET statement_timeout;
+
+SELECT injection_points_detach('pg-background-worker-before-publish-pid');
+SELECT injection_points_detach('pg-background-launch-before-startup-wait');
+SELECT injection_points_detach('pg-background-launch-worker-stopped');
+
+-- The failed launch left no tracking entry.
+SELECT * FROM pg_background_result(:release_pid, :release_cookie) AS (result text);
+SELECT count(*) AS tracked_workers FROM pg_background_list;
+
+DROP FUNCTION launch_early_exit_release(integer);
+DROP EXTENSION injection_points;

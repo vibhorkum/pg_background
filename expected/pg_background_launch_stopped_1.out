@@ -1,0 +1,32 @@
+-- -------------------------------------------------------------------------
+-- Launch of a worker that has already exited when the launcher checks it.
+--
+-- The launcher learns the worker's PID from WaitForBackgroundWorkerStartup(),
+-- which reports it only while the worker runs. A short worker can finish
+-- before the launcher looks, and then the check returns BGWH_STOPPED without
+-- a PID. The worker stores its PID in shared memory for this case.
+--
+-- This test holds the launcher at an injection point until the worker has
+-- committed and exited, and checks that the returned handle carries the PID
+-- of that worker and that both handles of the session keep working.
+-- pg_background_launch_early_exit covers a worker that fails before storing
+-- its PID.
+--
+-- Injection points need a server built with --enable-injection-points and
+-- the injection_points module installed (scripts/test-assert.sh does this
+-- for PostgreSQL 17 and later). Elsewhere the test is skipped.
+--
+-- Nothing SQL can see tells when the postmaster has reaped the worker, so
+-- the helper pauses before releasing the launcher. If reaping takes longer,
+-- the startup check sees the worker running, the notice from the
+-- BGWH_STOPPED branch is missing and the test fails. It cannot pass by
+-- mistake.
+-- -------------------------------------------------------------------------
+SELECT count(*) > 0 AS has_injection_points
+FROM pg_available_extensions WHERE name = 'injection_points'
+\gset
+\if :has_injection_points
+\else
+\echo 'injection_points is not available, test skipped'
+injection_points is not available, test skipped
+\quit

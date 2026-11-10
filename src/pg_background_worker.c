@@ -279,6 +279,7 @@ pg_background_worker_main(Datum main_arg)
     shm_toc     *toc;
     pg_background_input  *input;
     pg_background_output *output;
+    pid_t       *worker_pid;
     char        *sql;
     char        *gucstate;
     shm_mq      *mq;
@@ -318,6 +319,21 @@ pg_background_worker_main(Datum main_arg)
 
     if (input == NULL || output == NULL || sql == NULL || gucstate == NULL || mq == NULL)
         ereport(ERROR, (errmsg("failed to locate required data in shared memory")));
+
+    /*
+     * Publish our PID before attaching to the queue. A launcher that finds
+     * this worker already stopped gets no PID from the postmaster and reads
+     * this one. shm_mq_set_sender() takes the queue spinlock, which orders
+     * the store before the attach the launcher waits for. A segment created
+     * by a launcher from a build without the key has nowhere to store it.
+     *
+     * A test makes the worker fail at the injection point to cover a worker
+     * that exits before publishing its PID.
+     */
+    PGBG_INJECTION_POINT("pg-background-worker-before-publish-pid");
+    worker_pid = shm_toc_lookup(toc, PG_BACKGROUND_KEY_WORKER_PID, true);
+    if (worker_pid != NULL)
+        *worker_pid = MyProcPid;
 
     shm_mq_set_sender(mq, MyProc);
     responseq = shm_mq_attach(mq, seg, NULL);
